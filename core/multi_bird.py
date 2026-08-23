@@ -10,8 +10,9 @@ bird_detections 表的行数据。主鸟（评分对象，is_selected=1）不重
 设计约束：
 - 与主鸟识别走完全相同的路径（birdid.bird_identifier.identify_bird，
   preloaded_crop 模式），GPS/地理过滤行为一致；
-- 「看不清的就算了」由两道门槛兜底：面积 < multibird_min_area_ratio
-  只入框不分类；分类置信度 < multibird_species_threshold 时物种字段留空；
+- 「看不清的就算了」由面积门槛兜底：面积 < multibird_min_area_ratio
+  只入框不分类；分类结果无论置信度高低都照实入库（采纳是消费方按
+  multibird_species_threshold 判断的派生概念，数据层保留完整信息）；
 - 无数量上限：鸟群混稀有鸟正是目标场景，每鸟一次分类器前向
   (~10-50ms) 加一次 GPS EXIF 读取，几十只的鸟群照也可接受。
 
@@ -150,7 +151,6 @@ def classify_secondary_birds(
     filename: str,
     photo_path: str,
     min_area_ratio: float,
-    species_threshold: float,
     use_geo_filter: bool = True,
     country_code: Optional[str] = None,
     region_code: Optional[str] = None,
@@ -162,9 +162,10 @@ def classify_secondary_birds(
 
     主鸟（all_birds 中 is_selected=True 的项）不重复推理：main_species
     为调用方已采纳的主鸟识别结果（低于用户阈值时传 None，则主鸟行物种
-    留空）。其余每鸟：面积 ≥ min_area_ratio 才分类，置信度 ≥
-    species_threshold 才填物种字段；面积过小/分类失败/置信度不足均只
-    保留框与几何信息。
+    留空）。其余每鸟：面积 ≥ min_area_ratio 才分类；分类结果无论置信度
+    高低都存 top-1（物种+置信度照实入库）——「是否采纳」是展示层/统计
+    层按阈值判断的派生概念，数据层保留完整信息供人工审阅调阈值。
+    面积过小/分类失败仍只保留框与几何信息。
 
     参数:
     orig_image (np.ndarray): 原图 BGR（未缩放）
@@ -178,7 +179,6 @@ def classify_secondary_birds(
     filename (str): 照片前缀（bird_detections.filename）
     photo_path (str): 原始文件路径（identify_bird 读取 GPS 用）
     min_area_ratio (float): 最小 bbox 面积占比，低于只入框
-    species_threshold (float): 逐鸟分类采纳阈值（百分比）
     use_geo_filter / country_code / region_code / name_format:
         与主鸟 identify_bird 相同的地理过滤与命名参数
     identify_fn: 依赖注入的 identify_bird（测试可替换；None 则现场导入）
@@ -189,8 +189,9 @@ def classify_secondary_birds(
 
     Build bird_detections rows for every detected bird. The selected bird
     (is_selected=True) reuses main_species without re-inference; others
-    are cropped and classified individually. Rows are returned sorted by
-    detection idx.
+    are cropped and classified individually, storing the raw top-1 result
+    regardless of confidence — adoption is a derived, display-level
+    concept so users can review and tune thresholds.
     """
     if not all_birds:
         return []
@@ -288,14 +289,14 @@ def classify_secondary_birds(
 
         if not (result and result.get('success') and result.get('results')):
             continue
+        # top-1 结果照实入库（无论置信度高低）——采纳与否由消费方按
+        # 阈值判断，数据层保留完整信息便于人工审阅和调阈值。
+        # Store the raw top-1 result; adoption is decided downstream.
         top = result['results'][0]
-        confidence = float(top.get('confidence') or 0.0)
-        if confidence < species_threshold:
-            continue
         row['species_cn'] = top.get('cn_name')
         row['species_en'] = top.get('en_name')
         row['scientific_name'] = top.get('scientific_name')
-        row['species_confidence'] = confidence
+        row['species_confidence'] = float(top.get('confidence') or 0.0)
         row['class_id'] = top.get('class_id')
         row['gbif_rarity_100'] = top.get('gbif_rarity_100')
 

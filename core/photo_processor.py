@@ -1284,7 +1284,6 @@ class PhotoProcessor:
                                     filename=file_prefix,
                                     photo_path=image_path,
                                     min_area_ratio=self.config.multibird_min_area_ratio,
-                                    species_threshold=self.config.multibird_species_threshold,
                                     use_geo_filter=self.settings.birdid_use_geo_filter,
                                     country_code=self.settings.birdid_country_code,
                                     region_code=self.settings.birdid_region_code,
@@ -1320,11 +1319,17 @@ class PhotoProcessor:
                 return
             identified = [r for r in rows
                           if r.get('species_cn') or r.get('species_en')]
+            # 采纳 = 分类置信度 ≥ 用户阈值（数据层存全部 top-1，
+            # 采纳是统计口径，见 core/multi_bird.py 模块说明）
+            threshold = self.config.multibird_species_threshold
+            adopted = [r for r in identified
+                       if (r.get('species_confidence') or 0.0) >= threshold]
             self._log(
                 f"  🐦🐦 Multi-bird [{source_display}]: "
-                f"{len(rows)} detected, {len(identified)} identified",
+                f"{len(rows)} detected, {len(identified)} classified, "
+                f"{len(adopted)} adopted(≥{threshold:.0f}%)",
                 "species")
-            for r in rows:
+            for r in adopted:
                 if r.get('is_selected'):
                     continue
                 name = r.get('species_cn') or r.get('species_en')

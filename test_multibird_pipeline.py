@@ -149,14 +149,14 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         return fake
 
     def _run(self, all_birds, main_species=None, min_area=0.001,
-             threshold=50.0, identify=None):
+             identify=None):
         from core.multi_bird import classify_secondary_birds
         return classify_secondary_birds(
             self.orig, all_birds,
             proc_dims=(150, 100), orig_dims=(300, 200),
             main_species=main_species, filename='DSC_0001',
             photo_path='X:/DSC_0001.NEF',
-            min_area_ratio=min_area, species_threshold=threshold,
+            min_area_ratio=min_area,
             identify_fn=identify or self._fake_identify())
 
     def test_small_bird_boxed_but_not_classified(self):
@@ -186,19 +186,20 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(rows[1]['species_cn'], '虎皮鹦鹉')
 
-    def test_low_confidence_leaves_species_empty(self):
-        """置信度低于阈值 → 物种字段留空但框/锐度保留。"""
+    def test_low_confidence_result_still_stored(self):
+        """置信度低于阈值也照实入库（采纳是消费方派生概念）。"""
         birds = [
             {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
              'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
             {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
              'area_ratio': 0.03, 'mask_polygon': None, 'is_selected': False},
         ]
-        rows = self._run(birds, threshold=90.0,
+        rows = self._run(birds,
                          identify=self._fake_identify(confidence=30.0))
         self.assertEqual(len(self.calls), 1)
-        self.assertIsNone(rows[1]['species_cn'])
-        self.assertIsNone(rows[1]['species_confidence'])
+        # 低置信结果保留：数据层完整，采纳由展示层按阈值判断
+        self.assertEqual(rows[1]['species_cn'], '虎皮鹦鹉')
+        self.assertEqual(rows[1]['species_confidence'], 30.0)
         self.assertIsNotNone(rows[1]['crop_sharpness'])
 
     def test_selected_bird_reuses_main_result(self):
@@ -256,6 +257,42 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         """空输入返回空列表，不抛异常。"""
         self.assertEqual(self._run([]), [])
         self.assertEqual(self._run(None), [])
+
+
+class TestBirdBoxDedup(unittest.TestCase):
+    """_dedupe_bird_boxes：一鸟多框去重（保留最高置信度框）。"""
+
+    def _dedup(self, boxes, confs, iou_thresh=0.55):
+        import numpy as np
+        from ai_model import _dedupe_bird_boxes
+        dets = np.array(boxes, dtype=np.float64)
+        cf = np.array(confs, dtype=np.float64)
+        cls = np.array([14] * len(boxes), dtype=np.float64)
+        d, c, k, m = _dedupe_bird_boxes(dets, cf, cls, None,
+                                        iou_thresh=iou_thresh)
+        return d.tolist(), c.tolist()
+
+    def test_duplicate_box_suppressed(self):
+        """同一只鸟的两个高重叠框 → 只留置信度高的。"""
+        boxes = [[100, 100, 200, 200], [105, 102, 198, 205]]  # IoU≈0.9
+        dets, confs = self._dedup(boxes, [0.5, 0.8])
+        self.assertEqual(len(dets), 1)
+        self.assertEqual(confs[0], 0.8)  # 保留高置信度框
+
+    def test_adjacent_birds_kept(self):
+        """相邻但不重叠的两只鸟都保留（IoU 低）。"""
+        boxes = [[100, 100, 200, 200], [220, 100, 320, 200]]  # IoU=0
+        dets, _ = self._dedup(boxes, [0.5, 0.8])
+        self.assertEqual(len(dets), 2)
+
+    def test_partial_overlap_boundary(self):
+        """IoU 在阈值附近的框：高于阈值抑制、低于保留。"""
+        # 200x200 与右移 100 的框：交 100x200=20000，并 60000 → IoU=0.33
+        boxes = [[100, 100, 300, 300], [200, 100, 400, 300]]
+        dets, _ = self._dedup(boxes, [0.8, 0.5], iou_thresh=0.3)
+        self.assertEqual(len(dets), 1)
+        dets, _ = self._dedup(boxes, [0.8, 0.5], iou_thresh=0.5)
+        self.assertEqual(len(dets), 2)
 
 
 if __name__ == '__main__':

@@ -269,7 +269,8 @@ def _place_label_position(x1: int, y1: int, x2: int, y2: int,
 
 
 def annotate_photo(photo_path: str, out_path: str,
-                   max_side: int = DEFAULT_MAX_SIDE) -> bool:
+                   max_side: int = DEFAULT_MAX_SIDE,
+                   threshold: float = 50.0) -> bool:
     """
     生成一张照片的审阅叠加图。
 
@@ -277,11 +278,16 @@ def annotate_photo(photo_path: str, out_path: str,
     photo_path (str): 原照片路径（不被修改）
     out_path (str): 输出 JPEG 路径
     max_side (int): 输出图长边上限
+    threshold (float): 采纳阈值(%)——置信度 ≥ 此值为绿框（采纳），
+        有分类结果但低于此值为橙框（同样标注鸟名+置信度，便于调阈值），
+        未分类（面积过小未送分类/失败）为灰框只画框
 
     返回:
     bool: 是否成功生成
 
-    Render the annotated review image for one photo.
+    Render the annotated review image for one photo. Green = adopted
+    (conf >= threshold), orange = classified but below threshold
+    (labelled too, for threshold tuning), gray = not classified.
     """
     detections, _sidecar = _load_detections(photo_path)
     if not detections:
@@ -316,20 +322,24 @@ def annotate_photo(photo_path: str, out_path: str,
         x2, y2 = int(x + w), int(y + h)
         is_sel = bool(det.get("is_selected"))
         species = det.get("species")
+        conf = (species or {}).get("confidence")
         if is_sel:
             color = (0, 0, 255)          # 红：主鸟
             thickness = 2
-        elif species:
-            color = (0, 180, 0)          # 绿：已识别
+        elif species and conf is not None and conf >= threshold:
+            color = (0, 180, 0)          # 绿：已采纳（≥阈值）
             thickness = 1               # 细框 / thin frame
+        elif species:
+            color = (0, 165, 255)        # 橙：已分类但低于阈值（同样标注）
+            thickness = 1
         else:
-            color = (160, 160, 160)      # 灰：未识别，只画框不加文字
+            color = (160, 160, 160)      # 灰：未分类，只画框不加文字
             thickness = 1
         cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness,
                       lineType=cv2.LINE_AA)
 
-        # 文字标注：只有已识别的鸟才有（物种名 置信度%），主鸟加 ★
-        # Label identified birds only: "species conf%" (★ = main).
+        # 文字标注：有分类结果的鸟都标（物种名 置信度%），主鸟加 ★
+        # Label every classified bird: "species conf%" (★ = main).
         if not species:
             continue
         name = species.get("cn") or species.get("en") or "?"
@@ -381,6 +391,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="输出目录（默认 <照片目录>/.superpicky/review）")
     parser.add_argument("--max-side", type=int, default=DEFAULT_MAX_SIDE,
                         help=f"审阅图长边上限（默认 {DEFAULT_MAX_SIDE}）")
+    parser.add_argument("--threshold", type=float, default=50.0,
+                        help="采纳阈值(%%)：置信度≥此值为绿框，低于但有"
+                             "分类结果为橙框（默认 50，调阈值时改这里）")
     args = parser.parse_args(argv)
 
     photos = _collect_photos(args.inputs)
@@ -394,7 +407,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         prefix = os.path.splitext(os.path.basename(photo))[0]
         out_dir = args.out or os.path.join(directory, ".superpicky", "review")
         out_path = os.path.join(out_dir, f"{prefix}_review.jpg")
-        if annotate_photo(photo, out_path, max_side=args.max_side):
+        if annotate_photo(photo, out_path, max_side=args.max_side,
+                          threshold=args.threshold):
             print(f"  ✅ {out_path}")
             done += 1
     print(f"完成: {done}/{len(photos)}")

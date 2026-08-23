@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+多鸟逐鸟识别（multibird）单元测试。
+
+覆盖三块：
+1. report.db v9→v10 升级：旧库数据不丢、bird_detections 自动创建；
+2. bird_detections 入库幂等：重跑（先删后插）不产生重复行；
+3. core/multi_bird.classify_secondary_birds 的门槛逻辑：
+   面积边界（<min_area 只入框不分类）、置信度边界（<threshold 物种留空）、
+   主鸟复用（is_selected 行不重复推理）。
+
+Unit tests for the multi-bird per-bird classification feature:
+schema v9→v10 migration, idempotent detection persistence, and the
+min-area / confidence thresholds of classify_secondary_birds.
+"""
+import json
+import os
+import shutil
+import sqlite3
+import tempfile
+import unittest
+
+import numpy as np
+
+from tools.report_db import ReportDB, SCHEMA_VERSION
+
+
+def _make_rows(filename='DSC_0001', n=2, with_species=(True, False)):
+    """构造 n 行检测数据（中文物种名用于 UTF-8 回读验证）。"""
+    names = [('鸡尾鹦鹉', 'Cockatiel', 'Nymphicus hollandicus'),
+             ('虎皮鹦鹉', 'Budgerigar', 'Melopsittacus undulatus')]
+    rows = []
+    for i in range(n):
+        row = {
+            'filename': filename,
+            'bird_index': i,
+            'is_selected': 1 if i == 0 else 0,
+            'bbox_x': 100.0 * (i + 1), 'bbox_y': 200.0,
+            'bbox_w': 300.0, 'bbox_h': 400.0,
+            'mask_polygon': json.dumps([[100, 200], [400, 200], [400, 600]]),
+            'area_ratio': 0.05 * (i + 1),
+            'yolo_conf': 0.9 - 0.1 * i,
+            'crop_sharpness': 500.0 - 100.0 * i,
+        }
+        if with_species[i]:
+            cn, en, sci = names[i % len(names)]
+            row.update({
+                'species_cn': cn, 'species_en': en,
+                'scientific_name': sci,
+                'species_confidence': 88.5,
+                'class_id': 100 + i,
+                'gbif_rarity_100': 12.0,
+            })
+        rows.append(row)
+    return rows
+
+
+class TestSchemaV10Migration(unittest.TestCase):
+    """v9 旧库打开后自动升级 v10，photos 数据保留。"""
+
+    def _create_v9_db(self, db_dir):
+        """手工建一个 v9 库：photos 表带一行数据、meta 版本号 9。"""
+        sp_dir = os.path.join(db_dir, '.superpicky')
+        os.makedirs(sp_dir, exist_ok=True)
+        db_path = os.path.join(sp_dir, 'report.db')
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE photos (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "filename TEXT UNIQUE, has_bird INTEGER, confidence REAL, rating INTEGER)")
+        conn.execute(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '9')")
+        conn.execute(
+            "INSERT INTO photos (filename, has_bird, confidence, rating) "
+            "VALUES ('OLD_0001', 1, 0.87, 3)")
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_v9_upgrades_and_keeps_data(self):
+        db_dir = tempfile.mkdtemp()
+        try:
+            self._create_v9_db(db_dir)
+            db = ReportDB(db_dir)
+            # 版本已升到 10
+            ver = db._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+            self.assertEqual(ver, "10")
+            self.assertEqual(SCHEMA_VERSION, "10")
+            # 旧 photos 数据仍在
+            photo = db.get_photo('OLD_0001')
+            self.assertIsNotNone(photo)
+            self.assertEqual(photo['rating'], 3)
+            # bird_detections 表已创建且可写
+            db.insert_detections_batch(_make_rows('OLD_0001'))
+            self.assertEqual(len(db.get_detections('OLD_0001')), 2)
+            db._conn.close()
+        finally:
+            shutil.rmtree(db_dir, ignore_errors=True)
+
+
+class TestDetectionsPersistence(unittest.TestCase):
+    """bird_detections 入库与幂等重跑。"""
+
+    def test_insert_idempotent_and_utf8(self):
+        db_dir = tempfile.mkdtemp()
+        try:
+            db = ReportDB(db_dir)
+            rows = _make_rows()
+            db.insert_detections_batch(rows)
+            self.assertEqual(len(db.get_detections('DSC_0001')), 2)
+            # 幂等：同照片重插仍是 2 行（先删后插）
+            db.insert_detections_batch(rows)
+            self.assertEqual(len(db.get_detections('DSC_0001')), 2)
+            # 中文物种名 UTF-8 回读无损
+            got = db.get_detections('DSC_0001')
+            self.assertEqual(got[0]['species_cn'], '鸡尾鹦鹉')
+            self.assertIsNone(got[1]['species_cn'])
+            # polygon JSON 可解析
+            poly = json.loads(got[0]['mask_polygon'])
+            self.assertEqual(poly[0], [100, 200])
+            # 混入不同 filename 应拒绝（防脏数据）
+            bad = [dict(rows[0]), dict(rows[1], filename='OTHER')]
+            with self.assertRaises(ValueError):
+                db.insert_detections_batch(bad)
+            db._conn.close()
+        finally:
+            shutil.rmtree(db_dir, ignore_errors=True)
+
+
+class TestClassifySecondaryBirds(unittest.TestCase):
+    """classify_secondary_birds 的门槛逻辑（注入假识别器，不加载模型）。"""
+
+    def setUp(self):
+        # 200x300 原图 / 100x150 处理图 → 缩放比 2.0
+        rng = np.random.default_rng(42)
+        self.orig = rng.integers(0, 255, (200, 300, 3), dtype=np.uint8)
+        self.calls = []
+
+    def _fake_identify(self, confidence=88.5):
+        def fake(path, use_yolo, use_gps, use_geo, cc, rc, top_k, nf, crop):
+            self.calls.append({'path': path, 'crop_size': crop.size})
+            return {'success': True, 'results': [{
+                'cn_name': '虎皮鹦鹉', 'en_name': 'Budgerigar',
+                'scientific_name': 'Melopsittacus undulatus',
+                'confidence': confidence, 'class_id': 7,
+                'gbif_rarity_100': 5.0}]}
+        return fake
+
+    def _run(self, all_birds, main_species=None, min_area=0.001,
+             threshold=50.0, identify=None):
+        from core.multi_bird import classify_secondary_birds
+        return classify_secondary_birds(
+            self.orig, all_birds,
+            proc_dims=(150, 100), orig_dims=(300, 200),
+            main_species=main_species, filename='DSC_0001',
+            photo_path='X:/DSC_0001.NEF',
+            min_area_ratio=min_area, species_threshold=threshold,
+            identify_fn=identify or self._fake_identify())
+
+    def test_small_bird_boxed_but_not_classified(self):
+        """面积 < min_area_ratio：只入框不分类（识别器不被调用）。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (80, 80, 86, 84),
+             'area_ratio': 0.0009, 'mask_polygon': None, 'is_selected': False},
+        ]
+        rows = self._run(birds)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(self.calls, [])  # 小鸟没触发分类
+        self.assertIsNone(rows[1]['species_cn'])
+        self.assertIsNotNone(rows[1]['bbox_w'])  # 框照入
+        self.assertIsNotNone(rows[1]['crop_sharpness'])
+
+    def test_area_boundary_exact_equal_classifies(self):
+        """面积恰好等于阈值 → 分类（>= 语义）。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.001, 'mask_polygon': None, 'is_selected': False},
+        ]
+        rows = self._run(birds, min_area=0.001)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(rows[1]['species_cn'], '虎皮鹦鹉')
+
+    def test_low_confidence_leaves_species_empty(self):
+        """置信度低于阈值 → 物种字段留空但框/锐度保留。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.03, 'mask_polygon': None, 'is_selected': False},
+        ]
+        rows = self._run(birds, threshold=90.0,
+                         identify=self._fake_identify(confidence=30.0))
+        self.assertEqual(len(self.calls), 1)
+        self.assertIsNone(rows[1]['species_cn'])
+        self.assertIsNone(rows[1]['species_confidence'])
+        self.assertIsNotNone(rows[1]['crop_sharpness'])
+
+    def test_selected_bird_reuses_main_result(self):
+        """主鸟行复用 main_species，不触发识别器。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.03, 'mask_polygon': None, 'is_selected': False},
+        ]
+        main = {'cn': '鸡尾鹦鹉', 'en': 'Cockatiel',
+                'scientific': 'Nymphicus hollandicus',
+                'confidence': 99.0, 'class_id': 123, 'gbif_rarity_100': 12.0}
+        rows = self._run(birds, main_species=main)
+        # 只有次鸟调用了一次识别器
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(rows[0]['species_cn'], '鸡尾鹦鹉')
+        self.assertEqual(rows[0]['is_selected'], 1)
+        self.assertEqual(rows[1]['species_cn'], '虎皮鹦鹉')
+        # 主鸟的 main_species=None 时行物种留空（低于用户阈值场景）
+        rows2 = self._run(birds, main_species=None)
+        self.assertIsNone(rows2[0]['species_cn'])
+        self.assertEqual(rows2[0]['is_selected'], 1)
+
+    def test_square_crop_geometry(self):
+        """次鸟裁剪为方形（最长边 × 1.15 padding）。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            # 处理图 (60,60)-(110,90) → 原图 (120,120)-(220,180)：100x60 → 方 115
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.03, 'mask_polygon': None, 'is_selected': False},
+        ]
+        self._run(birds)
+        w, h = self.calls[0]['crop_size']
+        self.assertEqual(w, h)
+        self.assertEqual(w, 115)
+        self.assertEqual(self.calls[0]['path'], 'X:/DSC_0001.NEF')
+
+    def test_polygon_scaled_to_orig(self):
+        """轮廓点从处理图坐标缩放到原图坐标（比例 2.0），JSON 序列化。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.03,
+             'mask_polygon': [[60, 60], [110, 60], [110, 90]],
+             'is_selected': False},
+        ]
+        rows = self._run(birds)
+        self.assertEqual(json.loads(rows[1]['mask_polygon']),
+                         [[120, 120], [220, 120], [220, 180]])
+
+    def test_empty_input(self):
+        """空输入返回空列表，不抛异常。"""
+        self.assertEqual(self._run([]), [])
+        self.assertEqual(self._run(None), [])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

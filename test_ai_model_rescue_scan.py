@@ -87,8 +87,9 @@ def test_detect_returns_10_tuple_no_bird(tmp_path, monkeypatch):
     model = FakeModel(np.zeros((0, 4)), [], [])
     result = ai_model.detect_and_draw_birds(
         jpg, model, None, str(tmp_path), [50, 300, 5.0, False], None)
-    assert len(result) == 10
+    assert len(result) == 11  # V5.0: 追加 all_birds
     assert result[0] is False and result[9] is False
+    assert result[10] == []
 
 
 def test_detect_rescue_success_path(tmp_path, monkeypatch):
@@ -114,7 +115,7 @@ def test_detect_rescue_success_path(tmp_path, monkeypatch):
     model = FakeModel(np.zeros((0, 4)), [], [])  # 第一遍无任何检测
     result = ai_model.detect_and_draw_birds(
         jpg, model, None, str(tmp_path), [50, 300, 5.0, False], None)
-    assert len(result) == 10
+    assert len(result) == 11  # V5.0: 追加 all_birds
     assert result[0] is True          # found_bird
     assert result[9] is True          # rescued
     assert result[8] == 1             # bird_count

@@ -96,6 +96,15 @@ class AdvancedConfig:
         "rescue_scan_enabled": True,   # 判无鸟/低置信度时触发 1024px 重扫 + 识鸟守门
         "rescue_birdid_gate": 10,      # 弱候选的识鸟确认门槛 (0-100, top1 置信度百分比)
 
+        # 多鸟逐鸟识别（multi-bird per-bird classification）
+        # bird_count > 1 时对每个检测框单独做鸟种分类，结果入 bird_detections 表。
+        # 主鸟（评分对象）选择逻辑不受影响。
+        # Multi-bird: classify every detected box when bird_count > 1;
+        # main-bird selection and rating pipeline stay untouched.
+        "multibird_enabled": True,           # 总开关（仅多鸟照片生效）
+        "multibird_min_area_ratio": 0.001,   # bbox 面积/图面积 < 此值只入框不分类（太小看不清）
+        "multibird_species_threshold": 50,   # 逐鸟分类采纳阈值(%)，低于则物种字段留空
+
         # 外部编辑应用（右键菜单 "用 X 打开"）
         # 每项格式：{"name": "显示名称", "path": "/Applications/...app"}
         "external_apps": [],
@@ -353,6 +362,21 @@ class AdvancedConfig:
         """补救识鸟确认门槛 (0-100) / Rescue BirdID gate percent (0-100)."""
         return self.config.get("rescue_birdid_gate", 10)
 
+    @property
+    def multibird_enabled(self) -> bool:
+        """多鸟逐鸟识别总开关 / Multi-bird per-bird classification toggle."""
+        return bool(self.config.get("multibird_enabled", True))
+
+    @property
+    def multibird_min_area_ratio(self) -> float:
+        """逐鸟分类的最小 bbox 面积占比 / Min bbox area ratio to classify."""
+        return float(self.config.get("multibird_min_area_ratio", 0.001))
+
+    @property
+    def multibird_species_threshold(self) -> float:
+        """逐鸟分类采纳阈值(%) / Per-bird species adoption threshold (percent)."""
+        return float(self.config.get("multibird_species_threshold", 50))
+
     # Setter方法
     def set_min_confidence(self, value):
         """设置AI置信度阈值 (0.3-0.7)"""
@@ -404,6 +428,20 @@ class AdvancedConfig:
     def set_rescue_birdid_gate(self, value):
         """设置补救识鸟确认门槛 (0-100) / Rescue BirdID gate percent (0-100)."""
         self.config["rescue_birdid_gate"] = max(0, min(100, int(value)))
+
+    def set_multibird_enabled(self, value: bool) -> None:
+        """设置多鸟逐鸟识别开关 / Set multi-bird per-bird classification toggle."""
+        self.config["multibird_enabled"] = bool(value)
+
+    def set_multibird_min_area_ratio(self, value: float) -> None:
+        """设置逐鸟分类最小面积占比 (0.0001-0.05) / Set min bbox area ratio."""
+        self.config["multibird_min_area_ratio"] = max(
+            0.0001, min(0.05, float(value)))
+
+    def set_multibird_species_threshold(self, value: float) -> None:
+        """设置逐鸟分类采纳阈值 (10-95%) / Set per-bird species threshold."""
+        self.config["multibird_species_threshold"] = max(
+            10.0, min(95.0, float(value)))
 
     def set_log_level(self, value):
         """设置日志详细程度"""

@@ -205,9 +205,25 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
 
     def _result(i: int, source: str, species: str = "",
                 species_conf: float = 0.0) -> dict:
+        # V5.0(multibird): 救回时带回重扫的全部鸟框（含救回候选），让
+        # 调用方重建完整的 all_birds——鸟群照第一遍 640 分辨率常整体漏检，
+        # 补救扫描是它们唯一的检测来源，只带回最佳一只会让逐鸟分类
+        # 拿到 bird_count=1 永远不触发。混淆类候选（airplane/kite）不在
+        # 鸟类索引中，追加在末尾，由调用方统一按鸟类处理（已过识鸟守门）。
+        # V5.0: carry every rescanned bird box back so the caller can
+        # rebuild the full all_birds list; distant flocks are often only
+        # detected by this rescan. A confusable-class rescue candidate is
+        # appended (it already passed the BirdID gate).
+        keep = [int(j) for j in bird_ix]
+        if i not in keep:
+            keep.append(i)
         return {
             "xyxy": xyxy[i], "conf": float(confs[i]), "mask": _mask_of(i),
             "source": source, "species": species, "species_conf": species_conf,
+            "detections": xyxy[keep],
+            "detection_confs": confs[keep],
+            "detection_masks": (masks_np[keep]
+                                if masks_np is not None else None),
         }
 
     # 规则 1：重扫 bird 直接过 UI 阈值 / Rule 1: rescanned bird clears UI threshold
@@ -240,6 +256,55 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
     return None
 
 
+def _mask_to_polygon(masks, idx: int, width: int, height: int,
+                     max_points: int = 32) -> Optional[list]:
+    """
+    把 YOLO 分割掩码简化成轮廓多边形点阵（处理图坐标）。
+
+    掩码先按需缩放到 (width, height)（与主鸟 bird_mask 同一逻辑），
+    findContours 取最大轮廓，approxPolyDP 逐步放宽 epsilon 直到
+    顶点数 ≤ max_points。像素级掩码可随时由 YOLO 确定性重算，
+    这里只存轻量轮廓供可视化/网站叠加。
+
+    参数:
+    masks (np.ndarray): YOLO 全部掩码 (N, h, w)，可为 None
+    idx (int): 检测序号
+    width / height (int): 处理图尺寸（多边形输出坐标系）
+    max_points (int): 轮廓最大顶点数
+
+    返回:
+    Optional[list]: [[x, y], ...]；无掩码/空轮廓返回 None
+
+    Simplify a YOLO segmentation mask into a contour polygon (processed
+    frame coordinates). Returns None when no mask is available.
+    """
+    if masks is None or idx >= len(masks):
+        return None
+    try:
+        raw = masks[idx]
+        if raw.shape[:2] != (height, width):
+            raw = cv2.resize(raw, (width, height),
+                             interpolation=cv2.INTER_NEAREST)
+        binary = (raw > 0.5).astype(np.uint8)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        contour = max(contours, key=cv2.contourArea)
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter <= 0:
+            return None
+        epsilon = max(1.0, perimeter * 0.005)
+        for _ in range(8):
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            if len(approx) <= max_points:
+                break
+            epsilon *= 1.6
+        return [[int(p[0][0]), int(p[0][1])] for p in approx]
+    except Exception:
+        return None
+
+
 def detect_and_draw_birds(
     image_path,
     model,
@@ -267,9 +332,11 @@ def detect_and_draw_birds(
         decoded_image: 复用上游已解码的 BGR 图像，减少重复 JPEG 解码
     
     Returns:
-        10-tuple (found_bird, bird_result, confidence, sharpness, nima_score, bird_bbox, img_dims, bird_mask, bird_count, rescued)
+        11-tuple (found_bird, bird_result, confidence, sharpness, nima_score, bird_bbox, img_dims, bird_mask, bird_count, rescued, all_birds)
         bird_count: 检测到的鸟的数量（V4.2 新增）
         rescued: 是否经补救扫描救回（V4.6 新增）/ whether rescued by the rescue scan (V4.6 new)
+        all_birds: 全部鸟检测项（V5.0 multibird 新增），每项含
+            idx/conf/bbox/area_ratio/mask_polygon（处理图坐标），空列表表示无鸟
     """
     # V3.1: 从 ui_settings 获取参数
     ai_confidence = ui_settings[0] / 100  # AI置信度：50-100 -> 0.5-1.0（仅用于过滤）
@@ -349,7 +416,7 @@ def detect_and_draw_birds(
             }
             if report_db:
                 report_db.insert_photo(data)
-            return found_bird, bird_result, 0.0, 0.0, None, None, None, None, 0, False  # V4.6: 10 values with rescued
+            return found_bird, bird_result, 0.0, 0.0, None, None, None, None, 0, False, []  # V5.0: 11 values with all_birds
 
     yolo_time = (time.time() - step_start) * 1000
     # V3.3: 简化日志，移除步骤详情
@@ -373,14 +440,23 @@ def detect_and_draw_birds(
     del results
 
     # V4.2: 收集所有检测到的鸟
+    # V5.0(multibird): 每项附 area_ratio 与 mask_polygon（处理图坐标），
+    # 供逐鸟分类/入库使用；masks 此时可用，轮廓压缩在此完成。
+    # V4.2: Collect all detected birds; each entry also carries
+    # area_ratio and the simplified mask polygon for per-bird use.
     all_birds = []
     for idx, (detection, conf, class_id) in enumerate(zip(detections, confidences, class_ids)):
         if int(class_id) == config.ai.BIRD_CLASS_ID:
             x1, y1, x2, y2 = detection
+            box_w = max(0, int(x2) - int(x1))
+            box_h = max(0, int(y2) - int(y1))
             all_birds.append({
                 'idx': idx,
                 'conf': float(conf),
-                'bbox': (int(x1), int(y1), int(x2), int(y2))
+                'bbox': (int(x1), int(y1), int(x2), int(y2)),
+                'area_ratio': (box_w * box_h) / float(width * height)
+                              if width > 0 and height > 0 else 0.0,
+                'mask_polygon': _mask_to_polygon(masks, idx, width, height),
             })
     
     bird_count = len(all_birds)
@@ -396,20 +472,57 @@ def detect_and_draw_birds(
             _rescue = _rescue_scan(model, image, ai_confidence,
                                    _adv.rescue_birdid_gate, dir, i18n)
             if _rescue is not None:
-                # 用救回候选覆盖第一遍解析结果，后续裁剪/画框/入库全部复用
-                # Overwrite the pass-1 parse with the rescued candidate; the
-                # rest of the pipeline (crop/draw/DB) is reused unchanged.
-                detections = np.array([_rescue["xyxy"]], dtype=np.float64)
-                confidences = np.array([_rescue["conf"]], dtype=np.float64)
-                class_ids = np.array([float(config.ai.BIRD_CLASS_ID)])
-                masks = (_rescue["mask"][None, ...]
-                         if _rescue["mask"] is not None else None)
-                all_birds = [{
-                    'idx': 0,
-                    'conf': _rescue["conf"],
-                    'bbox': tuple(int(v) for v in _rescue["xyxy"]),
-                }]
-                bird_count = 1
+                # V5.0(multibird): 用重扫的全部鸟框重建检测结果（不再只
+                # 覆盖单只救回候选）——数组与 all_birds 索引天然对齐，下方
+                # 主鸟选择策略照常运行（对焦点优先/最高置信度），逐鸟分类
+                # 拿到真实 bird_count。混淆类候选已过识鸟守门，统一按鸟类。
+                # V5.0: rebuild the full detection arrays from the rescan
+                # so indices align with all_birds; the standard selection
+                # strategy below runs unchanged and per-bird classification
+                # sees the real bird_count.
+                det_arr = _rescue.get("detections")
+                if det_arr is not None and len(det_arr):
+                    detections = np.asarray(det_arr, dtype=np.float64)
+                    confidences = np.asarray(_rescue["detection_confs"],
+                                             dtype=np.float64)
+                    class_ids = np.full(len(confidences),
+                                        float(config.ai.BIRD_CLASS_ID))
+                    masks = _rescue.get("detection_masks")
+                    all_birds = []
+                    for pos in range(len(detections)):
+                        dx1, dy1, dx2, dy2 = [int(v) for v in detections[pos]]
+                        box_w = max(0, dx2 - dx1)
+                        box_h = max(0, dy2 - dy1)
+                        all_birds.append({
+                            'idx': pos,
+                            'conf': float(confidences[pos]),
+                            'bbox': (dx1, dy1, dx2, dy2),
+                            'area_ratio': (box_w * box_h)
+                                          / float(width * height)
+                                          if width > 0 and height > 0 else 0.0,
+                            'mask_polygon': _mask_to_polygon(
+                                masks, pos, width, height),
+                        })
+                    bird_count = len(all_birds)
+                else:
+                    # 兜底：重扫未带回数组时维持旧版单候选行为
+                    # Fallback: legacy single-candidate overwrite.
+                    detections = np.array([_rescue["xyxy"]], dtype=np.float64)
+                    confidences = np.array([_rescue["conf"]], dtype=np.float64)
+                    class_ids = np.array([float(config.ai.BIRD_CLASS_ID)])
+                    masks = (_rescue["mask"][None, ...]
+                             if _rescue["mask"] is not None else None)
+                    rx1, ry1, rx2, ry2 = [int(v) for v in _rescue["xyxy"]]
+                    all_birds = [{
+                        'idx': 0,
+                        'conf': _rescue["conf"],
+                        'bbox': (rx1, ry1, rx2, ry2),
+                        'area_ratio': ((rx2 - rx1) * (ry2 - ry1))
+                                      / float(width * height)
+                                      if width > 0 and height > 0 else 0.0,
+                        'mask_polygon': _mask_to_polygon(masks, 0, width, height),
+                    }]
+                    bird_count = 1
                 rescued = True
 
     # V4.2: 鸟选择策略
@@ -436,6 +549,12 @@ def detect_and_draw_birds(
     elif bird_count > 1:
         # 多只鸟但没有对焦点，选择置信度最高
         bird_idx = max(all_birds, key=lambda b: b['conf'])['idx']
+
+    # V5.0(multibird): 给选中项打标，下游逐鸟分类据此识别主鸟
+    # V5.0: flag the selected entry so per-bird classification can
+    # identify the main bird without passing an extra index around.
+    for bird in all_birds:
+        bird['is_selected'] = (bird['idx'] == bird_idx)
 
     parse_time = (time.time() - step_start) * 1000
     # V3.3: 简化日志，移除步骤详情
@@ -467,7 +586,7 @@ def detect_and_draw_birds(
         }
         if report_db:
             report_db.insert_photo(data)
-        return found_bird, bird_result, 0.0, 0.0, None, None, None, None, 0, False  # V4.6: 10 values with rescued
+        return found_bird, bird_result, 0.0, 0.0, None, None, None, None, 0, False, []  # V5.0: 11 values with all_birds
     # V3.2: 移除 NIMA 计算（现在由 photo_processor 在裁剪区域上计算）
     # nima_score 设为 None，photo_processor 会重新计算
     nima_score = None
@@ -599,6 +718,19 @@ def detect_and_draw_birds(
             # log_message(f"  ⏱️  [4/4] CSV写入: {csv_time:.1f}ms", dir)
 
 
+    # V5.0(multibird): 调试图画出全部鸟——主鸟红粗框（上方循环已画），
+    # 其余灰细框+序号，多鸟场景的完整检测清单不再丢失。
+    # V5.0: draw every bird on the debug image — the main bird keeps its
+    # red box; others get a thin gray box plus an index label.
+    if found_bird and output_path and len(all_birds) > 1:
+        for bird in all_birds:
+            if bird['idx'] == bird_idx:
+                continue
+            bx1, by1, bx2, by2 = bird['bbox']
+            cv2.rectangle(image, (bx1, by1), (bx2, by2), (160, 160, 160), 1)
+            cv2.putText(image, str(bird['idx']), (bx1, max(12, by1 - 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+
     # 只有在 found_bird 为 True 且 output_path 有效时，才保存带框的图片
     if found_bird and output_path:
         cv2.imwrite(output_path, image)
@@ -641,4 +773,4 @@ def detect_and_draw_birds(
             # Mask processing failed, ignore
             pass
 
-    return found_bird, bird_result, bird_confidence, bird_sharpness, nima_score, bird_bbox, img_dims, bird_mask, bird_count, rescued
+    return found_bird, bird_result, bird_confidence, bird_sharpness, nima_score, bird_bbox, img_dims, bird_mask, bird_count, rescued, all_birds

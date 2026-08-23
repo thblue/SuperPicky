@@ -21,7 +21,7 @@ from .file_utils import ensure_hidden_directory
 
 
 # Schema 版本，用于未来升级
-SCHEMA_VERSION = "9"
+SCHEMA_VERSION = "10"
 
 # 所有列定义（有序），用于 CREATE TABLE 和数据验证
 PHOTO_COLUMNS = [
@@ -109,6 +109,17 @@ PHOTO_COLUMNS = [
 
 # 列名集合，用于快速查找
 COLUMN_NAMES = {col[0] for col in PHOTO_COLUMNS}
+
+# bird_detections 表的全部业务列（不含 id/created_at/updated_at）
+# All business columns of bird_detections (id/timestamps excluded).
+DETECTION_COLUMNS = (
+    "filename", "bird_index", "is_selected",
+    "bbox_x", "bbox_y", "bbox_w", "bbox_h",
+    "mask_polygon", "area_ratio", "yolo_conf", "crop_sharpness",
+    "species_cn", "species_en", "scientific_name",
+    "species_confidence", "class_id", "gbif_rarity_100",
+    "notable", "notable_reason", "edited",
+)
 
 
 class ReportDB:
@@ -221,6 +232,46 @@ class ReportDB:
                 self._conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_corrections_filename "
                     "ON corrections(filename)"
+                )
+
+                # 多鸟检测表（multi-bird detection）：
+                # 每张照片的每个检测框一行，记录逐鸟分类结果。
+                # filename 与 photos.filename 同键（文件名前缀，无扩展名）。
+                # is_selected=1 的行是主鸟（现有评分链路的对象），其余为次要鸟。
+                # mask_polygon 为简化轮廓 [[x,y],...]（JSON 字符串，原图坐标）。
+                # Multi-bird detections table: one row per detected bird box.
+                # filename matches photos.filename (prefix without extension).
+                # is_selected=1 marks the main bird used by the rating pipeline.
+                self._conn.execute("""
+                    CREATE TABLE IF NOT EXISTS bird_detections (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        filename TEXT NOT NULL,
+                        bird_index INTEGER NOT NULL,
+                        is_selected INTEGER DEFAULT 0,
+                        bbox_x REAL,
+                        bbox_y REAL,
+                        bbox_w REAL,
+                        bbox_h REAL,
+                        mask_polygon TEXT,
+                        area_ratio REAL,
+                        yolo_conf REAL,
+                        crop_sharpness REAL,
+                        species_cn TEXT,
+                        species_en TEXT,
+                        scientific_name TEXT,
+                        species_confidence REAL,
+                        class_id INTEGER,
+                        gbif_rarity_100 REAL,
+                        notable INTEGER DEFAULT 0,
+                        notable_reason TEXT,
+                        edited INTEGER DEFAULT 0,
+                        created_at TEXT,
+                        updated_at TEXT
+                    )
+                """)
+                self._conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_bird_detections_filename_idx "
+                    "ON bird_detections(filename, bird_index)"
                 )
 
                 # 初始化元数据
@@ -428,6 +479,52 @@ class ReportDB:
                     self._update_schema_version("9")
                 current_version = "9"
                 print("✅ Database schema upgraded to v9")
+
+            # ----------------------------------------------------------------------
+            #  Upgrade: v9 -> v10 (Multi-bird detections table)
+            #  新增 bird_detections 表：每照片多鸟逐鸟分类结果。
+            #  纯新增表，photos 表无变化；CREATE IF NOT EXISTS 对新库幂等。
+            #  Adds bird_detections table for per-bird classification results.
+            #  Additive only; no photos-table change.
+            # ----------------------------------------------------------------------
+            if current_version == "9":
+                print("🔄 Upgrading database schema from v9 to v10...")
+                with self._conn:
+                    self._conn.execute("""
+                        CREATE TABLE IF NOT EXISTS bird_detections (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            filename TEXT NOT NULL,
+                            bird_index INTEGER NOT NULL,
+                            is_selected INTEGER DEFAULT 0,
+                            bbox_x REAL,
+                            bbox_y REAL,
+                            bbox_w REAL,
+                            bbox_h REAL,
+                            mask_polygon TEXT,
+                            area_ratio REAL,
+                            yolo_conf REAL,
+                            crop_sharpness REAL,
+                            species_cn TEXT,
+                            species_en TEXT,
+                            scientific_name TEXT,
+                            species_confidence REAL,
+                            class_id INTEGER,
+                            gbif_rarity_100 REAL,
+                            notable INTEGER DEFAULT 0,
+                            notable_reason TEXT,
+                            edited INTEGER DEFAULT 0,
+                            created_at TEXT,
+                            updated_at TEXT
+                        )
+                    """)
+                    self._conn.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "idx_bird_detections_filename_idx "
+                        "ON bird_detections(filename, bird_index)"
+                    )
+                    self._update_schema_version("10")
+                current_version = "10"
+                print("✅ Database schema upgraded to v10")
 
     def _update_schema_version(self, version):
         """更新数据库中的版本号（由调用方负责提交事务）"""
@@ -767,6 +864,122 @@ class ReportDB:
                 "SELECT * FROM corrections ORDER BY created_at, id"
             )
             return [dict(r) for r in cursor.fetchall()]
+
+    # ==========================================================================
+    #  多鸟检测（multi-bird detections）
+    # ==========================================================================
+
+    def insert_detections_batch(self, rows: List[dict]) -> int:
+        """
+        整体替换一张照片的多鸟检测记录（先删后插，幂等，支持重跑）。
+
+        参数:
+        rows (List[dict]): 每鸟一行的数据字典，键为 DETECTION_COLUMNS
+            中的列名；filename 必填。缺失列写 NULL。
+
+        返回:
+        int: 实际写入的行数
+
+        Replace all detections of a photo (delete-then-insert, idempotent).
+        Rows must share the same filename; missing keys become NULL.
+
+        Raises:
+            ValueError: rows 为空或 filename 缺失/不一致时。
+        """
+        if not rows:
+            raise ValueError("insert_detections_batch: rows 为空 / rows is empty")
+        filename = rows[0].get("filename")
+        if not filename:
+            raise ValueError("insert_detections_batch: filename 缺失 / missing filename")
+        for r in rows:
+            if r.get("filename") != filename:
+                raise ValueError(
+                    "insert_detections_batch: rows 必须同一照片 / "
+                    f"rows must share one filename, got {r.get('filename')} vs {filename}"
+                )
+
+        now = _now_iso()
+        cols = DETECTION_COLUMNS
+        placeholders = ", ".join(["?"] * len(cols))
+        col_str = ", ".join(cols)
+        sql = (
+            f"INSERT INTO bird_detections ({col_str}, created_at, updated_at) "
+            f"VALUES ({placeholders}, ?, ?)"
+        )
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "DELETE FROM bird_detections WHERE filename = ?",
+                    (filename,)
+                )
+                for data in rows:
+                    values = [data.get(c) for c in cols]
+                    self._conn.execute(sql, values + [now, now])
+            self._safe_commit()
+        return len(rows)
+
+    def get_detections(self, filename: str) -> List[dict]:
+        """
+        返回一张照片的全部检测记录，按 bird_index 升序。
+
+        参数:
+        filename (str): 照片前缀（与 photos.filename 同键）
+
+        返回:
+        List[dict]: 检测记录列表；无记录时为空列表
+
+        Return all detections of one photo ordered by bird_index.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM bird_detections WHERE filename = ? "
+                "ORDER BY bird_index",
+                (filename,)
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_all_detections(self) -> List[dict]:
+        """返回全表检测记录，按 filename、bird_index 升序。/ All detections."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM bird_detections ORDER BY filename, bird_index"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def update_detection_species(
+        self,
+        filename: str,
+        bird_index: int,
+        species_cn: Optional[str],
+        species_en: Optional[str],
+        scientific_name: Optional[str] = None,
+        class_id: Optional[int] = None,
+    ) -> bool:
+        """
+        人工修改某一只鸟的物种（二期编辑功能入口，本期预留）。
+
+        参数:
+        filename (str): 照片前缀
+        bird_index (int): 鸟序号
+        species_cn / species_en / scientific_name (Optional[str]): 新物种名
+        class_id (Optional[int]): 新模型类别 ID（可反查时填）
+
+        返回:
+        bool: 是否命中并更新（无该行返回 False）
+
+        Manually overwrite the species of one detected bird.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE bird_detections SET species_cn = ?, species_en = ?, "
+                "scientific_name = ?, class_id = ?, edited = 1, updated_at = ? "
+                "WHERE filename = ? AND bird_index = ?",
+                (species_cn, species_en, scientific_name, class_id,
+                 _now_iso(), filename, bird_index)
+            )
+            updated = cursor.rowcount > 0
+            self._safe_commit()
+            return updated
 
     def get_photos_by_species(
         self,

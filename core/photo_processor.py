@@ -1217,6 +1217,8 @@ class PhotoProcessor:
             title_targets: List[str],
             source_filename: Optional[str] = None,
             bird_crop_pil=None,  # 主流水线已裁剪的 PIL Image，避免 BirdID 重跑 YOLO
+            multibird_birds=None,  # V5.0: all_birds（多鸟逐鸟分类；None=单鸟/关闭）
+            multibird_dims=None,   # V5.0: 处理图 (w, h)，bbox 坐标换算用
         ):
             if birdid_executor is None or identify_bird_fn is None:
                 return
@@ -1226,30 +1228,127 @@ class PhotoProcessor:
             try:
                 submit_start = time.time()
                 nf = self.settings.name_format if self.settings.name_format != "default" else None
-                future = birdid_executor.submit(
-                    identify_bird_fn,
-                    image_path,
-                    True,   # use_yolo
-                    True,   # use_gps
-                    self.settings.birdid_use_geo_filter,
-                    self.settings.birdid_country_code,
-                    self.settings.birdid_region_code,
-                    1,      # top_k
-                    nf,     # name_format
-                    bird_crop_pil,  # preloaded_crop
-                )
+
+                def _birdid_worker():
+                    """主鸟识别 + 多鸟逐鸟分类（同一线程串行，分类器有推理锁）。"""
+                    result = identify_bird_fn(
+                        image_path,
+                        True,   # use_yolo
+                        True,   # use_gps
+                        self.settings.birdid_use_geo_filter,
+                        self.settings.birdid_country_code,
+                        self.settings.birdid_region_code,
+                        1,      # top_k
+                        nf,     # name_format
+                        bird_crop_pil,  # preloaded_crop
+                    )
+                    # V5.0(multibird): 多鸟照片在同一 future 里接着做逐鸟分类，
+                    # 结果挂在返回 dict 上由 apply_birdid_result 统一落库。
+                    # 单鸟照片也走这里（正好一行主鸟记录，无额外推理）。
+                    # 原图仅在存在待分类的次要鸟时才读取：避免大批量排队期间
+                    # 闭包持有整幅原图，也避免单鸟时的无谓重读。
+                    if (multibird_birds and multibird_dims
+                            and result is not None):
+                        try:
+                            from core.multi_bird import classify_secondary_birds
+                            # 主鸟采纳标准与 apply_birdid_result 一致
+                            main_species = None
+                            if result.get('success') and result.get('results'):
+                                _top = result['results'][0]
+                                if float(_top.get('confidence') or 0) >= \
+                                        self.settings.birdid_confidence_threshold:
+                                    main_species = {
+                                        'cn': _top.get('cn_name'),
+                                        'en': _top.get('en_name'),
+                                        'scientific': _top.get('scientific_name'),
+                                        'confidence': _top.get('confidence'),
+                                        'class_id': _top.get('class_id'),
+                                        'gbif_rarity_100': _top.get('gbif_rarity_100'),
+                                    }
+                            _needs_orig = any(
+                                not b.get('is_selected')
+                                for b in multibird_birds)
+                            orig_img = (read_image_bgr(image_path)
+                                        if _needs_orig else None)
+                            if orig_img is not None or not _needs_orig:
+                                if orig_img is not None:
+                                    _oh, _ow = orig_img.shape[:2]
+                                else:
+                                    _ow, _oh = multibird_dims
+                                result['multibird_detections'] = classify_secondary_birds(
+                                    orig_image=orig_img,
+                                    all_birds=multibird_birds,
+                                    proc_dims=multibird_dims,
+                                    orig_dims=(_ow, _oh),
+                                    main_species=main_species,
+                                    filename=file_prefix,
+                                    photo_path=image_path,
+                                    min_area_ratio=self.config.multibird_min_area_ratio,
+                                    species_threshold=self.config.multibird_species_threshold,
+                                    use_geo_filter=self.settings.birdid_use_geo_filter,
+                                    country_code=self.settings.birdid_country_code,
+                                    region_code=self.settings.birdid_region_code,
+                                    name_format=nf,
+                                    identify_fn=identify_bird_fn,
+                                )
+                            del orig_img
+                        except Exception as _mb_e:
+                            self._log(f"  ⚠️ Multi-bird classify failed [{source_display}]: {_mb_e}", "warning")
+                    return result
+
+                future = birdid_executor.submit(_birdid_worker)
                 self._perf_add_stage('birdid_submit', (time.time() - submit_start) * 1000)
                 birdid_tasks.append((future, file_prefix, list(title_targets), source_display))
                 progress_state['birdid_submitted'] += 1
             except Exception as e:
                 self._log(f"  ⚠️ Bird ID failed [{source_display}]: {e}", "warning")
         
+        def apply_multibird_rows(file_prefix: str, rows: List[dict],
+                                 source_filename: Optional[str] = None):
+            """多鸟检测结果入库 + 已识别鸟的逐鸟日志（V5.0 multibird）。
+
+            主鸟行不入日志（已有单独的 Bird ID 日志行）；未识别的鸟只在
+            数据库中留框，不刷日志，避免大鸟群刷屏。
+            """
+            if not rows or not self.report_db:
+                return
+            source_display = source_filename or file_prefix or "?"
+            try:
+                self.report_db.insert_detections_batch(rows)
+            except Exception as e:
+                self._log(f"  ⚠️ Multi-bird DB write failed [{source_display}]: {e}", "warning")
+                return
+            identified = [r for r in rows
+                          if r.get('species_cn') or r.get('species_en')]
+            self._log(
+                f"  🐦🐦 Multi-bird [{source_display}]: "
+                f"{len(rows)} detected, {len(identified)} identified",
+                "species")
+            for r in rows:
+                if r.get('is_selected'):
+                    continue
+                name = r.get('species_cn') or r.get('species_en')
+                if not name:
+                    continue
+                area_pct = 100.0 * (r.get('area_ratio') or 0.0)
+                conf = r.get('species_confidence') or 0.0
+                self._log(
+                    f"     #{r.get('bird_index')} {name} ({conf:.0f}%) "
+                    f"area={area_pct:.2f}%", "species")
+
         def apply_birdid_result(
             file_prefix: str,
             title_targets: List[str],
             birdid_result: Dict,
             source_filename: Optional[str] = None
         ):
+            # V5.0(multibird): 多鸟行先取出——无论主鸟结果成败/是否过阈值，
+            # 检测框数据都要入库（主鸟识别失败时其行物种自然留空）。
+            multibird_rows = None
+            if isinstance(birdid_result, dict):
+                multibird_rows = birdid_result.pop('multibird_detections', None)
+            if multibird_rows:
+                apply_multibird_rows(file_prefix, multibird_rows, source_filename)
             if not birdid_result:
                 return
             if birdid_result.get('error'):
@@ -1925,8 +2024,8 @@ class PhotoProcessor:
                     mark_resume_completed(original_prefix)
                     continue
             
-                # V4.2: 解构 AI 结果（现在有 10 个返回值，包含 bird_count 和 rescued）
-                detected, _, confidence, sharpness, _, bird_bbox, img_dims, bird_mask, bird_count, rescued = result
+                # V4.2: 解构 AI 结果（现在有 11 个返回值，含 bird_count、rescued 和 all_birds）
+                detected, _, confidence, sharpness, _, bird_bbox, img_dims, bird_mask, bird_count, rescued, all_birds = result
             
                 # 多鸟场景才补读对焦点，并在需要时做一次 YOLO 复选（避免全量样本都读 RAW 对焦）
                 if detected and bird_count > 1 and can_read_focus_raw:
@@ -1948,7 +2047,7 @@ class PhotoProcessor:
                                 yolo_item.get('decoded_image'),
                             )
                             if refined_result is not None:
-                                detected, _, confidence, sharpness, _, bird_bbox, img_dims, bird_mask, bird_count, rescued = refined_result
+                                detected, _, confidence, sharpness, _, bird_bbox, img_dims, bird_mask, bird_count, rescued, all_birds = refined_result
                         except Exception:
                             pass
                         add_photo_stage('yolo_refine', (time.time() - refine_start) * 1000)
@@ -2702,12 +2801,21 @@ class PhotoProcessor:
                         # sharpness screen instead of "rating >= 2" — V2 assigns
                         # stars in the post-pass, so no instant rating exists here.
                         if self.settings.auto_identify and (
-                            rating_value >= 2 or (
+                            rating_value >= 2
+                            or (
                                 detected
                                 and confidence >= 0.5
                                 and not all_keypoints_hidden
                                 and normalized_sharpness >= 250
                             )
+                            # V5.0(multibird): 多鸟照片豁免粗筛——鸟群里的
+                            # 鸟通常小且主鸟未必清晰,但逐鸟分类正是为这种
+                            # 场景服务,不应被主鸟粗筛挡在门外。
+                            # V5.0: multi-bird photos bypass the coarse
+                            # screen; per-bird classification exists
+                            # precisely for small/crowded subjects.
+                            or (self.config.multibird_enabled
+                                and bird_count > 1)
                         ):
                             _birdid_crop_pil = None
                             if bird_crop_bgr is not None:
@@ -2719,12 +2827,19 @@ class PhotoProcessor:
                                     )
                                 except Exception:
                                     pass
+                            # V5.0(multibird): 多鸟照片随主鸟任务一起逐鸟分类
+                            # V5.0: 单鸟也传（入库一行主鸟记录，零额外推理）
+                            _mb_birds = (all_birds
+                                         if self.config.multibird_enabled
+                                         and all_birds else None)
                             submit_birdid_task(
                                 original_prefix,
                                 filepath,
                                 birdid_title_targets,
                                 os.path.basename(target_file_path),
                                 _birdid_crop_pil,
+                                multibird_birds=_mb_birds,
+                                multibird_dims=img_dims,
                             )
                 else:
                     # V3.4: 纯 JPEG 文件（没有对应 RAW）
@@ -2750,12 +2865,21 @@ class PhotoProcessor:
                         # sharpness screen instead of "rating >= 2" — V2 assigns
                         # stars in the post-pass, so no instant rating exists here.
                         if self.settings.auto_identify and (
-                            rating_value >= 2 or (
+                            rating_value >= 2
+                            or (
                                 detected
                                 and confidence >= 0.5
                                 and not all_keypoints_hidden
                                 and normalized_sharpness >= 250
                             )
+                            # V5.0(multibird): 多鸟照片豁免粗筛——鸟群里的
+                            # 鸟通常小且主鸟未必清晰,但逐鸟分类正是为这种
+                            # 场景服务,不应被主鸟粗筛挡在门外。
+                            # V5.0: multi-bird photos bypass the coarse
+                            # screen; per-bird classification exists
+                            # precisely for small/crowded subjects.
+                            or (self.config.multibird_enabled
+                                and bird_count > 1)
                         ):
                             _birdid_crop_pil = None
                             if bird_crop_bgr is not None:
@@ -2767,12 +2891,19 @@ class PhotoProcessor:
                                     )
                                 except Exception:
                                     pass
+                            # V5.0(multibird): 多鸟照片随主鸟任务一起逐鸟分类
+                            # V5.0: 单鸟也传（入库一行主鸟记录，零额外推理）
+                            _mb_birds = (all_birds
+                                         if self.config.multibird_enabled
+                                         and all_birds else None)
                             submit_birdid_task(
                                 original_prefix,
                                 filepath,
                                 [target_file_path],
                                 os.path.basename(target_file_path),
                                 _birdid_crop_pil,
+                                multibird_birds=_mb_birds,
+                                multibird_dims=img_dims,
                             )
 
                 # V3.4: 以下操作对 RAW 和纯 JPEG 都执行

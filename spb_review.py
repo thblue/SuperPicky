@@ -17,9 +17,9 @@ spb_review — 多鸟分类结果人工审阅工具
     python spb_review.py 照片.NEF --out D:/review --max-side 2400
 
 输出: 默认 <照片目录>/.superpicky/review/<前缀>_review.jpg
-标注: 红框=主鸟(评分对象) · 绿框=已识别 · 灰框=未识别/置信度不足
-      每框标注 序号 物种名 置信度%；中文用系统字体渲染（无 CJK 字体时
-      回退英文物种名）。
+标注: 红★=主鸟(评分对象) · 绿=已识别 · 灰=未识别（只画框不加字）
+      已识别的鸟在框上方标「物种名 置信度%」（白字黑描边，不铺背景条，
+      密集处自动避让下移；无 CJK 字体时物种名回退英文）。
 
 Overlay per-bird detection/classification results onto the original
 photo for manual review. Reads sidecar JSON first, falls back to
@@ -40,6 +40,10 @@ import numpy as np
 # 审阅图长边上限（原图 30MP+ 直接看不动，统一缩放）
 # Max long side of the annotated review image.
 DEFAULT_MAX_SIDE = 2400
+
+# 标注字号（像素，相对 2400 长边标定；白字黑描边，无背景条）
+# Label font size in pixels (calibrated for a 2400px long side).
+_LABEL_FONT_SIZE = 24
 
 # 支持的图片扩展（RAW 走 birdid.load_image 解码）
 # Supported extensions; RAW files decode via birdid.load_image.
@@ -193,40 +197,75 @@ def _load_detections(photo_path: str
     return None, None
 
 
-def _draw_label(img: np.ndarray, xy: Tuple[int, int], text: str,
-                color: Tuple[int, int, int], has_cjk: bool) -> None:
+def _render_labels(img: np.ndarray,
+                   labels: List[Tuple[int, int, str]]) -> None:
     """
-    在图上画一条带背景的标注文字（中文走 PIL，否则 cv2）。
+    一次性把全部文字标注渲染到图上（中文走 PIL，白字+黑描边）。
+
+    白色文字配黑色描边在任意背景（天空/水面/鸟群）上都可读，且不铺
+    背景条——把对鸟身的遮挡降到最低。无 CJK 字体时回退 cv2 原生渲染
+    （仅 ASCII 可靠，中文已在上游换成英文名）。
 
     参数:
     img (np.ndarray): BGR 图像（原地修改）
-    xy (Tuple[int,int]): 文字左下角位置
-    text (str): 标注内容
-    color (Tuple[int,int,int]): BGR 文字色
-    has_cjk (bool): 是否已确认有 CJK 字体（决定渲染路径）
+    labels (List[Tuple[int,int,str]]): (左上角x, 基线y, 文字) 列表
 
-    Draw a label with a solid background; PIL when CJK is available.
+    Render every text label in one pass: white text with a black
+    stroke, no background bar, minimising occlusion of the birds.
     """
-    x, y = xy
-    if has_cjk:
-        from PIL import Image, ImageDraw
-        font = _get_cjk_font(22)
-        if font is not None:
-            pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            draw = ImageDraw.Draw(pil)
-            bbox = draw.textbbox((x, y - 24), text, font=font)
-            draw.rectangle([bbox[0] - 4, bbox[1] - 2,
-                            bbox[2] + 4, bbox[3] + 2],
-                           fill=(color[2], color[1], color[0]))
-            draw.text((x, y - 24), text, font=font,
-                      fill=(color[2], color[1], color[0]))
-            img[:] = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-            return
-    # 无 CJK 字体：cv2 原生（仅 ASCII 可靠）
-    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-    cv2.rectangle(img, (x - 2, y - th - 8), (x + tw + 2, y), color, -1)
-    cv2.putText(img, text, (x, y - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    if not labels:
+        return
+    from PIL import Image, ImageDraw
+    pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil)
+    font = _get_cjk_font(_LABEL_FONT_SIZE)
+    if font is not None:
+        for x, y, text in labels:
+            draw.text((x, y), text, font=font, fill=(255, 255, 255),
+                      stroke_width=2, stroke_fill=(0, 0, 0))
+    else:
+        for x, y, text in labels:
+            draw.text((x, y), text, fill=(255, 255, 255),
+                      stroke_width=2, stroke_fill=(0, 0, 0))
+    img[:] = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+
+def _place_label_position(x1: int, y1: int, x2: int, y2: int,
+                          text_w: int, text_h: int, img_h: int,
+                          placed: List[Tuple[int, int, int, int]]
+                          ) -> Tuple[int, int]:
+    """
+    计算一个标注的落点：默认在框正上方，越界/与已放标注重叠时下移。
+
+    密集鸟群里相邻标注容易互相覆盖，这里做轻量贪心避让：从框上方
+    开始，与任一已放置矩形相交就整体下移一个行高，最多尝试 6 次，
+    仍冲突就放弃避让（宁可重叠也不把文字挪到别处误导审阅）。
+
+    参数:
+    x1, y1, x2, y2 (int): 检测框（缩放后坐标）
+    text_w / text_h (int): 标注文字的宽高
+    img_h (int): 图像高度
+    placed (List): 已放置标注的 (x, y, w, h) 列表
+
+    返回:
+    Tuple[int, int]: 文字左上角 (x, y)
+
+    Place a label above its box, shifting down on collision.
+    """
+    step = text_h + 4
+    x = x1
+    y = y1 - text_h - 4
+    if y < 2:                       # 框贴顶 → 放框下方
+        y = y2 + 4
+    for _ in range(6):
+        rect = (x, y, x + text_w, y + text_h)
+        if not any(rect[0] < p[2] and rect[2] > p[0]
+                   and rect[1] < p[3] and rect[3] > p[1] for p in placed):
+            placed.append(rect)
+            return x, y
+        y += step                   # 与已有标注重叠 → 下移一行再试
+    placed.append((x, y, x + text_w, y + text_h))
+    return x, y
 
 
 def annotate_photo(photo_path: str, out_path: str,
@@ -262,7 +301,11 @@ def annotate_photo(photo_path: str, out_path: str,
                          interpolation=cv2.INTER_AREA)
 
     has_cjk = _get_cjk_font() is not None
-    identified = sum(1 for d in detections if d.get("species"))
+    img_h = img.shape[0]
+    # 标注先收集、最后一次性渲染（一次 PIL 往返，快且描边一致）
+    # Collect labels first, render once at the end.
+    pending_labels: List[Tuple[int, int, int, int, str]] = []
+    placed: List[Tuple[int, int, int, int]] = []
 
     for det in detections:
         bbox = det.get("bbox")
@@ -275,44 +318,33 @@ def annotate_photo(photo_path: str, out_path: str,
         species = det.get("species")
         if is_sel:
             color = (0, 0, 255)          # 红：主鸟
+            thickness = 2
         elif species:
             color = (0, 180, 0)          # 绿：已识别
+            thickness = 1               # 细框 / thin frame
         else:
-            color = (160, 160, 160)      # 灰：未识别
-        thickness = max(1, int(round(3 * scale)) if is_sel
-                        else round(1.5 * scale))
+            color = (160, 160, 160)      # 灰：未识别，只画框不加文字
+            thickness = 1
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness,
+                      lineType=cv2.LINE_AA)
 
-        # 轮廓多边形（细线，同色）
-        poly = det.get("polygon")
-        if poly:
-            pts = np.array([[int(p[0] * scale), int(p[1] * scale)]
-                            for p in poly], dtype=np.int32)
-            cv2.polylines(img, [pts], isClosed=True, color=color,
-                          thickness=1, lineType=cv2.LINE_AA)
-
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
-
-        # 标注文字：#序号 [主] 物种 置信度%
-        idx = det.get("index", "?")
-        if species:
-            name = species.get("cn") or species.get("en") or "?"
-            if not has_cjk and species.get("en"):
-                name = species["en"]     # 无中文字体时用英文名
-            conf = species.get("confidence")
-            label = f"#{idx} {name}"
-            if conf is not None:
-                label += f" {conf:.0f}%"
-        else:
-            label = f"#{idx} 未识别" if has_cjk else f"#{idx} unID"
+        # 文字标注：只有已识别的鸟才有（物种名 置信度%），主鸟加 ★
+        # Label identified birds only: "species conf%" (★ = main).
+        if not species:
+            continue
+        name = species.get("cn") or species.get("en") or "?"
+        if not has_cjk and species.get("en"):
+            name = species["en"]         # 无中文字体时用英文名
+        conf = species.get("confidence")
+        label = f"{name} {conf:.0f}%" if conf is not None else name
         if is_sel:
-            label += " ★" if has_cjk else " [main]"
-        _draw_label(img, (x1, max(y1, 26)), label, color, has_cjk)
+            label = "★ " + label
+        text_w = int(len(label) * _LABEL_FONT_SIZE * 0.9)
+        lx, ly = _place_label_position(x1, y1, x2, y2, text_w,
+                                       _LABEL_FONT_SIZE, img_h, placed)
+        pending_labels.append((lx, ly, label))
 
-    # 顶部图例条
-    legend = (f"{os.path.basename(photo_path)}  "
-              f"detected={len(detections)} identified={identified}")
-    if has_cjk:
-        _draw_label(img, (10, 30), legend, (0, 0, 0), has_cjk)
+    _render_labels(img, [(lx, ly, t) for lx, ly, t in pending_labels])
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])

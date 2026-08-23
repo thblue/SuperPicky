@@ -103,7 +103,7 @@ class AdvancedConfig:
         # main-bird selection and rating pipeline stay untouched.
         "multibird_enabled": True,           # 总开关（仅多鸟照片生效）
         "multibird_min_area_ratio": 0.001,   # bbox 面积/图面积 < 此值只入框不分类（太小看不清）
-        "multibird_species_threshold": 50,   # 逐鸟分类采纳阈值(%)，低于则物种字段留空
+        "multibird_species_threshold": 35,   # 逐鸟分类采纳阈值(%)，低于此值为「未采纳」（数据仍入库，展示层分档）
 
         # 外部编辑应用（右键菜单 "用 X 打开"）
         # 每项格式：{"name": "显示名称", "path": "/Applications/...app"}
@@ -375,7 +375,7 @@ class AdvancedConfig:
     @property
     def multibird_species_threshold(self) -> float:
         """逐鸟分类采纳阈值(%) / Per-bird species adoption threshold (percent)."""
-        return float(self.config.get("multibird_species_threshold", 50))
+        return float(self.config.get("multibird_species_threshold", 35))
 
     # Setter方法
     def set_min_confidence(self, value):

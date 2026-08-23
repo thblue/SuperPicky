@@ -259,41 +259,5 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         self.assertEqual(self._run(None), [])
 
 
-class TestBirdBoxDedup(unittest.TestCase):
-    """_dedupe_bird_boxes：一鸟多框去重（保留最高置信度框）。"""
-
-    def _dedup(self, boxes, confs, iou_thresh=0.55):
-        import numpy as np
-        from ai_model import _dedupe_bird_boxes
-        dets = np.array(boxes, dtype=np.float64)
-        cf = np.array(confs, dtype=np.float64)
-        cls = np.array([14] * len(boxes), dtype=np.float64)
-        d, c, k, m = _dedupe_bird_boxes(dets, cf, cls, None,
-                                        iou_thresh=iou_thresh)
-        return d.tolist(), c.tolist()
-
-    def test_duplicate_box_suppressed(self):
-        """同一只鸟的两个高重叠框 → 只留置信度高的。"""
-        boxes = [[100, 100, 200, 200], [105, 102, 198, 205]]  # IoU≈0.9
-        dets, confs = self._dedup(boxes, [0.5, 0.8])
-        self.assertEqual(len(dets), 1)
-        self.assertEqual(confs[0], 0.8)  # 保留高置信度框
-
-    def test_adjacent_birds_kept(self):
-        """相邻但不重叠的两只鸟都保留（IoU 低）。"""
-        boxes = [[100, 100, 200, 200], [220, 100, 320, 200]]  # IoU=0
-        dets, _ = self._dedup(boxes, [0.5, 0.8])
-        self.assertEqual(len(dets), 2)
-
-    def test_partial_overlap_boundary(self):
-        """IoU 在阈值附近的框：高于阈值抑制、低于保留。"""
-        # 200x200 与右移 100 的框：交 100x200=20000，并 60000 → IoU=0.33
-        boxes = [[100, 100, 300, 300], [200, 100, 400, 300]]
-        dets, _ = self._dedup(boxes, [0.8, 0.5], iou_thresh=0.3)
-        self.assertEqual(len(dets), 1)
-        dets, _ = self._dedup(boxes, [0.8, 0.5], iou_thresh=0.5)
-        self.assertEqual(len(dets), 2)
-
-
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -270,7 +270,7 @@ def _place_label_position(x1: int, y1: int, x2: int, y2: int,
 
 def annotate_photo(photo_path: str, out_path: str,
                    max_side: int = DEFAULT_MAX_SIDE,
-                   threshold: float = 50.0) -> bool:
+                   threshold: float = 35.0) -> bool:
     """
     生成一张照片的审阅叠加图。
 
@@ -391,9 +391,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="输出目录（默认 <照片目录>/.superpicky/review）")
     parser.add_argument("--max-side", type=int, default=DEFAULT_MAX_SIDE,
                         help=f"审阅图长边上限（默认 {DEFAULT_MAX_SIDE}）")
-    parser.add_argument("--threshold", type=float, default=50.0,
+    parser.add_argument("--threshold", type=float, default=35.0,
                         help="采纳阈值(%%)：置信度≥此值为绿框，低于但有"
-                             "分类结果为橙框（默认 50，调阈值时改这里）")
+                             "分类结果为橙框（默认 35，调阈值时改这里）")
     args = parser.parse_args(argv)
 
     photos = _collect_photos(args.inputs)

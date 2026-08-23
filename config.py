@@ -367,6 +367,13 @@ class AIConfig:
     # V4.6: 无鸟补救扫描参数 / No-bird rescue scan parameters
     RESCUE_IMGSZ: int = 1024      # 补救重扫推理分辨率 / rescue rescan imgsz
     RESCUE_CONF: float = 0.05     # 补救重扫置信度地板 / rescue conf floor
+    # V5.0(multibird): 补救扫描带回多鸟列表的 YOLO 置信度地板。RESCUE_CONF
+    # (0.05) 服务于「主鸟救回」的弱候选守门，但全量带回 0.05 级的碎小框
+    # 只会给逐鸟分类制造噪音（误检+低置信怪结果）；0.2 实测能滤掉碎框
+    # 且不丢真实远距小鸟。救回候选本身不受此限制（永远带回）。
+    # V5.0: min YOLO conf for the rescued multi-bird bring-back list.
+    # The rescued candidate itself is always included regardless.
+    RESCUE_MULTIBIRD_MIN_CONF: float = 0.2
     # COCO 中飞鸟常被误认的类别 / COCO classes birds in flight are mistaken for
     RESCUE_CONFUSABLE_CLASS_IDS: dict = field(
         default_factory=lambda: {4: "airplane", 33: "kite"})

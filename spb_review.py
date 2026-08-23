@@ -270,7 +270,8 @@ def _place_label_position(x1: int, y1: int, x2: int, y2: int,
 
 def annotate_photo(photo_path: str, out_path: str,
                    max_side: int = DEFAULT_MAX_SIDE,
-                   threshold: float = 35.0) -> bool:
+                   threshold: float = 35.0,
+                   hide_below: float = 35.0) -> bool:
     """
     生成一张照片的审阅叠加图。
 
@@ -278,16 +279,17 @@ def annotate_photo(photo_path: str, out_path: str,
     photo_path (str): 原照片路径（不被修改）
     out_path (str): 输出 JPEG 路径
     max_side (int): 输出图长边上限
-    threshold (float): 采纳阈值(%)——置信度 ≥ 此值为绿框（采纳），
-        有分类结果但低于此值为橙框（同样标注鸟名+置信度，便于调阈值），
-        未分类（面积过小未送分类/失败）为灰框只画框
+    threshold (float): 采纳阈值(%)——置信度 ≥ 此值为绿框（采纳）
+    hide_below (float): 隐藏标注阈值(%)——置信度低于此值只画框不标
+        文字（默认与 threshold 同为 35，即低于 35% 的低置信结果不显示
+        怪鸟名，只保留橙框占位）。设 0 可显示全部标注。
 
     返回:
     bool: 是否成功生成
 
-    Render the annotated review image for one photo. Green = adopted
-    (conf >= threshold), orange = classified but below threshold
-    (labelled too, for threshold tuning), gray = not classified.
+    Render the annotated review image. Green = adopted (>= threshold),
+    orange labelled between hide_below and threshold, orange box-only
+    below hide_below, gray = not classified.
     """
     detections, _sidecar = _load_detections(photo_path)
     if not detections:
@@ -338,9 +340,12 @@ def annotate_photo(photo_path: str, out_path: str,
         cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness,
                       lineType=cv2.LINE_AA)
 
-        # 文字标注：有分类结果的鸟都标（物种名 置信度%），主鸟加 ★
-        # Label every classified bird: "species conf%" (★ = main).
+        # 文字标注：conf ≥ hide_below 才标（物种名 置信度%），主鸟加 ★；
+        # 低于 hide_below 的只留橙框不标文字（低置信怪结果不干扰审阅）
+        # Label when conf >= hide_below; box-only below that.
         if not species:
+            continue
+        if conf is not None and conf < hide_below:
             continue
         name = species.get("cn") or species.get("en") or "?"
         if not has_cjk and species.get("en"):
@@ -392,8 +397,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-side", type=int, default=DEFAULT_MAX_SIDE,
                         help=f"审阅图长边上限（默认 {DEFAULT_MAX_SIDE}）")
     parser.add_argument("--threshold", type=float, default=35.0,
-                        help="采纳阈值(%%)：置信度≥此值为绿框，低于但有"
-                             "分类结果为橙框（默认 35，调阈值时改这里）")
+                        help="采纳阈值(%%)：置信度≥此值为绿框（默认 35）")
+    parser.add_argument("--hide-below", type=float, default=35.0,
+                        help="隐藏标注阈值(%%)：低于此值只画框不标文字，"
+                             "设 0 显示全部标注（默认 35）")
     args = parser.parse_args(argv)
 
     photos = _collect_photos(args.inputs)
@@ -408,7 +415,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         out_dir = args.out or os.path.join(directory, ".superpicky", "review")
         out_path = os.path.join(out_dir, f"{prefix}_review.jpg")
         if annotate_photo(photo, out_path, max_side=args.max_side,
-                          threshold=args.threshold):
+                          threshold=args.threshold,
+                          hide_below=args.hide_below):
             print(f"  ✅ {out_path}")
             done += 1
     print(f"完成: {done}/{len(photos)}")

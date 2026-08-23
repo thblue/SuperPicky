@@ -259,5 +259,86 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         self.assertEqual(self._run(None), [])
 
 
+class TestBirdBoxDedup(unittest.TestCase):
+    """_dedupe_bird_boxes：一鸟多框去重（保留最高置信度框）。"""
+
+    def _dedup(self, boxes, confs, iou_thresh=0.55):
+        import numpy as np
+        from ai_model import _dedupe_bird_boxes
+        dets = np.array(boxes, dtype=np.float64)
+        cf = np.array(confs, dtype=np.float64)
+        cls = np.array([14] * len(boxes), dtype=np.float64)
+        d, c, k, m = _dedupe_bird_boxes(dets, cf, cls, None,
+                                        iou_thresh=iou_thresh)
+        return d.tolist(), c.tolist()
+
+    def test_duplicate_box_suppressed(self):
+        """同一只鸟的两个高重叠框 → 只留置信度高的。"""
+        boxes = [[100, 100, 200, 200], [105, 102, 198, 205]]  # IoU≈0.9
+        dets, confs = self._dedup(boxes, [0.5, 0.8])
+        self.assertEqual(len(dets), 1)
+        self.assertEqual(confs[0], 0.8)  # 保留高置信度框
+
+    def test_adjacent_birds_kept(self):
+        """相邻但不重叠的两只鸟都保留（IoU 低）。"""
+        boxes = [[100, 100, 200, 200], [220, 100, 320, 200]]  # IoU=0
+        dets, _ = self._dedup(boxes, [0.5, 0.8])
+        self.assertEqual(len(dets), 2)
+
+    def test_partial_overlap_boundary(self):
+        """IoU 在阈值附近的框：高于阈值抑制、低于保留。"""
+        # 200x200 与右移 100 的框：交 100x200=20000，并 60000 → IoU=0.33
+        boxes = [[100, 100, 300, 300], [200, 100, 400, 300]]
+        dets, _ = self._dedup(boxes, [0.8, 0.5], iou_thresh=0.3)
+        self.assertEqual(len(dets), 1)
+        dets, _ = self._dedup(boxes, [0.8, 0.5], iou_thresh=0.5)
+        self.assertEqual(len(dets), 2)
+
+
+class TestRescueMultibirdConfFloor(unittest.TestCase):
+    """rescue 带回多鸟列表的 0.2 置信度地板（碎小误检框不带回）。"""
+
+    def test_low_conf_birds_filtered_from_bringback(self):
+        """rescue 结果的 detections 数组只含 conf≥0.2 的鸟 + 救回候选。"""
+        import numpy as np
+        import torch
+        import ai_model
+
+        class _FakeBoxes:
+            def __init__(self, xyxy, conf, cls):
+                self.xyxy = torch.tensor(xyxy, dtype=torch.float32)
+                self.conf = torch.tensor(conf, dtype=torch.float32)
+                self.cls = torch.tensor(cls, dtype=torch.float32)
+
+            def __len__(self):
+                return len(self.conf)
+
+        class _FakeResult:
+            def __init__(self, boxes):
+                self.boxes = boxes
+                self.masks = None
+
+        class _FakeModel:
+            def __init__(self, xyxy, conf, cls):
+                self._r = _FakeResult(_FakeBoxes(xyxy, conf, cls))
+
+            def __call__(self, image, **kwargs):
+                return [self._r]
+
+        model = _FakeModel(
+            [[10, 10, 60, 60],      # 0.42 主候选（直接救回）
+             [100, 100, 150, 150],  # 0.25 ≥0.2 保留
+             [200, 200, 240, 240]],  # 0.08 <0.2 过滤掉
+            [0.42, 0.25, 0.08], [14, 14, 14])
+        r = ai_model._rescue_scan(model, np.zeros((683, 1024, 3), np.uint8),
+                                  0.3, 10, ".", None)
+        self.assertIsNotNone(r)
+        confs = sorted(float(c) for c in r["detection_confs"])
+        # 0.08 的碎框被过滤，只剩主候选 + 0.25 那只（float32 精度用近似）
+        self.assertEqual(len(confs), 2)
+        self.assertAlmostEqual(confs[0], 0.25, places=5)
+        self.assertAlmostEqual(confs[1], 0.42, places=5)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

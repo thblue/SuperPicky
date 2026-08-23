@@ -208,13 +208,16 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
         # V5.0(multibird): 救回时带回重扫的全部鸟框（含救回候选），让
         # 调用方重建完整的 all_birds——鸟群照第一遍 640 分辨率常整体漏检，
         # 补救扫描是它们唯一的检测来源，只带回最佳一只会让逐鸟分类
-        # 拿到 bird_count=1 永远不触发。混淆类候选（airplane/kite）不在
-        # 鸟类索引中，追加在末尾，由调用方统一按鸟类处理（已过识鸟守门）。
-        # V5.0: carry every rescanned bird box back so the caller can
-        # rebuild the full all_birds list; distant flocks are often only
-        # detected by this rescan. A confusable-class rescue candidate is
-        # appended (it already passed the BirdID gate).
-        keep = [int(j) for j in bird_ix]
+        # 拿到 bird_count=1 永远不触发。带回列表按 RESCUE_MULTIBIRD_MIN_CONF
+        # (0.2) 过滤碎小误检框；混淆类候选（airplane/kite）不在鸟类索引中，
+        # 追加在末尾，由调用方统一按鸟类处理（已过识鸟守门）。
+        # V5.0: carry every rescanned bird box back (conf >= 0.2 floor
+        # against junk fragments) so the caller can rebuild the full
+        # all_birds list; distant flocks are often only detected by this
+        # rescan. A confusable-class rescue candidate is appended (it
+        # already passed the BirdID gate).
+        keep = [int(j) for j in bird_ix
+                if confs[j] >= config.ai.RESCUE_MULTIBIRD_MIN_CONF]
         if i not in keep:
             keep.append(i)
         return {
@@ -303,6 +306,70 @@ def _mask_to_polygon(masks, idx: int, width: int, height: int,
         return [[int(p[0][0]), int(p[0][1])] for p in approx]
     except Exception:
         return None
+
+
+def _iou_xyxy(a, b) -> float:
+    """
+    计算两个 xyxy 框的 IoU（交并比）。
+
+    参数:
+    a / b: (x1, y1, x2, y2) 框坐标（np 行或序列均可）
+
+    返回:
+    float: IoU，0~1；任一框面积为 0 时返回 0
+
+    IoU of two xyxy boxes.
+    """
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, float(ix2 - ix1)), max(0.0, float(iy2 - iy1))
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, float(ax2 - ax1)) * max(0.0, float(ay2 - ay1))
+    area_b = max(0.0, float(bx2 - bx1)) * max(0.0, float(by2 - by1))
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _dedupe_bird_boxes(detections, confidences, class_ids, masks,
+                       iou_thresh: float = 0.55):
+    """
+    对鸟类框做贪心 NMS 去重（同一只鸟多个框时只保留置信度最高的）。
+
+    补救扫描用 RESCUE_CONF=0.05 的低置信度地板，YOLO 内建 NMS（IoU 0.7）
+    对密集小鸟群太宽松，同一只鸟常留下两个大小相近的框。这里按置信度
+    降序贪心保留，抑制与已保留框 IoU > iou_thresh 的鸟类框；非鸟类框
+    原样保留。四个数组同步过滤，索引保持一致。
+
+    参数:
+    detections / confidences / class_ids / masks: 解析后的 YOLO 数组
+    iou_thresh (float): 去重 IoU 阈值（相邻不重叠的两只鸟 IoU 通常 <0.4）
+
+    返回:
+    tuple: 过滤后的 (detections, confidences, class_ids, masks)
+
+    Greedy NMS over bird-class boxes so one bird keeps one box.
+    All four arrays are filtered consistently.
+    """
+    bird_ix = [i for i, c in enumerate(class_ids)
+               if int(c) == config.ai.BIRD_CLASS_ID]
+    keep_mask = np.ones(len(detections), dtype=bool)
+    for a in sorted(bird_ix, key=lambda i: -float(confidences[i])):
+        if not keep_mask[a]:
+            continue
+        for b in bird_ix:
+            if b == a or not keep_mask[b]:
+                continue
+            if _iou_xyxy(detections[a], detections[b]) > iou_thresh:
+                keep_mask[b] = False
+    if bool(keep_mask.all()):
+        return detections, confidences, class_ids, masks
+    kept_masks = masks[keep_mask] if masks is not None else None
+    return (detections[keep_mask], confidences[keep_mask],
+            class_ids[keep_mask], kept_masks)
 
 
 def detect_and_draw_birds(
@@ -439,6 +506,10 @@ def detect_and_draw_birds(
     # 数据已转为 numpy，立即释放 YOLO results（含 GPU tensor），避免长批次显存堆积
     del results
 
+    # V5.0(multibird): 鸟类框 NMS 去重（同一只鸟可能留下多个框）
+    detections, confidences, class_ids, masks = _dedupe_bird_boxes(
+        detections, confidences, class_ids, masks)
+
     # V4.2: 收集所有检测到的鸟
     # V5.0(multibird): 每项附 area_ratio 与 mask_polygon（处理图坐标），
     # 供逐鸟分类/入库使用；masks 此时可用，轮廓压缩在此完成。
@@ -488,6 +559,10 @@ def detect_and_draw_birds(
                     class_ids = np.full(len(confidences),
                                         float(config.ai.BIRD_CLASS_ID))
                     masks = _rescue.get("detection_masks")
+                    # V5.0(multibird): 重扫数组同样去重后再重建 all_birds
+                    detections, confidences, class_ids, masks = (
+                        _dedupe_bird_boxes(detections, confidences,
+                                           class_ids, masks))
                     all_birds = []
                     for pos in range(len(detections)):
                         dx1, dy1, dx2, dy2 = [int(v) for v in detections[pos]]

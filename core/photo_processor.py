@@ -3165,6 +3165,21 @@ class PhotoProcessor:
         
         # 注意：report_db 在 run() 方法结束时关闭，因为后续阶段仍需要使用
         
+        # V5.0(sidecar): 批末导出每照片 JSON（非破坏工作流的数据出口，
+        # 网站数据源），写入 .superpicky/meta/<前缀>.json。增量、保 edits。
+        # V5.0: export per-photo JSON sidecars (external data contract).
+        if self.report_db is not None:
+            try:
+                from core.sidecar_export import export_directory_sidecars
+                _n_sidecar = export_directory_sidecars(
+                    self.report_db, self.dir_path, log=self._log)
+                if _n_sidecar:
+                    self._log(
+                        f"  📝 Sidecar 导出: {_n_sidecar} 个 JSON → "
+                        f".superpicky/meta/ (per-photo rich data)")
+            except Exception as _sc_e:
+                self._log(f"  ⚠️ Sidecar export failed: {_sc_e}", "warning")
+
         self._perf_finalize()
         
         ai_total_time = time.time() - ai_total_start

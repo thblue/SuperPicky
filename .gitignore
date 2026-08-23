@@ -149,3 +149,8 @@ docs/Promotion/
 # iRateBird 原始 figshare CSV（未随仓库分发，需开发者手动下载）
 # iRateBird raw figshare CSVs (not distributed with the repo; download manually)
 scripts_dev/data_sources/
+
+# V5.0 开发测试产物 / dev test artifacts
+.smoke_test/
+.zcode/
+img/IMG_5214.CR3

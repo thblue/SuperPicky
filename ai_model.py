@@ -10,7 +10,7 @@ import time
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from typing import Optional
+from typing import Optional, Tuple
 from tools.utils import log_message
 from config import config, get_lazy_registry, ensure_cv2_thread_pool
 
@@ -68,6 +68,34 @@ def read_image_bgr(image_path: str) -> Optional[np.ndarray]:
         if data.size == 0:
             return None
         return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def read_image_dims(image_path: str) -> Optional[Tuple[int, int]]:
+    """
+    仅解析图像头部获取宽高 (w, h)，不解码像素数据。
+
+    用于 bbox 坐标换算等只需要尺寸的场景：45MP JPEG 整图解码约
+    200-400ms，而 PIL 惰性打开只读头部（约 1ms），且不占用解码
+    内存。HEIF 需 pillow-heif 已注册才能识别，未注册时抛异常由
+    调用方回退。
+
+    参数:
+    image_path (str): 图像文件路径
+
+    返回:
+    Optional[Tuple[int, int]]: (宽, 高)；头部无法解析时 None
+
+    Read only the image header for (width, height) without decoding
+    pixels — for size-only consumers such as bbox coordinate scaling.
+    A 45MP JPEG full decode costs 200-400ms while the header probe is
+    ~1ms. Returns None when the header cannot be parsed.
+    """
+    try:
+        from PIL import Image
+        with Image.open(image_path) as im:
+            return im.size
     except Exception:
         return None
 

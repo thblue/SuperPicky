@@ -31,7 +31,7 @@ from datetime import datetime
 
 # 现有模块
 from tools.find_bird_util import raw_to_jpeg
-from ai_model import load_yolo_model, detect_and_draw_birds, read_image_bgr
+from ai_model import load_yolo_model, detect_and_draw_birds, read_image_bgr, read_image_dims
 from tools.report_db import ReportDB
 from tools.exiftool_manager import get_exiftool_manager
 from tools.file_utils import ensure_hidden_directory, clear_readonly_attribute
@@ -1245,8 +1245,9 @@ class PhotoProcessor:
                     # V5.0(multibird): 多鸟照片在同一 future 里接着做逐鸟分类，
                     # 结果挂在返回 dict 上由 apply_birdid_result 统一落库。
                     # 单鸟照片也走这里（正好一行主鸟记录，无额外推理）。
-                    # 原图仅在存在待分类的次要鸟时才读取：避免大批量排队期间
-                    # 闭包持有整幅原图，也避免单鸟时的无谓重读。
+                    # 原图仅在存在待分类的次要鸟时才整图解码：避免大批量排队
+                    # 期间闭包持有整幅原图，也避免单鸟时的无谓重读；单鸟时
+                    # 仍需原图精确尺寸做 bbox 换算，改用头部探测取宽高。
                     if (multibird_birds and multibird_dims
                             and result is not None):
                         try:
@@ -1274,7 +1275,24 @@ class PhotoProcessor:
                                 if orig_img is not None:
                                     _oh, _ow = orig_img.shape[:2]
                                 else:
-                                    _ow, _oh = multibird_dims
+                                    # 单鸟照片：不整图解码，但 bbox/polygon 换算
+                                    # 必须用原图真实尺寸，否则缩放比恒为 1，
+                                    # 框会以 1024 处理图坐标入库（编辑器里就是
+                                    # 一个错位的小点）。头部探测失败才回退处理
+                                    # 图尺寸并告警。
+                                    # Single-bird photo: no full decode, but the
+                                    # bbox/polygon scaling still requires the
+                                    # exact original size — falling back to the
+                                    # processed dims would keep scale at 1.0 and
+                                    # store coordinates in 1024-space.
+                                    _dims = read_image_dims(image_path)
+                                    if _dims is None:
+                                        self._log(
+                                            f"  ⚠️ Header size probe failed, "
+                                            f"bbox kept unscaled [{source_display}]",
+                                            "warning")
+                                        _dims = multibird_dims
+                                    _ow, _oh = _dims
                                 _rows = classify_secondary_birds(
                                     orig_image=orig_img,
                                     all_birds=multibird_birds,

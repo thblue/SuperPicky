@@ -210,8 +210,14 @@ class _ZoomCropView(QWidget):
                           QRect(int(self._off_x), int(self._off_y),
                                 max(1, int(vw)), max(1, int(vh))))
         if self._zoom > 1.05:
-            painter.setPen(QPen(QColor(255, 220, 0), 1))
-            painter.drawText(8, 16, f"{self._zoom:.1f}x")
+            # 半透明底衬 + 描边，缩放倍数不再与照片内容视觉混叠
+            # Semi-transparent chip keeps the zoom readout readable and
+            # visually separate from the photo underneath.
+            zoom_text = f"{self._zoom:.1f}x"
+            chip_w = 10 + 8 * len(zoom_text)
+            painter.fillRect(6, 4, chip_w, 20, QColor(0, 0, 0, 150))
+            painter.setPen(QPen(QColor(255, 220, 0)))
+            painter.drawText(10, 19, zoom_text)
         painter.end()
 
     def wheelEvent(self, event):  # noqa: N802
@@ -359,6 +365,18 @@ class _BirdCanvas(QWidget):
         return (species.get("scientific") or species.get("cn")
                 or species.get("en") or "")
 
+    def _det_species_label(self, det: dict) -> str:
+        """
+        检测项的鸟种显示名：中文优先（用户主语言），回退英文/学名。
+        筛选 chips 用它显示，键仍用 _det_species_key 保证唯一。
+        Display name for a detection: Chinese first, then English, then
+        the scientific name. Used by the filter chips; uniqueness still
+        comes from _det_species_key.
+        """
+        species = det.get("species") or {}
+        return (species.get("cn") or species.get("en")
+                or species.get("scientific") or "")
+
     def set_selected(self, index: int) -> None:
         self._selected = index
         self.update()
@@ -497,9 +515,13 @@ class MultibirdEditorDialog(QDialog):
     - 重新标记某框鸟种（标记后 edited=true，视为人工结果）
     - 软删除误检框（deleted=true，画布不再显示）
     - 主鸟种复选（≤3，写入顶层 main_species）
+    - 星级快调（右侧按钮/数字键 0-3，X=无鸟）：本地写 JSON，同时发
+      rating_change_requested 信号由宿主浏览器走 DB/EXIF/移动目录链路
 
     Manual multi-bird editor dialog; edits persist to the sidecar JSON.
     """
+
+    rating_change_requested = Signal(int)
 
     def __init__(self, photo: dict, directory: str, parent=None,
                  load_async: bool = True):
@@ -669,6 +691,48 @@ class MultibirdEditorDialog(QDialog):
             f"padding: 4px;")
         right_lay.addWidget(usage)
 
+        # -- 星级快调（AI 误判"稀有鸟"把平庸片顶上 2★+ 时，
+        #    改鸟种 + 降星在同一屏完成；数字键 0-3 / X 同效）--
+        rating_box = QGroupBox("星级")
+        rating_row = QHBoxLayout(rating_box)
+        rating_row.setSpacing(6)
+        # 当前档位大字显示：不看按钮也能知道级别
+        # Big always-visible readout of the current level.
+        self._rating_display = QLabel("—")
+        self._rating_display.setStyleSheet(
+            f"color: {COLORS['star_gold']}; font-size: 15px;"
+            f"background: transparent; padding: 0 4px;")
+        rating_row.addWidget(self._rating_display)
+        rating_row.addStretch(1)
+        self._rating_buttons: dict = {}
+        for val, label in ((-1, "❌"), (0, "0★"), (1, "1★"),
+                           (2, "2★"), (3, "3★")):
+            btn = QPushButton(label)
+            btn.setObjectName("tertiary")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            # 必须带 :checked 高亮——全局 #tertiary 无选中态，
+            # 没有它点击后毫无视觉反馈（档位也看不出来）
+            # Must include a :checked state: the global #tertiary style
+            # has none, leaving clicks without any visual feedback.
+            btn.setStyleSheet(
+                f"QPushButton {{ padding: 4px 10px; font-size: 12px;"
+                f" border: 1px solid {COLORS['border']}; border-radius: 5px;"
+                f" color: {COLORS['text_secondary']};"
+                f" background: {COLORS['bg_input']}; }}"
+                f"QPushButton:hover {{ border-color: {COLORS['text_muted']};"
+                f" color: {COLORS['text_primary']}; }}"
+                f"QPushButton:checked {{ border-color: {COLORS['accent']};"
+                f" background: {COLORS['accent_dim']};"
+                f" color: {COLORS['accent']}; font-weight: 600; }}")
+            btn.setToolTip("无鸟（快捷键 X）" if val == -1
+                           else f"{val} 星（快捷键 {val}）")
+            btn.clicked.connect(lambda _=False, v=val: self._set_rating(v))
+            self._rating_buttons[val] = btn
+            rating_row.addWidget(btn)
+        right_lay.addWidget(rating_box)
+        self._sync_rating_buttons()
+
         # -- 选中鸟区域 --
         box = QGroupBox("选中鸟")
         box_lay = QVBoxLayout(box)
@@ -712,9 +776,13 @@ class MultibirdEditorDialog(QDialog):
 
         self._info_label = QLabel("-")
         self._info_label.setWordWrap(True)
-        self._info_label.setMinimumHeight(44)  # 固定两行高度，防切换时布局跳动
+        # 固定三行高度：换行到第三行时不再与下方按钮行贴边
+        # Fixed three-line height so a wrapped 3rd line never touches
+        # the button row below.
+        self._info_label.setMinimumHeight(60)
         self._info_label.setStyleSheet(
-            f"color: {COLORS['text_secondary']}; padding: 2px;")
+            f"color: {COLORS['text_secondary']}; padding: 2px;"
+            f"background: transparent;")
         box_lay.addWidget(self._info_label)
 
         btn_row = QHBoxLayout()
@@ -729,19 +797,15 @@ class MultibirdEditorDialog(QDialog):
         box_lay.addLayout(btn_row)
         right_lay.addWidget(box)
 
-        # -- 主鸟种区域（内层限高滚动，长列表不再撑爆面板）--
+        # -- 主鸟种区域（直接纵排，超长由外层滚动区兜底；
+        #    此前的内嵌 QScrollArea 与外层滚动嵌套，窗口较矮时
+        #    复选框文字会被组框边线/裁切，去掉嵌套彻底消除）--
         main_box = QGroupBox(f"主鸟种（最多 {MAX_MAIN_SPECIES} 个）")
         main_outer = QVBoxLayout(main_box)
-        self._main_scroll = QScrollArea()
-        self._main_scroll.setWidgetResizable(True)
-        self._main_scroll.setMaximumHeight(220)
-        self._main_scroll.setFrameShape(QScrollArea.NoFrame)
-        self._main_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        main_host = QWidget()
-        self._main_lay = QVBoxLayout(main_host)
+        main_outer.setContentsMargins(10, 6, 10, 8)
+        self._main_lay = QVBoxLayout()
         self._main_lay.setContentsMargins(0, 0, 0, 0)
-        self._main_scroll.setWidget(main_host)
-        main_outer.addWidget(self._main_scroll)
+        main_outer.addLayout(self._main_lay)
         self._main_keys = self._default_main_keys()
         self._rebuild_main_checkboxes()
         right_lay.addWidget(main_box)
@@ -957,13 +1021,16 @@ class MultibirdEditorDialog(QDialog):
         self._refresh_selection_ui()
 
     def _rebuild_species_chips(self) -> None:
-        """重建左下鸟种筛选 chips（含数量；人工改种后即时刷新）。"""
+        """重建左下鸟种筛选 chips（中文名+数量；人工改种后即时刷新）。"""
         while self._chips_lay.count():
             item = self._chips_lay.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        counts = {}
+        # 键=学名（唯一），显示名=中文优先；同一键取首个出现的显示名
+        # Key = scientific name (unique); label prefers Chinese.
+        counts: dict = {}
+        labels: dict = {}
         for det in (self._data or {}).get("detections") or []:
             if det.get("deleted"):
                 continue
@@ -971,17 +1038,11 @@ class MultibirdEditorDialog(QDialog):
             if not key:
                 continue
             counts[key] = counts.get(key, 0) + 1
-        # 已勾选状态保留
-        checked = set()
-        for key in counts:
-            for det in (self._data or {}).get("detections") or []:
-                if (not det.get("deleted")
-                        and self._canvas._det_species_key(det) == key):
-                    sp = det.get("species") or {}
-                    checked_key = key
-                    break
+            if key not in labels:
+                labels[key] = self._canvas._det_species_label(det)
         for key, n in sorted(counts.items(), key=lambda kv: -kv[1]):
-            label = key if len(key) <= 14 else key[:13] + "…"
+            display = labels.get(key) or key
+            label = display if len(display) <= 14 else display[:13] + "…"
             chip = QPushButton(f"{label} ×{n}")
             chip.setObjectName("tertiary")
             chip.setCheckable(True)
@@ -1045,6 +1106,63 @@ class MultibirdEditorDialog(QDialog):
     # ------------------------------------------------------------------
     # 编辑动作 / edit actions
     # ------------------------------------------------------------------
+
+    def _current_rating(self) -> int:
+        """当前星级（JSON processing.rating；缺失视为 -1 无鸟）。"""
+        proc = (self._data or {}).get("processing") or {}
+        try:
+            return int(proc.get("rating"))
+        except (TypeError, ValueError):
+            return -1
+
+    def _sync_rating_buttons(self) -> None:
+        """把当前星级同步到右侧：大字档位显示 + 按钮组当前档高亮。"""
+        cur = self._current_rating()
+        display = {-1: "❌ 无鸟", 0: "0★", 1: "⭐", 2: "⭐⭐",
+                   3: "⭐⭐⭐"}.get(cur, "—")
+        self._rating_display.setText(display)
+        for val, btn in self._rating_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(val == cur)
+            btn.blockSignals(False)
+
+    def _set_rating(self, value: int) -> None:
+        """
+        快调星级：写本地 JSON（保存时落盘）+ 发信号由宿主走
+        DB/EXIF/目录移动链路。数字键 0-3 / X(-1) 与按钮同效。
+
+        参数:
+        value (int): 新星级，-1=无鸟，0-3 星。
+
+        Quick-set the rating: local JSON write (persisted on save) plus
+        a signal the host browser uses to run its DB/EXIF/move chain.
+        """
+        if self._data is None:
+            return
+        value = max(-1, min(3, int(value)))
+        proc = self._data.setdefault("processing", {})
+        old_rating = self._current_rating()
+        if value == old_rating:
+            self._sync_rating_buttons()
+            return
+        self._append_edit("rating_set", None,
+                          old=old_rating, new=value)
+        proc["rating"] = value
+        self._photo["rating"] = value
+        self._sync_rating_buttons()
+        self._refresh_info_bar()
+        self.rating_change_requested.emit(value)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        """数字键 0-3 直设星级，X=无鸟；其余交给对话框默认处理。"""
+        key = event.key()
+        digit_map = {Qt.Key_0: 0, Qt.Key_1: 1, Qt.Key_2: 2, Qt.Key_3: 3}
+        if key in digit_map:
+            self._set_rating(digit_map[key])
+        elif key == Qt.Key_X:
+            self._set_rating(-1)
+        else:
+            super().keyPressEvent(event)
 
     def _on_remark(self) -> None:
         """重新标记选中鸟的物种（IOC 搜索；标记后视为人工结果）。"""

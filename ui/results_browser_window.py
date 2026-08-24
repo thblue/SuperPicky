@@ -817,6 +817,7 @@ class ResultsBrowserWindow(QMainWindow):
         self._fullscreen.delete_requested.connect(self._on_delete_photo)
         self._fullscreen.context_menu_requested.connect(self._on_fullscreen_context_menu)
         self._fullscreen.species_edit_requested.connect(self._on_species_edit_requested)
+        self._fullscreen.multibird_edit_requested.connect(self._on_multibird_edit_requested)
         self._fullscreen.crop_advice_requested.connect(self._on_crop_advice_requested)
         self._fullscreen.auto_retouch_requested.connect(
             lambda p: self._open_studio_with_action(p, "enhance"))
@@ -1411,7 +1412,7 @@ class ResultsBrowserWindow(QMainWindow):
 
     @Slot(dict)
     def _enter_fullscreen(self, photo: dict):
-        """双击缩略图 → 进入全屏查看器。"""
+        """双击缩略图 → 进入全屏查看器；有多鸟数据时默认带出多鸟编辑。"""
         if photo.get("is_expanded_burst_member"):
             self._open_burst_sequence(photo)
             return
@@ -1420,6 +1421,29 @@ class ResultsBrowserWindow(QMainWindow):
         self._detail_panel._switch_view(True)   # 进入全屏 → 切到裁切图
         self._stack.setCurrentIndex(1)
         self._fullscreen.setFocus()  # 确保全屏 viewer 获得键盘焦点
+        # 默认进入多鸟编辑模式：sidecar 存在且至少一个检测框时直接打开
+        # 编辑器；无检测数据的照片（无鸟/旧结果）保持纯全屏浏览。
+        # Enter multi-bird edit mode by default when the sidecar has at
+        # least one detection; photos without detection data stay in
+        # plain fullscreen.
+        base_dir = photo.get("_base_dir") or self._directory
+        prefix = photo.get("filename") or ""
+        sidecar = os.path.join(base_dir, ".superpicky", "meta",
+                               f"{prefix}.json")
+        if prefix and self._sidecar_has_detections(sidecar):
+            QTimer.singleShot(0, lambda: self._on_multibird_edit_requested(photo))
+
+    @staticmethod
+    def _sidecar_has_detections(sidecar_path: str) -> bool:
+        """sidecar JSON 存在且含未删除检测框时返回 True（轻量读盘）。"""
+        try:
+            import json
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return bool(any(not d.get("deleted")
+                            for d in data.get("detections") or []))
+        except (OSError, ValueError):
+            return False
 
     @Slot()
     def _exit_fullscreen(self):
@@ -1506,9 +1530,12 @@ class ResultsBrowserWindow(QMainWindow):
         右键「多鸟编辑」→ 打开多鸟编辑对话框（V5.0 multibird）。
 
         编辑写入图片同目录的 sidecar JSON（.superpicky/meta/），不碰照片
-        EXIF；物种修改会同步 bird_detections 表。保存后刷新详情面板。
+        EXIF；物种修改会同步 bird_detections 表。对话框内的星级快调通过
+        rating_change_requested 走浏览器既有改星链路（DB+EXIF+移动目录）。
+        保存后刷新详情面板与全屏顶条。
         Open the multi-bird editor dialog; edits persist to the sidecar
-        JSON beside the photo (never EXIF).
+        JSON beside the photo (never EXIF). In-dialog rating changes are
+        routed through the browser's existing rating chain.
         """
         from PySide6.QtWidgets import QDialog
         from ui.multibird_editor_dialog import MultibirdEditorDialog
@@ -1516,9 +1543,13 @@ class ResultsBrowserWindow(QMainWindow):
         directory = photo.get("_base_dir") or photo.get("source_dir") \
             or self._directory
         dialog = MultibirdEditorDialog(photo, directory, parent=self)
+        dialog.rating_change_requested.connect(
+            lambda new_rating, _p=photo: self._on_rating_changed(_p, new_rating))
         if dialog.exec() == QDialog.Accepted:
-            # 保存成功：刷新详情面板（主鸟种可能变化）
+            # 保存成功：刷新详情面板与全屏顶条（主鸟种/星级可能变化）
             self._detail_panel.show_photo(photo)
+            if self._stack.currentIndex() == 1:
+                self._fullscreen.update_rating_display(photo)
 
     def _on_species_edit_requested(self, photo: dict):
         """

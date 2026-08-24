@@ -832,6 +832,7 @@ class FullscreenViewer(QWidget):
     species_edit_requested = Signal(dict)   # 左栏「编辑鸟种」→ 父窗口复用既有处理
     crop_advice_requested = Signal(dict)    # 左栏「裁剪建议」→ 父窗口复用既有处理
     auto_retouch_requested = Signal(dict)   # 左栏「自动修图」→ 打开工作区直接进自动修图
+    multibird_edit_requested = Signal(dict) # 左栏「多鸟编辑」→ 打开多鸟编辑对话框
 
     def __init__(self, i18n, parent=None):
         super().__init__(parent)
@@ -1058,6 +1059,13 @@ class FullscreenViewer(QWidget):
         self._edit_species_btn = self._tool_btn("square-pen.svg", self.i18n.t("fullscreen.tb_species"),
                                                 self._on_edit_species_clicked)
         v.addWidget(self._edit_species_btn)
+        # 多鸟编辑：逐鸟核对/改种/删框 + 星级快调（与右键菜单同一对话框）
+        # Multi-bird edit: per-bird review + quick rating (same dialog as
+        # the context-menu entry).
+        self._multibird_edit_btn = self._tool_btn(
+            "square-stack.svg", self.i18n.t("browser.ctx_multibird_edit"),
+            self._on_multibird_edit_clicked)
+        v.addWidget(self._multibird_edit_btn)
         # ExtremeSimple: 「裁剪建议」按钮已从工具栏剥离（_on_crop_advice_clicked/
         # crop_advice_requested 信号本身保留在下方；这是打开 Crop Studio 的唯一
         # 入口，摘掉后 ui/crop_studio.py 与 core/crop_advisor.py 全部变为不可达但
@@ -1187,6 +1195,11 @@ class FullscreenViewer(QWidget):
         """发出编辑鸟种信号,由父窗口复用既有处理弹窗。"""
         if self._current_photo:
             self.species_edit_requested.emit(self._current_photo)
+
+    def _on_multibird_edit_clicked(self):
+        """发出多鸟编辑信号,由父窗口打开多鸟编辑对话框。"""
+        if self._current_photo:
+            self.multibird_edit_requested.emit(self._current_photo)
 
     def _on_crop_advice_clicked(self):
         """发出裁剪建议信号,由父窗口复用既有处理弹窗。"""

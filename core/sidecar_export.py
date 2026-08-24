@@ -114,6 +114,9 @@ def _build_processing_section(photo_row: dict) -> dict:
         "rating": photo_row.get("rating"),
         "picked": bool(photo_row.get("picked")) if photo_row.get("picked") is not None else False,
         "focus_status": photo_row.get("focus_status"),
+        "focus_x": photo_row.get("focus_x"),
+        "focus_y": photo_row.get("focus_y"),
+        "exposure_status": photo_row.get("exposure_status"),
         "is_flying": bool(photo_row.get("is_flying")),
         "main_yolo_confidence": photo_row.get("confidence"),
         "quality": {

@@ -66,6 +66,196 @@ def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+from PySide6.QtCore import QPoint, QRect, QSize, Qt as _Qt2
+from PySide6.QtWidgets import QLayout, QSizePolicy as _QSizePolicy
+
+
+class _FlowLayout(QLayout):
+    """
+    流式布局：子控件按行排列、自动换行（鸟种筛选 chips 用）。
+
+    Qt 没有内置流式布局，这是官方 FlowLayout 示例的精简移植。
+    A minimal port of the Qt FlowLayout example for species chips.
+    """
+
+    def __init__(self, parent=None, margin=0, spacing=6):
+        super().__init__(parent)
+        self.setContentsMargins(margin, margin, margin, margin)
+        self._spacing = spacing
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return _Qt2.Orientations(_Qt2.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _do_layout(self, rect, test):
+        x, y = rect.x(), rect.y()
+        line_height = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._spacing
+            if next_x - self._spacing > rect.right() and line_height > 0:
+                x = rect.x()
+                y = y + line_height + self._spacing
+                next_x = x + hint.width() + self._spacing
+                line_height = 0
+            if not test:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y()
+
+
+class _ZoomCropView(QWidget):
+    """
+    固定尺寸的裁切预览：滚轮缩放（1-8x）+ 拖拽平移 + 双击复位。
+
+    视图窗口大小始终不变，缩放/平移都在视图内部进行（找鸟核对用：
+    看清羽毛细节不需要另开窗口）。亮度由上游应用到图像后 set_image。
+
+    Fixed-size crop preview with wheel zoom and drag pan; the view
+    itself never resizes. Brightness is baked into the input image.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._qimg = None
+        self._zoom = 1.0
+        self._off_x = 0.0   # 平移偏移（图像像素坐标）
+        self._off_y = 0.0
+        self._drag_pos = None
+        self.setMinimumHeight(210)
+        self.setSizePolicy(_QSizePolicy.Ignored,
+                           _QSizePolicy.Preferred)
+        self.setStyleSheet("background-color: #101014; border-radius: 6px;")
+
+    def set_image(self, qimg):
+        """设置新图像并复位缩放。/ Set a new image, reset the view."""
+        self._qimg = qimg
+        self._zoom = 1.0
+        self._off_x = self._off_y = 0.0
+        self.update()
+
+    # ---- 视口几何 / viewport math ----
+
+    def _base_scale(self) -> float:
+        if self._qimg is None:
+            return 1.0
+        iw, ih = self._qimg.width(), self._qimg.height()
+        if iw <= 0 or ih <= 0:
+            return 1.0
+        return min(self.width() / iw, self.height() / ih)
+
+    def _clamp_offset(self):
+        """把平移偏移限制在图像范围内（不拉出黑边过多）。"""
+        if self._qimg is None:
+            return
+        iw, ih = self._qimg.width(), self._qimg.height()
+        s = self._base_scale() * self._zoom
+        vw, vh = self.width() / s, self.height() / s   # 视口在图像坐标的尺寸
+        max_x = max(0.0, iw - vw)
+        max_y = max(0.0, ih - vh)
+        self._off_x = min(max(0.0, self._off_x), max_x)
+        self._off_y = min(max(0.0, self._off_y), max_y)
+        if iw <= vw:
+            self._off_x = (iw - vw) / 2.0   # 图小于视口时居中
+        if ih <= vh:
+            self._off_y = (ih - vh) / 2.0
+
+    def paintEvent(self, event):  # noqa: N802
+        from PySide6.QtGui import QPainter
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#101014"))
+        if self._qimg is None:
+            painter.setPen(QColor(COLORS["text_muted"]))
+            painter.drawText(self.rect(), Qt.AlignCenter,
+                             "-")
+            painter.end()
+            return
+        self._clamp_offset()
+        s = self._base_scale() * self._zoom
+        vw, vh = self.width() / s, self.height() / s
+        painter.drawImage(QRect(0, 0, self.width(), self.height()),
+                          self._qimg,
+                          QRect(int(self._off_x), int(self._off_y),
+                                max(1, int(vw)), max(1, int(vh))))
+        if self._zoom > 1.05:
+            painter.setPen(QPen(QColor(255, 220, 0), 1))
+            painter.drawText(8, 16, f"{self._zoom:.1f}x")
+        painter.end()
+
+    def wheelEvent(self, event):  # noqa: N802
+        """滚轮缩放：光标处的图像点保持在原位。"""
+        if self._qimg is None:
+            return
+        old_zoom = self._zoom
+        self._zoom = max(1.0, min(8.0, self._zoom *
+                                  (1.25 if event.angleDelta().y() > 0 else 0.8)))
+        if self._zoom == old_zoom:
+            return
+        # 以光标为锚点调整偏移
+        mx = (event.position().x() / self.width()) *              (self.width() / (self._base_scale() * old_zoom)) + self._off_x
+        my = (event.position().y() / self.height()) *              (self.height() / (self._base_scale() * old_zoom)) + self._off_y
+        s = self._base_scale() * self._zoom
+        self._off_x = mx - (event.position().x() / self.width()) *             (self.width() / s)
+        self._off_y = my - (event.position().y() / self.height()) *             (self.height() / s)
+        self._clamp_offset()
+        self.update()
+
+    def mousePressEvent(self, event):  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.position()
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self._drag_pos is None or self._qimg is None:
+            return
+        s = self._base_scale() * self._zoom
+        delta = event.position() - self._drag_pos
+        self._drag_pos = event.position()
+        self._off_x -= delta.x() / s
+        self._off_y -= delta.y() / s
+        self._clamp_offset()
+        self.update()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        self._drag_pos = None
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        self._zoom = 1.0
+        self._off_x = self._off_y = 0.0
+        self.update()
+
+
 from PySide6.QtCore import QThread as _QThread, Signal as _Signal
 
 
@@ -115,6 +305,8 @@ class _BirdCanvas(QWidget):
         self._orig_w = 0   # bbox 坐标系（原图）尺寸 / bbox coord space
         self._orig_h = 0
         self._status_text = ""  # 无图时的提示文案（如「加载中」）
+        self._highlight_keys: Optional[set] = None  # 鸟种筛选高亮（None=全部正常）
+        self._focus_point = None   # (fx, fy) 归一化对焦点 / AF point
         self.setMinimumSize(520, 400)
         self.setMouseTracking(False)
 
@@ -142,6 +334,30 @@ class _BirdCanvas(QWidget):
         """设置无图占位文案（加载中/加载失败）。"""
         self._status_text = text
         self.update()
+
+    def set_highlight_keys(self, keys) -> None:
+        """设置鸟种筛选高亮集（None 清除；非匹配框半透明弱化）。"""
+        self._highlight_keys = keys if keys else None
+        self.update()
+
+    def set_focus_point(self, fx: float, fy: float) -> None:
+        """设置归一化对焦点 (0-1)，画布上画十字标记。"""
+        self._focus_point = (fx, fy)
+        self.update()
+
+    def _point_to_display(self, x: float, y: float) -> Tuple[int, int]:
+        """原图坐标点 → 画布坐标（与 bbox 同一映射）。"""
+        if self._qimage is None or self._orig_w <= 0 or self._orig_h <= 0:
+            return (0, 0)
+        ox, oy, dw, dh = self._fit_rect()
+        return (int(ox + x * dw / self._orig_w),
+                int(oy + y * dh / self._orig_h))
+
+    def _det_species_key(self, det: dict) -> str:
+        """检测项的鸟种键（与对话框 _species_key 同规则）。"""
+        species = det.get("species") or {}
+        return (species.get("scientific") or species.get("cn")
+                or species.get("en") or "")
 
     def set_selected(self, index: int) -> None:
         self._selected = index
@@ -212,7 +428,10 @@ class _BirdCanvas(QWidget):
                 continue
             rect = self._bbox_to_display(bbox)
             is_sel = det.get("index") == self._selected
-            color = _box_color(det, self._threshold)
+            color = QColor(_box_color(det, self._threshold))
+            # 鸟种筛选激活时，非匹配框半透明弱化
+            if self._highlight_keys is not None                     and self._det_species_key(det) not in self._highlight_keys:
+                color.setAlpha(70)
             pen = QPen(color)
             pen.setWidth(3 if is_sel else 1)
             painter.setPen(pen)
@@ -220,6 +439,17 @@ class _BirdCanvas(QWidget):
                 selected_rect = (rect, det)
                 continue
             painter.drawRect(*rect)
+        # 对焦点标记（十字+圆圈，青色）
+        if self._focus_point is not None:
+            fx, fy = self._focus_point
+            cx, cy = self._point_to_display(fx * self._orig_w,
+                                            fy * self._orig_h)
+            pen = QPen(QColor(0, 255, 210))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.drawEllipse(cx - 7, cy - 7, 14, 14)
+            painter.drawLine(cx - 11, cy, cx + 11, cy)
+            painter.drawLine(cx, cy - 11, cx, cy + 11)
         if selected_rect is not None:
             rect, det = selected_rect
             pen = QPen(QColor(255, 220, 0))
@@ -374,10 +604,20 @@ class MultibirdEditorDialog(QDialog):
             "■ <span style='color:#28a745'>已采纳</span>  "
             "■ <span style='color:#ffa500'>低置信</span>  "
             "■ <span style='color:#a0a0a0'>未分类</span>  "
-            "· 点击框选中")
+            "◎ <span style='color:#00ffd2'>对焦点</span>  · 点击框选中")
         self._legend_label.setStyleSheet(
             f"color: {COLORS['text_muted']}; font-size: 12px; padding: 2px;")
         left_lay.addWidget(self._legend_label)
+        # 照片信息栏：星级/对焦/锐度/美学等（找鸟核对的上下文）
+        self._info_bar = QLabel("-")
+        self._info_bar.setStyleSheet(
+            f"color: {COLORS['text_secondary']}; font-size: 13px;"
+            f"padding: 2px;")
+        left_lay.addWidget(self._info_bar)
+        # 鸟种筛选 chips：点击高亮该鸟种的所有框（快速找鸟）
+        self._chips_host = QWidget()
+        self._chips_lay = _FlowLayout(self._chips_host, margin=2, spacing=6)
+        left_lay.addWidget(self._chips_host)
         body.addWidget(left_area, 1)
         dets = (self._data or {}).get("detections") or []
         self._canvas.set_data(None, dets, threshold=35.0)
@@ -433,15 +673,26 @@ class MultibirdEditorDialog(QDialog):
         box = QGroupBox("选中鸟")
         box_lay = QVBoxLayout(box)
         box_lay.setSpacing(8)
-        self._crop_label = QLabel("点击左侧图中的框选择一只鸟\n"
-                                  "Click a box on the photo")
-        self._crop_label.setAlignment(Qt.AlignCenter)
-        self._crop_label.setMinimumHeight(210)
-        from PySide6.QtWidgets import QSizePolicy
-        self._crop_label.setSizePolicy(
-            QSizePolicy.Ignored, self._crop_label.sizePolicy().verticalPolicy())
-        self._crop_label.setStyleSheet(
-            f"background-color: {COLORS['bg_void']}; border-radius: 6px;")
+        # 逐只导航：◀ 上一只 / n/N / 下一只 ▶（筛选激活时只在匹配鸟里循环）
+        nav_row = QHBoxLayout()
+        prev_btn = QPushButton("◀")
+        prev_btn.setObjectName("tertiary")
+        prev_btn.setFixedWidth(40)
+        prev_btn.clicked.connect(lambda: self._select_next(-1))
+        next_btn = QPushButton("▶")
+        next_btn.setObjectName("tertiary")
+        next_btn.setFixedWidth(40)
+        next_btn.clicked.connect(lambda: self._select_next(1))
+        self._nav_counter = QLabel("-")
+        self._nav_counter.setAlignment(Qt.AlignCenter)
+        self._nav_counter.setStyleSheet(
+            f"color: {COLORS['text_secondary']};")
+        nav_row.addWidget(prev_btn)
+        nav_row.addWidget(self._nav_counter, 1)
+        nav_row.addWidget(next_btn)
+        box_lay.addLayout(nav_row)
+        # 缩略图：滚轮缩放/拖拽平移（视图尺寸不变），亮度由上游烘焙
+        self._crop_label = _ZoomCropView()
         box_lay.addWidget(self._crop_label)
 
         bright_row = QHBoxLayout()
@@ -573,11 +824,18 @@ class MultibirdEditorDialog(QDialog):
         super().closeEvent(event)
 
     def _init_selection(self) -> None:
-        """默认选中主鸟。/ Initially select the main bird."""
+        """默认选中主鸟；构建左下信息栏/chips/对焦点标记。"""
         for det in (self._data or {}).get("detections") or []:
             if det.get("is_selected") and not det.get("deleted"):
                 self._canvas.set_selected(det.get("index", -1))
                 break
+        # 对焦点标记（JSON 有坐标时画十字）
+        proc = (self._data or {}).get("processing") or {}
+        if proc.get("focus_x") is not None and proc.get("focus_y") is not None:
+            self._canvas.set_focus_point(float(proc["focus_x"]),
+                                         float(proc["focus_y"]))
+        self._refresh_info_bar()
+        self._rebuild_species_chips()
         self._refresh_selection_ui()
 
     def _on_bird_selected(self, index: int) -> None:
@@ -589,13 +847,19 @@ class MultibirdEditorDialog(QDialog):
         det = self._selected_det()
         if det is None:
             self._crop_base = None
-            self._crop_label.setPixmap(QPixmap())  # 清空
-            self._crop_label.setText("点击左侧图中的框选择一只鸟\n"
-                                     "Click a box on the photo")
+            self._crop_label.set_image(None)  # 清空视图
+            self._nav_counter.setText("-")
             self._info_label.setText("-")
             self._mark_btn.setEnabled(False)
             self._delete_btn.setEnabled(False)
             return
+        # 导航计数：当前序号/可见总数（筛选时为匹配数）
+        visible = self._visible_dets()
+        try:
+            pos = [d.get("index") for d in visible].index(det.get("index"))
+        except ValueError:
+            pos = 0
+        self._nav_counter.setText(f"{pos + 1}/{len(visible)}")
         self._mark_btn.setEnabled(True)
         self._delete_btn.setEnabled(True)
         self._show_crop(det)
@@ -649,14 +913,7 @@ class MultibirdEditorDialog(QDialog):
             crop = np.clip(crop.astype(np.int16)
                            + int(brightness * 2.5), 0, 255).astype(np.uint8)
         qimg = self._ndarray_to_qimage(crop, max_side=600)
-        from PySide6.QtGui import QPixmap
-        # 同时适配宽与高：竖长裁切（站立水鸟）不会超出预览区被裁切
-        target = self._crop_label.size()
-        pm = QPixmap.fromImage(qimg)
-        if pm.width() > target.width() or pm.height() > target.height():
-            pm = pm.scaled(target, Qt.KeepAspectRatio,
-                           Qt.SmoothTransformation)
-        self._crop_label.setPixmap(pm)
+        self._crop_label.set_image(qimg)
 
     def _on_brightness(self, value: int) -> None:
         self._render_crop(value)
@@ -666,6 +923,124 @@ class MultibirdEditorDialog(QDialog):
         super().resizeEvent(event)
         if getattr(self, "_crop_base", None) is not None:
             self._render_crop(self._bright_slider.value())
+
+    # ------------------------------------------------------------------
+    # 找鸟导航与筛选 / find & verify navigation
+    # ------------------------------------------------------------------
+
+    def _visible_dets(self) -> List[dict]:
+        """当前可见的检测项：未删除；筛选激活时仅匹配鸟种。"""
+        keys = self._canvas._highlight_keys
+        out = []
+        for det in (self._data or {}).get("detections") or []:
+            if det.get("deleted"):
+                continue
+            if keys is not None and \
+                    self._canvas._det_species_key(det) not in keys:
+                continue
+            out.append(det)
+        return out
+
+    def _select_next(self, delta: int) -> None:
+        """导航到上/下一只可见的鸟（循环）。/ Step to prev/next bird."""
+        visible = self._visible_dets()
+        if not visible:
+            return
+        indexes = [d.get("index") for d in visible]
+        cur = self._canvas._selected
+        if cur in indexes:
+            pos = (indexes.index(cur) + delta) % len(visible)
+        else:
+            pos = 0 if delta > 0 else len(visible) - 1
+        self._canvas.set_selected(indexes[pos])
+        self._bright_slider.setValue(0)
+        self._refresh_selection_ui()
+
+    def _rebuild_species_chips(self) -> None:
+        """重建左下鸟种筛选 chips（含数量；人工改种后即时刷新）。"""
+        while self._chips_lay.count():
+            item = self._chips_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        counts = {}
+        for det in (self._data or {}).get("detections") or []:
+            if det.get("deleted"):
+                continue
+            key = self._canvas._det_species_key(det)
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+        # 已勾选状态保留
+        checked = set()
+        for key in counts:
+            for det in (self._data or {}).get("detections") or []:
+                if (not det.get("deleted")
+                        and self._canvas._det_species_key(det) == key):
+                    sp = det.get("species") or {}
+                    checked_key = key
+                    break
+        for key, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            label = key if len(key) <= 14 else key[:13] + "…"
+            chip = QPushButton(f"{label} ×{n}")
+            chip.setObjectName("tertiary")
+            chip.setCheckable(True)
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.setStyleSheet(
+                "QPushButton { padding: 2px 10px; font-size: 12px; }")
+            chip.setProperty("species_key", key)
+            chip.toggled.connect(
+                lambda checked, _k=key: self._on_chip_toggled(_k, checked))
+            self._chips_lay.addWidget(chip)
+
+    def _on_chip_toggled(self, key: str, checked: bool) -> None:
+        """chips 勾选变化：收集全部勾选鸟种 → 画布高亮 + 跳到首只匹配鸟。"""
+        keys = {k for k, v in self._chips_state().items() if v}
+        self._canvas.set_highlight_keys(keys or None)
+        if keys:
+            visible = self._visible_dets()
+            if visible:
+                self._canvas.set_selected(visible[0].get("index", -1))
+                self._bright_slider.setValue(0)
+                self._refresh_selection_ui()
+
+    def _chips_state(self) -> dict:
+        """当前各 chip 的勾选状态（键 → bool）。"""
+        state = {}
+        for i in range(self._chips_lay.count()):
+            w = self._chips_lay.itemAt(i).widget()
+            if w is not None and w.property("species_key"):
+                state[w.property("species_key")] = w.isChecked()
+        return state
+
+    def _refresh_info_bar(self) -> None:
+        """左下照片信息栏：星级/对焦/锐度/美学/飞版/主鸟。"""
+        proc = (self._data or {}).get("processing") or {}
+        q = proc.get("quality") or {}
+        rating = proc.get("rating")
+        stars = {3: "⭐⭐⭐", 2: "⭐⭐", 1: "⭐", 0: "0★"}.get(rating, "❌")
+        parts = [f"<b>{stars}</b>"]
+        focus = proc.get("focus_status")
+        if focus:
+            parts.append(f"对焦 {focus}")
+        sharp = q.get("head_sharpness")
+        if sharp is not None:
+            parts.append(f"锐度 {sharp:.0f}")
+        topiq = q.get("topiq")
+        if topiq is not None:
+            parts.append(f"美学 {topiq:.1f}")
+        if proc.get("is_flying"):
+            parts.append("飞版")
+        exposure = proc.get("exposure_status")
+        if exposure:
+            parts.append(str(exposure))
+        sm = proc.get("species_main") or {}
+        main_name = sm.get("cn") or sm.get("en")
+        if main_name:
+            conf = sm.get("confidence")
+            conf_txt = f" {conf:.0f}%" if conf is not None else ""
+            parts.append(f"主鸟 {main_name}{conf_txt}")
+        self._info_bar.setText("  |  ".join(parts))
 
     # ------------------------------------------------------------------
     # 编辑动作 / edit actions
@@ -698,6 +1073,8 @@ class MultibirdEditorDialog(QDialog):
         self._refresh_selection_ui()
         self._canvas.update()
         self._rebuild_main_checkboxes()
+        self._rebuild_species_chips()
+        self._refresh_info_bar()
 
     def _on_delete(self) -> None:
         """软删除选中框（JSON deleted=true，数据保留可手工恢复）。"""
@@ -711,6 +1088,7 @@ class MultibirdEditorDialog(QDialog):
         self._refresh_selection_ui()
         self._canvas.update()
         self._rebuild_main_checkboxes()
+        self._rebuild_species_chips()
 
     def _append_edit(self, action: str, bird_index: Optional[int],
                      old=None, new=None) -> None:

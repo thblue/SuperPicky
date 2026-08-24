@@ -160,8 +160,13 @@ class _BirdCanvas(QWidget):
                              "无图片数据 / no image")
             return
         ox, oy, dw, dh = self._fit_rect()
-        painter.drawImage(int(ox), int(oy), self._qimage, 0, 0,
-                          self._qimage.width(), self._qimage.height())
+        # 关键：底图必须缩放进适配区域（QRect 目标重载），
+        # 与 bbox 的映射使用同一缩放比——否则框和鸟必然错位。
+        # The image MUST be drawn scaled into the fit rect (QRect
+        # overload) so it shares the exact mapping used for bboxes.
+        from PySide6.QtCore import QRect
+        painter.drawImage(QRect(int(ox), int(oy), int(dw), int(dh)),
+                          self._qimage)
         # 先画未选中的细框，选中框最后画（覆盖在上）
         # Draw unselected first so the selected box stays on top.
         selected_rect = None
@@ -346,7 +351,8 @@ class MultibirdEditorDialog(QDialog):
         # 保存条不进滚动区，永远可见可点
         from PySide6.QtWidgets import QScrollArea, QGroupBox
         right_container = QWidget()
-        right_container.setFixedWidth(340)
+        right_container.setMinimumWidth(360)
+        right_container.setMaximumWidth(420)
         right_outer = QVBoxLayout(right_container)
         right_outer.setContentsMargins(0, 0, 0, 0)
         right_outer.setSpacing(8)
@@ -392,7 +398,7 @@ class MultibirdEditorDialog(QDialog):
         self._crop_label = QLabel("点击左侧图中的框选择一只鸟\n"
                                   "Click a box on the photo")
         self._crop_label.setAlignment(Qt.AlignCenter)
-        self._crop_label.setMinimumHeight(260)
+        self._crop_label.setMinimumHeight(210)
         self._crop_label.setStyleSheet(
             f"background-color: {COLORS['bg_void']}; border-radius: 6px;")
         box_lay.addWidget(self._crop_label)
@@ -450,7 +456,7 @@ class MultibirdEditorDialog(QDialog):
 
         # -- 底部保存条（固定在滚动区之外，始终可见）--
         save_bar = QHBoxLayout()
-        hint = QLabel("保存 → 写入同目录 .superpicky/meta/ JSON（不动照片）")
+        hint = QLabel("保存 → 同目录 JSON（不动照片）")
         hint.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 12px;")
         hint.setWordWrap(True)
         save_bar.addWidget(hint, 1)

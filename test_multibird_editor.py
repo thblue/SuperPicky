@@ -92,6 +92,27 @@ class TestMultibirdEditor(unittest.TestCase):
                 return det
         raise AssertionError(idx)
 
+    def test_canvas_downscaled_coord_mapping(self):
+        """底图降采样后 bbox 仍按原图坐标正确映射（真实照片回归 bug）。"""
+        canvas = self.dlg._canvas
+        from PySide6.QtGui import QImage
+        canvas._qimage = QImage(600, 400, QImage.Format_RGB888)
+        canvas._detections = self.dlg._data['detections']
+        canvas._orig_w, canvas._orig_h = 1200, 800
+        # 桩掉布局相关尺寸：底图显示区固定 (20, 20, 600, 400)
+        canvas._fit_rect = lambda: (20, 20, 600, 400)
+        # det0 bbox=(40,40,120,100) 原图坐标：sx=0.5 → (40,40,60,50)
+        x, y, w, h = canvas._bbox_to_display([40, 40, 120, 100])
+        self.assertEqual((x, y, w, h), (40, 40, 60, 50))
+        # 逆向：显示 (80, 60) → 原图 (120, 80)，落在 det0 内
+        from PySide6.QtCore import QPoint
+        orig = canvas._point_to_orig(QPoint(80, 60))
+        self.assertEqual(orig, (120.0, 80.0))
+        results = []
+        canvas.bird_selected.connect(results.append)
+        canvas.mousePressEvent(_FakeMouse(QPoint(80, 60)))
+        self.assertEqual(results[-1], 0)
+
     def test_canvas_hit_test(self):
         """画布命中：框内点选中、空白 -1、重叠取最小框。"""
         from PySide6.QtCore import QPoint

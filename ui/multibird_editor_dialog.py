@@ -84,15 +84,29 @@ class _BirdCanvas(QWidget):
         self._detections: List[dict] = []
         self._selected = -1
         self._threshold = 35.0
+        self._orig_w = 0   # bbox 坐标系（原图）尺寸 / bbox coord space
+        self._orig_h = 0
         self.setMinimumSize(520, 400)
         self.setMouseTracking(False)
 
     def set_data(self, qimage: QImage, detections: List[dict],
-                 threshold: float) -> None:
-        """设置底图与检测列表（刷新绘制）。/ Set image + detections."""
+                 threshold: float,
+                 orig_w: int = 0, orig_h: int = 0) -> None:
+        """
+        设置底图与检测列表（刷新绘制）。
+
+        orig_w/orig_h 是 bbox 所在的原图坐标系尺寸——底图通常为省内存
+        而降采样过（如 6960→1800），不传原图尺寸会把框画到错误位置。
+
+        Set image + detections. orig_w/orig_h give the coordinate space
+        of the bboxes (the canvas image is usually downscaled).
+        """
         self._qimage = qimage
         self._detections = detections
         self._threshold = threshold
+        # bbox 坐标系 = 原图；缺省时视为与底图同尺寸
+        self._orig_w = orig_w or (qimage.width() if qimage else 0)
+        self._orig_h = orig_h or (qimage.height() if qimage else 0)
         self.update()
 
     def set_selected(self, index: int) -> None:
@@ -114,24 +128,24 @@ class _BirdCanvas(QWidget):
 
     def _bbox_to_display(self, bbox: List[float]) -> Tuple[int, int, int, int]:
         """原图坐标 bbox → 画布坐标矩形。/ Map an original-coord bbox."""
-        if self._qimage is None:
+        if self._qimage is None or self._orig_w <= 0 or self._orig_h <= 0:
             return (0, 0, 0, 0)
         ox, oy, dw, dh = self._fit_rect()
-        sx = dw / self._qimage.width()
-        sy = dh / self._qimage.height()
+        sx = dw / self._orig_w
+        sy = dh / self._orig_h
         x, y, w, h = bbox
         return (int(ox + x * sx), int(oy + y * sy),
                 max(2, int(w * sx)), max(2, int(h * sy)))
 
     def _point_to_orig(self, pos: QPoint) -> Optional[Tuple[float, float]]:
         """画布坐标 → 原图坐标（底图区域内）。/ Canvas → original coords."""
-        if self._qimage is None:
+        if self._qimage is None or self._orig_w <= 0 or self._orig_h <= 0:
             return None
         ox, oy, dw, dh = self._fit_rect()
         if not (ox <= pos.x() < ox + dw and oy <= pos.y() < oy + dh):
             return None
-        sx = self._qimage.width() / dw
-        sy = self._qimage.height() / dh
+        sx = self._orig_w / dw
+        sy = self._orig_h / dh
         return ((pos.x() - ox) * sx, (pos.y() - oy) * sy)
 
     # ---- 绘制与交互 / paint & interact ----
@@ -180,7 +194,25 @@ class _BirdCanvas(QWidget):
                              QColor(255, 220, 0))
             painter.setPen(QColor(0, 0, 0))
             painter.drawText(rect[0] + 4, max(11, rect[1] - 4), label)
+        self._paint_legend(painter)
         painter.end()
+
+    def _paint_legend(self, painter) -> None:
+        """左下角画框色图例，帮助理解配色。/ Color legend, bottom-left."""
+        items = [(QColor(255, 0, 0), "主鸟 Main"),
+                 (QColor(0, 180, 0), "已采纳 Adopted"),
+                 (QColor(255, 165, 0), "低置信 Low-conf"),
+                 (QColor(160, 160, 160), "未分类 UnID")]
+        x, y = 12, self.height() - 14 - len(items) * 18 - 8
+        painter.fillRect(x - 6, y - 6, 150, len(items) * 18 + 12,
+                         QColor(0, 0, 0, 140))
+        for i, (color, text) in enumerate(items):
+            painter.setPen(QPen(color))
+            painter.setBrush(color)
+            painter.drawRect(x, y + i * 18 + 3, 14, 3)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QColor(240, 240, 240))
+            painter.drawText(x + 22, y + i * 18 + 10, text)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = self._point_to_orig(event.position().toPoint())
@@ -232,6 +264,7 @@ class MultibirdEditorDialog(QDialog):
         self.setWindowTitle(
             f"多鸟编辑 - {self._prefix}  |  Multi-bird Editor")
         self.resize(1180, 760)
+        self.setWindowState(Qt.WindowMaximized)  # 默认最大化，鸟群照更需要空间
 
         # ---- 数据加载 / load data ----
         from core.sidecar_export import _sidecar_path, _atomic_write_json  # noqa: F401 (写回用)
@@ -305,18 +338,27 @@ class MultibirdEditorDialog(QDialog):
         if self._img_bgr is not None:
             qimg = self._ndarray_to_qimage(self._img_bgr, max_side=1800)
             dets = (self._data or {}).get("detections") or []
-            self._canvas.set_data(qimg, dets, threshold=35.0)
+            _oh, _ow = self._img_bgr.shape[:2]
+            self._canvas.set_data(qimg, dets, threshold=35.0,
+                                  orig_w=_ow, orig_h=_oh)
 
-        # 右：属性面板（可滚动，内容多）
+        # 右：属性面板 = 固定容器（滚动区 + 底部固定保存条），
+        # 保存条不进滚动区，永远可见可点
+        from PySide6.QtWidgets import QScrollArea, QGroupBox
+        right_container = QWidget()
+        right_container.setFixedWidth(340)
+        right_outer = QVBoxLayout(right_container)
+        right_outer.setContentsMargins(0, 0, 0, 0)
+        right_outer.setSpacing(8)
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
-        right_scroll.setFixedWidth(340)
         right = QWidget()
         right_scroll.setWidget(right)
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(10, 10, 10, 10)
-        right_lay.setSpacing(10)
-        body.addWidget(right_scroll)
+        right_lay.setSpacing(14)
+        right_outer.addWidget(right_scroll, 1)
+        body.addWidget(right_container)
 
         if self._data is None:
             tip = QLabel("未找到 sidecar JSON（照片未处理或多鸟功能未启用）\n"
@@ -324,15 +366,29 @@ class MultibirdEditorDialog(QDialog):
             tip.setWordWrap(True)
             right_lay.addWidget(tip)
             right_lay.addStretch(1)
+            close_bar = QHBoxLayout()
             close = QPushButton("关闭 Close")
             close.setObjectName("secondary")
             close.clicked.connect(self.reject)
-            right_lay.addWidget(close)
+            close_bar.addStretch(1)
+            close_bar.addWidget(close)
+            right_outer.addLayout(close_bar)
             return
+
+        # -- 使用提示（首行，帮助理解交互）--
+        usage = QLabel("① 点击左侧图中的框选中一只鸟\n"
+                       "② 右侧放大查看，可调亮度、改正鸟种或删框\n"
+                       "③ 底部勾选主鸟种后保存")
+        usage.setWordWrap(True)
+        usage.setStyleSheet(
+            f"color: {COLORS['text_muted']}; font-size: 12px;"
+            f"padding: 4px;")
+        right_lay.addWidget(usage)
 
         # -- 选中鸟区域 --
         box = QGroupBox("选中鸟 Selected bird")
         box_lay = QVBoxLayout(box)
+        box_lay.setSpacing(8)
         self._crop_label = QLabel("点击左侧图中的框选择一只鸟\n"
                                   "Click a box on the photo")
         self._crop_label.setAlignment(Qt.AlignCenter)
@@ -374,19 +430,29 @@ class MultibirdEditorDialog(QDialog):
         box_lay.addLayout(btn_row)
         right_lay.addWidget(box)
 
-        # -- 主鸟种区域 --
+        # -- 主鸟种区域（内层限高滚动，长列表不再撑爆面板）--
         main_box = QGroupBox(f"主鸟种 Main species（最多 {MAX_MAIN_SPECIES} 个）")
-        self._main_lay = QVBoxLayout(main_box)
+        main_outer = QVBoxLayout(main_box)
+        self._main_scroll = QScrollArea()
+        self._main_scroll.setWidgetResizable(True)
+        self._main_scroll.setMaximumHeight(220)
+        self._main_scroll.setFrameShape(QScrollArea.NoFrame)
+        main_host = QWidget()
+        self._main_lay = QVBoxLayout(main_host)
+        self._main_lay.setContentsMargins(0, 0, 0, 0)
+        self._main_scroll.setWidget(main_host)
+        main_outer.addWidget(self._main_scroll)
         self._main_keys = self._default_main_keys()
         self._rebuild_main_checkboxes()
         right_lay.addWidget(main_box)
 
         right_lay.addStretch(1)
 
-        # -- 底部保存条 --
+        # -- 底部保存条（固定在滚动区之外，始终可见）--
         save_bar = QHBoxLayout()
-        hint = QLabel("保存 → 写入 .superpicky/meta/<前缀>.json（不动照片）")
-        hint.setStyleSheet(f"color: {COLORS['text_muted']};")
+        hint = QLabel("保存 → 写入同目录 .superpicky/meta/ JSON（不动照片）")
+        hint.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: 12px;")
+        hint.setWordWrap(True)
         save_bar.addWidget(hint, 1)
         cancel = QPushButton("取消 Cancel")
         cancel.setObjectName("tertiary")
@@ -396,7 +462,7 @@ class MultibirdEditorDialog(QDialog):
         save.setObjectName("secondary")
         save.clicked.connect(self._on_save)
         save_bar.addWidget(save)
-        right_lay.addLayout(save_bar)
+        right_outer.addLayout(save_bar)
 
     def _ndarray_to_qimage(self, arr: np.ndarray,
                            max_side: int = 1800) -> QImage:

@@ -66,6 +66,34 @@ def _now_iso() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+from PySide6.QtCore import QThread as _QThread, Signal as _Signal
+
+
+class _EditorImageLoader(_QThread):
+    """
+    后台解码原图的加载线程（RAW 全尺寸解码需数秒，不能阻塞窗口）。
+
+    信号:
+    ready(object) — 解码完成的 BGR ndarray（失败为 None）
+
+    Background image loader so the dialog opens instantly; a full-res
+    RAW decode takes seconds and must not block the UI.
+    """
+
+    ready = _Signal(object)
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self._path = path
+
+    def run(self):
+        from spb_review import _read_image
+        try:
+            self.ready.emit(_read_image(self._path))
+        except Exception:
+            self.ready.emit(None)
+
+
 class _BirdCanvas(QWidget):
     """
     左侧画布：绘制缩放后的原图 + 全部 bbox，点击选中一只鸟。
@@ -86,6 +114,7 @@ class _BirdCanvas(QWidget):
         self._threshold = 35.0
         self._orig_w = 0   # bbox 坐标系（原图）尺寸 / bbox coord space
         self._orig_h = 0
+        self._status_text = ""  # 无图时的提示文案（如「加载中」）
         self.setMinimumSize(520, 400)
         self.setMouseTracking(False)
 
@@ -107,6 +136,11 @@ class _BirdCanvas(QWidget):
         # bbox 坐标系 = 原图；缺省时视为与底图同尺寸
         self._orig_w = orig_w or (qimage.width() if qimage else 0)
         self._orig_h = orig_h or (qimage.height() if qimage else 0)
+        self.update()
+
+    def set_status_text(self, text: str) -> None:
+        """设置无图占位文案（加载中/加载失败）。"""
+        self._status_text = text
         self.update()
 
     def set_selected(self, index: int) -> None:
@@ -157,7 +191,7 @@ class _BirdCanvas(QWidget):
         if self._qimage is None:
             painter.setPen(QColor(COLORS["text_muted"]))
             painter.drawText(self.rect(), Qt.AlignCenter,
-                             "无图片数据 / no image")
+                             self._status_text or "无图片数据 / no image")
             return
         ox, oy, dw, dh = self._fit_rect()
         # 关键：底图必须缩放进适配区域（QRect 目标重载），
@@ -237,14 +271,18 @@ class MultibirdEditorDialog(QDialog):
     Manual multi-bird editor dialog; edits persist to the sidecar JSON.
     """
 
-    def __init__(self, photo: dict, directory: str, parent=None):
+    def __init__(self, photo: dict, directory: str, parent=None,
+                 load_async: bool = True):
         """
         参数:
         photo (dict): 浏览器的 photo 行（report.db 字段）
         directory (str): 照片所在目录（定位 JSON/DB/文件）
         parent: Qt 父窗口
+        load_async (bool): 后台线程加载原图（默认开；窗口秒开，
+            RAW 解码数秒不阻塞 UI。测试传 False 走同步路径）
         """
         super().__init__(parent)
+        self._load_async = load_async
         self._photo = dict(photo)
         self._directory = directory
         self._prefix = photo.get("filename") or ""
@@ -264,7 +302,11 @@ class MultibirdEditorDialog(QDialog):
                     self._data = json.load(f)
             except (OSError, ValueError):
                 self._data = None
-        self._img_bgr = self._load_image()
+        # 原图解码改为延迟：异步模式下后台加载（RAW 解码数秒），
+        # 同步模式（测试）在 _build_ui 后立即加载
+        self._img_bgr = None
+        self._loader: Optional[_EditorImageLoader] = None
+        self._closing = False
 
         # 主鸟种选择状态（species key 列表）
         self._main_keys: List[str] = []
@@ -275,7 +317,8 @@ class MultibirdEditorDialog(QDialog):
         self._crop_base: Optional[np.ndarray] = None
 
         self._build_ui()
-        self._init_selection()
+        # 默认选中等图片就绪后执行（_on_image_ready → _init_selection）；
+        # 构造函数立即返回，窗口先出现、图片后台加载。
 
     # ------------------------------------------------------------------
     # 数据加载 / data loading
@@ -336,12 +379,9 @@ class MultibirdEditorDialog(QDialog):
             f"color: {COLORS['text_muted']}; font-size: 12px; padding: 2px;")
         left_lay.addWidget(self._legend_label)
         body.addWidget(left_area, 1)
-        if self._img_bgr is not None:
-            qimg = self._ndarray_to_qimage(self._img_bgr, max_side=1800)
-            dets = (self._data or {}).get("detections") or []
-            _oh, _ow = self._img_bgr.shape[:2]
-            self._canvas.set_data(qimg, dets, threshold=35.0,
-                                  orig_w=_ow, orig_h=_oh)
+        dets = (self._data or {}).get("detections") or []
+        self._canvas.set_data(None, dets, threshold=35.0)
+        self._canvas.set_status_text("图片加载中… / loading image…")
 
         # 右：属性面板 = 固定容器（滚动区 + 底部固定保存条），
         # 保存条不进滚动区，永远可见可点
@@ -421,8 +461,9 @@ class MultibirdEditorDialog(QDialog):
 
         self._info_label = QLabel("-")
         self._info_label.setWordWrap(True)
+        self._info_label.setMinimumHeight(44)  # 固定两行高度，防切换时布局跳动
         self._info_label.setStyleSheet(
-            f"color: {COLORS['text_secondary']};")
+            f"color: {COLORS['text_secondary']}; padding: 2px;")
         box_lay.addWidget(self._info_label)
 
         btn_row = QHBoxLayout()
@@ -471,6 +512,8 @@ class MultibirdEditorDialog(QDialog):
         save.clicked.connect(self._on_save)
         save_bar.addWidget(save)
         right_outer.addLayout(save_bar)
+        # UI 就绪后启动图片加载（异步不阻塞窗口出现）
+        self._start_image_load()
 
     def _ndarray_to_qimage(self, arr: np.ndarray,
                            max_side: int = 1800) -> QImage:
@@ -495,6 +538,39 @@ class MultibirdEditorDialog(QDialog):
             if det.get("index") == idx and not det.get("deleted"):
                 return det
         return None
+
+    def _start_image_load(self) -> None:
+        """按构造参数启动图片加载（异步线程或同步）。"""
+        if self._load_async:
+            path = self._photo_file()
+            if path is None:
+                self._canvas.set_status_text("找不到图片文件 / photo not found")
+                return
+            self._loader = _EditorImageLoader(path, parent=self)
+            self._loader.ready.connect(self._on_image_ready)
+            self._loader.start()
+        else:
+            self._on_image_ready(self._load_image())
+
+    def _on_image_ready(self, arr) -> None:
+        """图片解码完成：填充画布、恢复默认选中。UI 线程执行。"""
+        if self._closing:
+            return
+        if arr is None:
+            self._canvas.set_status_text("图片加载失败 / failed to load")
+            return
+        self._img_bgr = arr
+        dets = (self._data or {}).get("detections") or []
+        _oh, _ow = arr.shape[:2]
+        qimg = self._ndarray_to_qimage(arr, max_side=1800)
+        self._canvas.set_data(qimg, dets, threshold=35.0,
+                              orig_w=_ow, orig_h=_oh)
+        self._init_selection()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        """关闭时置停接收加载结果，避免线程信号触达已销毁控件。"""
+        self._closing = True
+        super().closeEvent(event)
 
     def _init_selection(self) -> None:
         """默认选中主鸟。/ Initially select the main bird."""
@@ -574,9 +650,12 @@ class MultibirdEditorDialog(QDialog):
                            + int(brightness * 2.5), 0, 255).astype(np.uint8)
         qimg = self._ndarray_to_qimage(crop, max_side=600)
         from PySide6.QtGui import QPixmap
-        pm = QPixmap.fromImage(qimg).scaled(
-            self._crop_label.size(), Qt.KeepAspectRatio,
-            Qt.SmoothTransformation)
+        # 同时适配宽与高：竖长裁切（站立水鸟）不会超出预览区被裁切
+        target = self._crop_label.size()
+        pm = QPixmap.fromImage(qimg)
+        if pm.width() > target.width() or pm.height() > target.height():
+            pm = pm.scaled(target, Qt.KeepAspectRatio,
+                           Qt.SmoothTransformation)
         self._crop_label.setPixmap(pm)
 
     def _on_brightness(self, value: int) -> None:

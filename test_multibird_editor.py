@@ -80,7 +80,8 @@ class TestMultibirdEditor(unittest.TestCase):
     def setUp(self):
         self.d, self.photo = _make_fixture()
         from ui.multibird_editor_dialog import MultibirdEditorDialog
-        self.dlg = MultibirdEditorDialog(self.photo, self.d)
+        self.dlg = MultibirdEditorDialog(self.photo, self.d,
+                                         load_async=False)
 
     def tearDown(self):
         self.dlg.deleteLater()

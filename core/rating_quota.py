@@ -242,17 +242,37 @@ def assign_ratings(
                 star, q_score=q, reason_key=reason_key,
                 reason_args={"percent": math.ceil((gidx + 1) * 100 / gn)})
 
-    # 连拍组内 3★ 封顶:每组只留 Q 最高的前 N 张,其余降 2★
-    # Per-burst 3-star cap: keep the top-N by Q, demote the rest to 2★
+    # 连拍/相似簇封顶:组内若已有 3★,只保留这些 3★(至多 N 张),其余一律 1★;
+    # 组内没有 3★ 时保留 Q 最高的前 N 张维持配额星级(不强行提升到 3★)。
+    # (同组照片互为替品,人工 review 与统计只需关注 2★+/组内最优)
+    # Per-burst / similarity-cluster cap: if the group earned any 3-star,
+    # only those (up to N) keep it and every other member drops to 1 star;
+    # with no 3-star in the group, the top-N by Q keep their quota rating
+    # (never promoted to fill the cap). Redundant shots of the same moment.
     if burst_cap3 > 0:
-        burst_threes: Dict[int, List[str]] = {}
+        burst_members: Dict[int, List[str]] = {}
         for q, p in scored:
-            if p.burst_id is not None and results[p.key].rating == 3:
-                burst_threes.setdefault(p.burst_id, []).append(p.key)
-        for keys in burst_threes.values():
-            for key in keys[burst_cap3:]:  # scored 已按 Q 降序,故切片即淘汰尾部
-                results[key].rating = 2
-                results[key].reason_key = "rating_v2.burst_capped"
+            if p.burst_id is not None:
+                burst_members.setdefault(p.burst_id, []).append(p.key)
+        for keys in burst_members.values():
+            has_three = any(results[k].rating == 3 for k in keys)
+            kept = 0
+            for key in keys:  # scored 已按 Q 降序,组内顺序随之有序
+                r = results[key]
+                if has_three:
+                    # 有 3★:只放行 3★ 本身(≤cap 张),其余(含 2★)全部 1★
+                    if r.rating == 3 and kept < burst_cap3:
+                        kept += 1
+                    else:
+                        r.rating = 1
+                        r.reason_key = "rating_v2.burst_capped"
+                else:
+                    # 无 3★:前 cap 张维持配额星级,其余 1★
+                    if kept < burst_cap3:
+                        kept += 1
+                    else:
+                        r.rating = 1
+                        r.reason_key = "rating_v2.burst_capped"
 
     return results
 

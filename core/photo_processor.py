@@ -2705,6 +2705,7 @@ class PhotoProcessor:
                             'target_file': None,
                             'adj_sharpness': None,
                             'adj_topiq': None,
+                            'filepath': filepath,  # V4.7: 相似簇 pHash 用 / for similarity clustering
                         }
 
                 should_build_debug = bool(self.callbacks.crop_preview or self.settings.save_crop)
@@ -3129,6 +3130,40 @@ class PhotoProcessor:
                 info = self.file_bird_species.get(prefix)
                 if info:
                     pend['metrics'].species = info.get('en_name') or info.get('cn_name')
+
+            # V4.7: 同鸟种 pHash 相似簇——内容相似但不属于时间连拍的照片
+            # (跨快门序列/同一栖枝场景)也复用连拍封顶:簇内只保 Q 最高的
+            # 前 N 张,其余降 1★,避免相似照挤占 2★/3★ 名额。
+            # 伪 burst_id 接在现有连拍组 id 之后,不写入 burst_map,
+            # 因此只影响打星,不触发连拍子目录移动。
+            # V4.7: same-species pHash similarity clusters — photos that look
+            # alike but are not EXIF-time bursts reuse the burst cap: only the
+            # top-N by Q keep their rating, the rest are demoted to 1 star.
+            # Pseudo burst ids continue after real ones and never enter
+            # burst_map, so this affects rating only, not folder moves.
+            try:
+                from core.burst_detector import cluster_similar_by_phash
+                sim_items = []
+                for prefix, pend in v2_pending.items():
+                    m = pend['metrics']
+                    fp = pend.get('filepath')
+                    if m.species and m.burst_id is None and fp:
+                        jpg = os.path.splitext(fp)[0] + '.jpg'
+                        img_path = jpg if os.path.exists(jpg) else fp
+                        sim_items.append((prefix, m.species, img_path))
+                sim_clusters = cluster_similar_by_phash(sim_items)
+                if sim_clusters:
+                    next_id = (max(self.burst_map.values()) if self.burst_map else 0) + 1
+                    for cl in sim_clusters:
+                        for prefix in cl:
+                            v2_pending[prefix]['metrics'].burst_id = next_id
+                        next_id += 1
+                    clustered = sum(len(c) for c in sim_clusters)
+                    self._log(self.i18n.t("logs.similar_clustered",
+                                          groups=len(sim_clusters), photos=clustered))
+            except Exception as e:
+                self._log(f"⚠️ similar-cluster failed: {e}")
+
             quota3 = get_quota3_for_skill(self.config.skill_level, self.config)
             quota2 = get_quota2_for_skill(self.config.skill_level, self.config)
             v2_results = assign_ratings_v2(

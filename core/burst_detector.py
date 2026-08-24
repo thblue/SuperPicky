@@ -52,6 +52,84 @@ class BurstGroup:
         return None
 
 
+# 相似簇参数 / Similarity-cluster params
+# V4.7: 跨时段相似照判定阈值(64bit pHash 汉明距离)。
+# 比连拍验证的 12 更严格,避免把同场景不同姿态的鸟误并成簇。
+# V4.7: Hamming-distance threshold for cross-time similar photos (64-bit
+# pHash). Stricter than the burst-verify threshold of 12 to avoid merging
+# distinct poses of the same bird into one cluster.
+PHASH_SIM_THRESHOLD = 8
+
+
+def cluster_similar_by_phash(items: List[Tuple[str, str, str]],
+                             threshold: int = PHASH_SIM_THRESHOLD) -> List[List[str]]:
+    """
+    基于感知哈希(pHash)的同鸟种相似照聚类,不限拍摄时间。
+
+    用于处理"内容相似但不属于 EXIF 时间连拍"的照片(如跨快门序列的
+    同一栖枝场景):与连拍封顶共用同一通道,簇内只保留最优照片的高星级。
+
+    Args:
+        items: [(key, species, image_path)] 三元组列表;
+               species 为 None 的条目会被跳过(未识别不聚类)
+        threshold: pHash 汉明距离阈值(<= 视为相似)
+
+    Returns:
+        List[List[key]]: 只返回包含 >= 2 张照片的簇;无法计算哈希的
+        照片不参与聚类。任何异常(依赖缺失等)返回 [],安全降级。
+
+    Cluster similar photos of the same species by perceptual hash,
+    regardless of capture time. Feeds the same per-burst rating cap
+    used for EXIF-time bursts. Only clusters with >= 2 photos are
+    returned; failures degrade safely to an empty list.
+    """
+    try:
+        from imagehash import phash
+        from PIL import Image
+    except ImportError:
+        return []
+
+    # 计算哈希并按鸟种分桶 / compute hashes, bucket by species
+    hashes: Dict[str, object] = {}
+    by_species: Dict[str, List[str]] = {}
+    for key, species, path in items:
+        if not species:
+            continue
+        try:
+            h = phash(Image.open(path))
+        except Exception:
+            continue  # 无法解码(如无预览的 RAW),跳过
+        hashes[key] = h
+        by_species.setdefault(species, []).append(key)
+
+    # 并查集传递闭包:A~B 且 B~C 则同簇(比相邻链式验证更宽容)
+    # Union-find transitive closure: A~B and B~C => same cluster
+    parent: Dict[str, str] = {k: k for k in hashes}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for keys in by_species.values():
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                if hashes[keys[i]] - hashes[keys[j]] <= threshold:
+                    union(keys[i], keys[j])
+
+    clusters: Dict[str, List[str]] = {}
+    for k in hashes:
+        clusters.setdefault(find(k), []).append(k)
+
+    return [g for g in clusters.values() if len(g) >= 2]
+
+
 class BurstDetector:
     """连拍检测器"""
     

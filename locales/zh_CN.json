@@ -358,7 +358,8 @@
     "geo_cell_failed": "[GeoFilter] 网格查询失败: {e}",
     "geo_country_failed": "[GeoFilter] 国家查询失败: {e}",
     "geo_unavailable": "[GeoFilter] 地理分布库不可用，地理过滤将被跳过",
-    "geo_init_failed": "[GeoFilter] 初始化失败: {e}"
+    "geo_init_failed": "[GeoFilter] 初始化失败: {e}",
+    "logs.similar_clustered": "🔗 相似照聚类: {groups} 组 {photos} 张(非连拍相似照仅保留组内最优)"
   },
   "server": {
     "server_already_running": "✅ 服务器已在端口 {port} 运行",
@@ -1080,7 +1081,7 @@
     "mid_quota": "良好（排名{percent}%）",
     "rest_quota": "普通（排名{percent}%）",
     "eye_capped": "良好（眼睛可见度低，封顶2星）",
-    "burst_capped": "良好（连拍组3星已满，降为2星）"
+    "burst_capped": "普通（连拍/相似组已保留组内最优，其余降为1星）"
   },
   "cli": {
     "banner": "  🐦 SuperPicky CLI v{version} - 慧眼选鸟 (命令行版)",

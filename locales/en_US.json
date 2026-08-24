@@ -358,7 +358,8 @@
     "geo_cell_failed": "[GeoFilter] Cell query failed: {e}",
     "geo_country_failed": "[GeoFilter] Country query failed: {e}",
     "geo_unavailable": "[GeoFilter] Geo-distribution DB unavailable, geo filtering skipped",
-    "geo_init_failed": "[GeoFilter] Init failed: {e}"
+    "geo_init_failed": "[GeoFilter] Init failed: {e}",
+    "logs.similar_clustered": "🔗 Similar-photo clusters: {groups} groups, {photos} photos (non-burst lookalikes keep only cluster best)"
   },
   "server": {
     "server_already_running": "✅ Server already running on port {port}",
@@ -805,7 +806,7 @@
     "mid_quota": "Good (rank {percent}%)",
     "rest_quota": "Average (rank {percent}%)",
     "eye_capped": "Good (low eye visibility, capped at 2 stars)",
-    "burst_capped": "Good (burst 3-star cap reached, demoted to 2 stars)"
+    "burst_capped": "Average (burst/similarity group already keeps its best, rest demoted to 1 star)"
   },
   "lightroom_guide": {
     "title": "Lightroom Classic User Guide - How to View and Use SuperPicky Ratings",

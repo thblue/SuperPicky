@@ -53,12 +53,14 @@ class BurstGroup:
 
 
 # 相似簇参数 / Similarity-cluster params
-# V4.7: 跨时段相似照判定阈值(64bit pHash 汉明距离)。
-# 比连拍验证的 12 更严格,避免把同场景不同姿态的鸟误并成簇。
+# V4.7: 跨时段相似照判定阈值(64bit pHash 汉明距离),与连拍验证阈值一致。
+# 实测校准(867张水鸟批): 同鸟种照片对距离中位约30、p5约24,阈值8几乎聚不出
+# 簇;12 可聚出约60簇且簇内确有多张高星冗余。
 # V4.7: Hamming-distance threshold for cross-time similar photos (64-bit
-# pHash). Stricter than the burst-verify threshold of 12 to avoid merging
-# distinct poses of the same bird into one cluster.
-PHASH_SIM_THRESHOLD = 8
+# pHash), aligned with the burst-verify threshold. Calibrated on an 867-shot
+# shorebird batch: same-species pair distances median ~30 / p5 ~24, so 8
+# yields almost nothing; 12 finds ~60 clusters with real high-star overlaps.
+PHASH_SIM_THRESHOLD = 12
 
 
 def cluster_similar_by_phash(items: List[Tuple[str, str, str]],
@@ -256,7 +258,7 @@ class BurstDetector:
                 input=paths_input.encode('utf-8'),  # 转换为字节
                 capture_output=True,
                 text=False,  # 使用 bytes 模式，避免自动解码
-                timeout=max(60, len(filepaths) // 10),  # 根据文件数量动态调整超时
+                timeout=max(300, len(filepaths) // 2),  # V4.7: 大目录/慢盘放宽超时(867张曾超时) / wider window for large dirs & slow disks
                 creationflags=creationflags
             )
             

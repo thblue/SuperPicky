@@ -359,7 +359,7 @@
     "geo_country_failed": "[GeoFilter] Country query failed: {e}",
     "geo_unavailable": "[GeoFilter] Geo-distribution DB unavailable, geo filtering skipped",
     "geo_init_failed": "[GeoFilter] Init failed: {e}",
-    "logs.similar_clustered": "🔗 Similar-photo clusters: {groups} groups, {photos} photos (non-burst lookalikes keep only cluster best)"
+    "similar_clustered": "🔗 Similar-photo clusters: {groups} groups, {photos} photos (non-burst lookalikes keep only cluster best)"
   },
   "server": {
     "server_already_running": "✅ Server already running on port {port}",

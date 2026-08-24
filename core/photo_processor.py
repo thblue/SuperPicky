@@ -2705,7 +2705,6 @@ class PhotoProcessor:
                             'target_file': None,
                             'adj_sharpness': None,
                             'adj_topiq': None,
-                            'filepath': filepath,  # V4.7: 相似簇 pHash 用 / for similarity clustering
                         }
 
                 should_build_debug = bool(self.callbacks.crop_preview or self.settings.save_crop)
@@ -3146,11 +3145,16 @@ class PhotoProcessor:
                 sim_items = []
                 for prefix, pend in v2_pending.items():
                     m = pend['metrics']
-                    fp = pend.get('filepath')
-                    if m.species and m.burst_id is None and fp:
-                        jpg = os.path.splitext(fp)[0] + '.jpg'
-                        img_path = jpg if os.path.exists(jpg) else fp
-                        sim_items.append((prefix, m.species, img_path))
+                    if m.species and m.burst_id is None:
+                        # pHash 需要 PIL 可解码的图:优先用 temp_preview 预览 JPG
+                        # (RAW 本体不可解码,fallback 也无意义,直接跳过)
+                        # pHash needs a PIL-decodable image: prefer the
+                        # temp_preview JPG (RAW files can't be decoded).
+                        preview = os.path.join(
+                            self.dir_path, '.superpicky', 'cache',
+                            'temp_preview', prefix + '.jpg')
+                        if os.path.exists(preview):
+                            sim_items.append((prefix, m.species, preview))
                 sim_clusters = cluster_similar_by_phash(sim_items)
                 if sim_clusters:
                     next_id = (max(self.burst_map.values()) if self.burst_map else 0) + 1

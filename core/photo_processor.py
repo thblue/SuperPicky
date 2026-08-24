@@ -1275,7 +1275,7 @@ class PhotoProcessor:
                                     _oh, _ow = orig_img.shape[:2]
                                 else:
                                     _ow, _oh = multibird_dims
-                                result['multibird_detections'] = classify_secondary_birds(
+                                _rows = classify_secondary_birds(
                                     orig_image=orig_img,
                                     all_birds=multibird_birds,
                                     proc_dims=multibird_dims,
@@ -1290,6 +1290,34 @@ class PhotoProcessor:
                                     name_format=nf,
                                     identify_fn=identify_bird_fn,
                                 )
+                                # V5.1: 焦点未命中（fallback）时综合重选主鸟
+                                # ——稀有优先，其次大而清晰。
+                                _sel_entry = next(
+                                    (b for b in multibird_birds
+                                     if b.get('is_selected')), None)
+                                if (_rows and len(_rows) > 1
+                                        and _sel_entry is not None
+                                        and _sel_entry.get('selection_reason')
+                                        == 'fallback'):
+                                    from core.multi_bird import select_main_bird
+                                    _new_idx = select_main_bird(
+                                        _rows,
+                                        rare_min_conf=self.config.mainbird_rare_min_conf,
+                                        rare_gbif=self.config.mainbird_rare_gbif)
+                                    _cur_idx = next(
+                                        (r['bird_index'] for r in _rows
+                                         if r.get('is_selected')), None)
+                                    if (_new_idx is not None
+                                            and _new_idx != _cur_idx):
+                                        for r in _rows:
+                                            r['is_selected'] = (
+                                                1 if r['bird_index'] == _new_idx
+                                                else 0)
+                                        result['mainbird_reselected'] = {
+                                            'from': _cur_idx,
+                                            'to': _new_idx,
+                                        }
+                                result['multibird_detections'] = _rows
                             del orig_img
                         except Exception as _mb_e:
                             self._log(f"  ⚠️ Multi-bird classify failed [{source_display}]: {_mb_e}", "warning")
@@ -1341,6 +1369,45 @@ class PhotoProcessor:
                     f"     #{r.get('bird_index')} {name} ({conf:.0f}%) "
                     f"area={area_pct:.2f}%", "species")
 
+        def _apply_mainbird_reselect(file_prefix: str, info: dict,
+                                     rows: List[dict],
+                                     source_filename: Optional[str] = None):
+            """V5.1 综合重选落库：photos 表主鸟种切换 + 日志说明。"""
+            source_display = source_filename or file_prefix or "?"
+            new_idx = info.get('to')
+            new_row = next((r for r in rows
+                            if r.get('bird_index') == new_idx), None)
+            if new_row is None:
+                return
+            name = new_row.get('species_cn') or new_row.get('species_en')
+            self._log(
+                f"  🎯 主鸟重选 [{source_display}]: "
+                f"#{info.get('from')} → #{new_idx}"
+                + (f" {name}" if name else "")
+                + "（对焦未命中，按稀有/画质综合选择）", "species")
+            # photos 表的主鸟种跟随新主鸟（浏览器筛选/详情展示一致）；
+            # 未达采纳阈值的新主鸟不改表（保留原识别，避免低置信污染）
+            if not name:
+                return False
+            conf = new_row.get('species_confidence') or 0.0
+            if conf < self.settings.birdid_confidence_threshold:
+                return False
+            if self.report_db:
+                try:
+                    updates = {
+                        'bird_species_cn': new_row.get('species_cn'),
+                        'bird_species_en': new_row.get('species_en'),
+                        'birdid_confidence': conf,
+                    }
+                    if new_row.get('gbif_rarity_100') is not None:
+                        updates['gbif_rarity_100'] = new_row['gbif_rarity_100']
+                    self.report_db.update_photo(file_prefix, updates)
+                    return True
+                except Exception as _e:
+                    self._log(f"  ⚠️ Main-bird reselect DB write failed: {_e}",
+                              "warning")
+            return False
+
         def apply_birdid_result(
             file_prefix: str,
             title_targets: List[str],
@@ -1350,10 +1417,17 @@ class PhotoProcessor:
             # V5.0(multibird): 多鸟行先取出——无论主鸟结果成败/是否过阈值，
             # 检测框数据都要入库（主鸟识别失败时其行物种自然留空）。
             multibird_rows = None
+            reselect_info = None
             if isinstance(birdid_result, dict):
                 multibird_rows = birdid_result.pop('multibird_detections', None)
+                reselect_info = birdid_result.pop('mainbird_reselected', None)
             if multibird_rows:
                 apply_multibird_rows(file_prefix, multibird_rows, source_filename)
+            reselect_applied = False
+            if reselect_info and multibird_rows:
+                reselect_applied = _apply_mainbird_reselect(
+                    file_prefix, reselect_info, multibird_rows,
+                    source_filename)
             if not birdid_result:
                 return
             if birdid_result.get('error'):
@@ -1401,8 +1475,11 @@ class PhotoProcessor:
                         'en_name': en_name
                     }
 
-                # 写入数据库，供结果浏览器筛选面板和详情面板使用
-                if self.report_db and (cn_name or en_name):
+                # 写入数据库，供结果浏览器筛选面板和详情面板使用。
+                # V5.1: 主鸟已被综合重选且新鸟种已落库时跳过——旧主鸟的
+                # 识别结果不应覆盖重选后的主鸟种。
+                if (self.report_db and (cn_name or en_name)
+                        and not reselect_applied):
                     try:
                         db_updates = {
                             'bird_species_cn': cn_name,

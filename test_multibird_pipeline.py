@@ -340,5 +340,126 @@ class TestRescueMultibirdConfFloor(unittest.TestCase):
         self.assertAlmostEqual(confs[1], 0.42, places=5)
 
 
+class TestMainBirdSelection(unittest.TestCase):
+    """ai_model._select_main_bird 三级规则（单鸟/polygon/bbox/兜底）。"""
+
+    def _bird(self, idx, bbox, conf=0.5, poly=None):
+        return {'idx': idx, 'conf': conf, 'bbox': bbox,
+                'mask_polygon': poly, 'is_selected': False}
+
+    def test_single_bird(self):
+        from ai_model import _select_main_bird
+        idx, reason = _select_main_bird(
+            [self._bird(0, (0, 0, 100, 100))], None, 200, 100)
+        self.assertEqual((idx, reason), (0, 'single'))
+
+    def test_polygon_hit_beats_bbox(self):
+        """对焦点在大框的 bbox 内但在其多边形外 → 跳过它选真正命中的鸟。
+
+        旧 bbox 逻辑会误选鸟0（bbox 包含但点其实在鸟身体外的空白），
+        polygon 精度避免了这种误选。
+        """
+        from ai_model import _select_main_bird
+        birds = [
+            # 鸟0：bbox 覆盖右下区域，但身体多边形只占上半部
+            self._bird(0, (100, 100, 200, 200), conf=0.9,
+                       poly=[[110, 110], [190, 110], [190, 150], [110, 150]]),
+            # 鸟1：右下角小 bbox（无多边形）
+            self._bird(1, (140, 140, 200, 200), conf=0.3, poly=None),
+        ]
+        # 点 (170,180)：在鸟0的 bbox 内、多边形外（身体下方的空白），
+        # 在鸟1的 bbox 内 → 应选鸟1；旧 bbox 逻辑会误选鸟0
+        idx, reason = _select_main_bird(birds, (0.85, 0.9), 200, 200)
+        self.assertEqual((idx, reason), (1, 'focus'))
+
+    def test_bbox_fallback_when_no_polygon(self):
+        """无多边形时 bbox 命中仍有效。"""
+        from ai_model import _select_main_bird
+        birds = [self._bird(0, (10, 10, 90, 90), conf=0.9, poly=None),
+                 self._bird(1, (110, 10, 190, 90), conf=0.3, poly=None)]
+        idx, reason = _select_main_bird(birds, (0.6, 0.3), 200, 100)
+        self.assertEqual((idx, reason), (1, 'focus'))
+
+    def test_focus_miss_falls_back_to_conf(self):
+        """对焦点不在任何鸟上 → fallback + 最高置信度。"""
+        from ai_model import _select_main_bird
+        birds = [self._bird(0, (10, 10, 60, 60), conf=0.4,
+                            poly=[[10, 10], [60, 10], [60, 60], [10, 60]]),
+                 self._bird(1, (110, 10, 180, 90), conf=0.8,
+                            poly=[[110, 10], [180, 10], [180, 90], [110, 90]])]
+        idx, reason = _select_main_bird(birds, (0.5, 0.95), 200, 100)
+        self.assertEqual((idx, reason), (1, 'fallback'))
+
+    def test_no_focus_falls_back(self):
+        """无对焦点 → fallback。"""
+        from ai_model import _select_main_bird
+        birds = [self._bird(0, (0, 0, 50, 50), conf=0.9),
+                 self._bird(1, (60, 0, 120, 50), conf=0.8)]
+        idx, reason = _select_main_bird(birds, None, 200, 100)
+        self.assertEqual((idx, reason), (0, 'fallback'))
+
+
+class TestComprehensiveMainBird(unittest.TestCase):
+    """core/multi_bird.select_main_bird 综合重选（稀有优先/大而清晰）。"""
+
+    def test_rare_confident_wins(self):
+        """置信的稀有鸟（conf≥70 且 gbif≥50）优先于大而清晰。"""
+        from core.multi_bird import select_main_bird
+        rows = [
+            {'bird_index': 0, 'species_cn': '常见大鸟', 'species_confidence': 99.0,
+             'gbif_rarity_100': 5.0, 'crop_sharpness': 900.0, 'area_ratio': 0.3},
+            {'bird_index': 1, 'species_cn': '稀有小鸟', 'species_confidence': 75.0,
+             'gbif_rarity_100': 80.0, 'crop_sharpness': 100.0, 'area_ratio': 0.01},
+        ]
+        self.assertEqual(select_main_bird(rows), 1)
+
+    def test_rare_requires_confidence(self):
+        """稀有但置信不足（<70）不算「置信的稀有鸟」→ 走评分。"""
+        from core.multi_bird import select_main_bird
+        rows = [
+            {'bird_index': 0, 'species_cn': '常见大鸟', 'species_confidence': 99.0,
+             'gbif_rarity_100': 5.0, 'crop_sharpness': 900.0, 'area_ratio': 0.3},
+            {'bird_index': 1, 'species_cn': '稀有但存疑', 'species_confidence': 40.0,
+             'gbif_rarity_100': 80.0, 'crop_sharpness': 100.0, 'area_ratio': 0.01},
+        ]
+        self.assertEqual(select_main_bird(rows), 0)
+
+    def test_score_prefers_big_sharp(self):
+        """无稀有鸟时：锐度+面积+置信度加权，大而清晰者胜。"""
+        from core.multi_bird import select_main_bird
+        rows = [
+            {'bird_index': 0, 'species_cn': '小糊鸟', 'species_confidence': 90.0,
+             'gbif_rarity_100': 3.0, 'crop_sharpness': 80.0, 'area_ratio': 0.005},
+            {'bird_index': 1, 'species_cn': '大清晰鸟', 'species_confidence': 85.0,
+             'gbif_rarity_100': 10.0, 'crop_sharpness': 700.0, 'area_ratio': 0.20},
+        ]
+        self.assertEqual(select_main_bird(rows), 1)
+
+    def test_unclassified_uses_yolo_conf(self):
+        """未分类的鸟用 YOLO 置信度参与评分。"""
+        from core.multi_bird import select_main_bird
+        rows = [
+            {'bird_index': 0, 'species_cn': None, 'species_confidence': None,
+             'gbif_rarity_100': None, 'crop_sharpness': 400.0,
+             'area_ratio': 0.05, 'yolo_conf': 0.9},
+            {'bird_index': 1, 'species_cn': '低分鸟', 'species_confidence': 36.0,
+             'gbif_rarity_100': 2.0, 'crop_sharpness': 200.0,
+             'area_ratio': 0.05, 'yolo_conf': 0.4},
+        ]
+        self.assertEqual(select_main_bird(rows), 0)
+
+    def test_deleted_excluded(self):
+        """软删除的鸟不参与重选。"""
+        from core.multi_bird import select_main_bird
+        rows = [
+            {'bird_index': 0, 'deleted': True, 'species_cn': '被删的稀有鸟',
+             'species_confidence': 99.0, 'gbif_rarity_100': 90.0,
+             'crop_sharpness': 900.0, 'area_ratio': 0.3},
+            {'bird_index': 1, 'species_cn': '普通鸟', 'species_confidence': 80.0,
+             'gbif_rarity_100': 5.0, 'crop_sharpness': 500.0, 'area_ratio': 0.1},
+        ]
+        self.assertEqual(select_main_bird(rows), 1)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

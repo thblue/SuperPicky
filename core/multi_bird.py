@@ -252,15 +252,18 @@ def classify_secondary_birds(
         row['mask_polygon'] = _polygon_to_orig(bird.get('mask_polygon'),
                                                scale_x, scale_y)
 
+        # 全部行都记录 bbox 锐度（廉价），供综合重选/召回规则使用——
+        # 包括主鸟（V5.1 重选评分需要主鸟也有锐度可比）
+        # Record bbox sharpness on every row (cheap), the main bird
+        # included — the comprehensive re-selection needs comparable
+        # sharpness across all birds.
+        row['crop_sharpness'] = crop_bbox_sharpness(orig_image, bbox_orig)
+
         # 主鸟：复用已采纳结果，不重复推理
         # Selected bird: reuse the adopted result, no re-inference.
         if row['is_selected']:
             row.update(main_fields)
             continue
-
-        # 全部行都记录 bbox 锐度（廉价），供后续召回规则使用
-        # Record bbox sharpness on every row (cheap) for later recall rules.
-        row['crop_sharpness'] = crop_bbox_sharpness(orig_image, bbox_orig)
 
         area_ratio = bird.get('area_ratio') or 0.0
         if area_ratio < min_area_ratio:
@@ -301,3 +304,55 @@ def classify_secondary_birds(
         row['gbif_rarity_100'] = top.get('gbif_rarity_100')
 
     return rows
+
+
+def select_main_bird(rows: List[dict],
+                     rare_min_conf: float = 70.0,
+                     rare_gbif: float = 50.0) -> Optional[int]:
+    """
+    焦点未命中时的综合主鸟选择（V5.1 规则 3）。
+
+    输入为 classify_secondary_birds 的输出行（含每鸟物种/置信度/
+    crop_sharpness/面积/GBIF 稀有度）。策略：
+      3a. 有「置信的稀有鸟」（分类置信 ≥ rare_min_conf 且 GBIF 稀有度
+          ≥ rare_gbif）→ 取其中稀有度最高、并列取置信度最高；
+      3b. 否则按「大而清晰」评分：锐度 45% + 面积 25% + 置信度 30%
+          （有分类结果用分类置信，未分类用 YOLO 检测置信）。
+
+    参数:
+    rows (List[dict]): 逐鸟结果行
+    rare_min_conf (float): 稀有鸟要求的分类置信度（百分比）
+    rare_gbif (float): 稀有鸟要求的 GBIF 稀有度（0-100，50=罕见档）
+
+    返回:
+    Optional[int]: 选中的 bird_index；rows 为空返回 None
+
+    Comprehensive main-bird re-selection when the AF point did not
+    hit any bird: confident-rare species first, otherwise the
+    big-clear-and-confident bird by a weighted score.
+    """
+    candidates = [r for r in rows if not r.get("deleted")]
+    if not candidates:
+        return None
+
+    # 3a 稀有优先 / rare-and-confident wins
+    rare = [r for r in candidates
+            if (r.get("species_confidence") or 0.0) >= rare_min_conf
+            and (r.get("gbif_rarity_100") or 0.0) >= rare_gbif]
+    if rare:
+        best = max(rare, key=lambda r: (r.get("gbif_rarity_100") or 0.0,
+                                         r.get("species_confidence") or 0.0))
+        return best.get("bird_index")
+
+    # 3b 大而清晰 / big, sharp and confident
+    def _score(r: dict) -> float:
+        sharp = min(1.0, (r.get("crop_sharpness") or 0.0) / 500.0)
+        area = min(1.0, (r.get("area_ratio") or 0.0) / 0.10)
+        if r.get("species_cn") or r.get("species_en"):
+            conf = min(1.0, (r.get("species_confidence") or 0.0) / 100.0)
+        else:
+            conf = max(0.0, min(1.0, r.get("yolo_conf") or 0.0))
+        return 0.45 * sharp + 0.25 * area + 0.30 * conf
+
+    best = max(candidates, key=_score)
+    return best.get("bird_index")

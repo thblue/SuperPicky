@@ -372,6 +372,61 @@ def _dedupe_bird_boxes(detections, confidences, class_ids, masks,
             class_ids[keep_mask], kept_masks)
 
 
+def _select_main_bird(all_birds, focus_point, width, height):
+    """
+    主鸟选择（三级规则，V5.1）。
+
+    1. 单鸟 → 唯一即主鸟；
+    2. 多鸟 + 对焦点命中：先精确（落在某只鸟的分割多边形内 → 该鸟），
+       再宽泛（落在 bbox 内 → 该鸟）；
+    3. 多鸟但对焦点未命中/无对焦点（对焦非人工控制）→ 暂取置信度最高，
+       reason='fallback'，下游逐鸟分类完成后按「稀有优先 / 大而清晰」
+       综合重选（core/multi_bird.select_main_bird）。
+
+    参数:
+    all_birds (List[dict]): 检测列表（含 bbox/mask_polygon/conf）
+    focus_point (Optional[Tuple[float, float]]): 归一化对焦点 0-1
+    width / height (int): 处理图尺寸（对焦点换算用）
+
+    返回:
+    Tuple[int, str]: (选中的 bird idx, 'single'|'focus'|'fallback')
+
+    Main-bird selection: single → focus-point hit (polygon first,
+    then bbox) → max-confidence fallback (re-selected downstream by
+    the comprehensive scorer when focus was not decisive).
+    """
+    if not all_birds:
+        return -1, 'fallback'
+    if len(all_birds) == 1:
+        return all_birds[0]['idx'], 'single'
+    if focus_point is not None:
+        fx, fy = focus_point
+        pt = (float(int(fx * width)), float(int(fy * height)))
+        # 规则 2a：对焦点落在分割多边形内（比 bbox 精确）
+        for bird in all_birds:
+            poly = bird.get('mask_polygon')
+            if poly and len(poly) >= 3:
+                contour = np.array(poly, dtype=np.int32)
+                try:
+                    if cv2.pointPolygonTest(contour, pt, False) >= 0:
+                        return bird['idx'], 'focus'
+                except cv2.error:
+                    pass
+        # 规则 2b：对焦点落在 bbox 内。仅对「没有多边形」的鸟生效——
+        # 有多边形的鸟以轮廓为准（bbox 内、轮廓外 = 检测框里的背景，
+        # 不能当作命中），避免大框吃掉旁边小框的焦点。
+        fx_px, fy_px = int(pt[0]), int(pt[1])
+        for bird in all_birds:
+            poly = bird.get('mask_polygon')
+            if poly and len(poly) >= 3:
+                continue
+            x1, y1, x2, y2 = bird['bbox']
+            if x1 <= fx_px <= x2 and y1 <= fy_px <= y2:
+                return bird['idx'], 'focus'
+    # 规则 3：对焦未命中（对焦非人工控制）→ 暂取置信度最高
+    return max(all_birds, key=lambda b: b['conf'])['idx'], 'fallback'
+
+
 def detect_and_draw_birds(
     image_path,
     model,
@@ -600,36 +655,17 @@ def detect_and_draw_birds(
                     bird_count = 1
                 rescued = True
 
-    # V4.2: 鸟选择策略
-    bird_idx = -1
-    if bird_count == 1:
-        # 只有一只鸟，直接选择
-        bird_idx = all_birds[0]['idx']
-    elif bird_count > 1 and focus_point is not None:
-        # 多只鸟，用对焦点选择
-        fx, fy = focus_point  # 归一化坐标 0-1
-        fx_px, fy_px = int(fx * width), int(fy * height)  # 转换为像素坐标
-        
-        found_by_focus = False
-        for bird in all_birds:
-            x1, y1, x2, y2 = bird['bbox']
-            if x1 <= fx_px <= x2 and y1 <= fy_px <= y2:
-                bird_idx = bird['idx']
-                found_by_focus = True
-                break
-        
-        if not found_by_focus:
-            # 对焦点不在任何鸟身上，回退到置信度最高
-            bird_idx = max(all_birds, key=lambda b: b['conf'])['idx']
-    elif bird_count > 1:
-        # 多只鸟但没有对焦点，选择置信度最高
-        bird_idx = max(all_birds, key=lambda b: b['conf'])['idx']
+    # V4.2/V5.1: 鸟选择策略（单鸟 → 对焦点命中[多边形优先,bbox回退] →
+    # 置信度兜底）。fallback 时下游逐鸟分类后会按稀有/画质综合重选。
+    bird_idx, _selection_reason = _select_main_bird(
+        all_birds, focus_point, width, height)
 
-    # V5.0(multibird): 给选中项打标，下游逐鸟分类据此识别主鸟
-    # V5.0: flag the selected entry so per-bird classification can
-    # identify the main bird without passing an extra index around.
+    # V5.0(multibird): 给选中项打标 + 记录选择原因（V5.1），下游
+    # 逐鸟分类据此识别主鸟、fallback 时触发综合重选
     for bird in all_birds:
         bird['is_selected'] = (bird['idx'] == bird_idx)
+        if bird['idx'] == bird_idx:
+            bird['selection_reason'] = _selection_reason
 
     parse_time = (time.time() - step_start) * 1000
     # V3.3: 简化日志，移除步骤详情

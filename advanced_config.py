@@ -104,6 +104,9 @@ class AdvancedConfig:
         "multibird_enabled": True,           # 总开关（仅多鸟照片生效）
         "multibird_min_area_ratio": 0.001,   # bbox 面积/图面积 < 此值只入框不分类（太小看不清）
         "multibird_species_threshold": 35,   # 逐鸟分类采纳阈值(%)，低于此值为「未采纳」（数据仍入库，展示层分档）
+        # V5.1: 焦点未命中时的综合主鸟重选（core/multi_bird.select_main_bird）
+        "mainbird_rare_min_conf": 70,        # 「置信的稀有鸟」要求分类置信 ≥ 此值(%)
+        "mainbird_rare_gbif": 50,            # 「稀有鸟」要求 GBIF 稀有度 ≥ 此值（50=罕见档）
 
         # 外部编辑应用（右键菜单 "用 X 打开"）
         # 每项格式：{"name": "显示名称", "path": "/Applications/...app"}
@@ -377,6 +380,16 @@ class AdvancedConfig:
         """逐鸟分类采纳阈值(%) / Per-bird species adoption threshold (percent)."""
         return float(self.config.get("multibird_species_threshold", 35))
 
+    @property
+    def mainbird_rare_min_conf(self) -> float:
+        """综合重选：稀有鸟要求的分类置信(%) / Rare-bird min confidence."""
+        return float(self.config.get("mainbird_rare_min_conf", 70))
+
+    @property
+    def mainbird_rare_gbif(self) -> float:
+        """综合重选：稀有鸟要求的 GBIF 稀有度 / Rare-bird min GBIF rarity."""
+        return float(self.config.get("mainbird_rare_gbif", 50))
+
     # Setter方法
     def set_min_confidence(self, value):
         """设置AI置信度阈值 (0.3-0.7)"""
@@ -441,6 +454,16 @@ class AdvancedConfig:
     def set_multibird_species_threshold(self, value: float) -> None:
         """设置逐鸟分类采纳阈值 (10-95%) / Set per-bird species threshold."""
         self.config["multibird_species_threshold"] = max(
+            10.0, min(95.0, float(value)))
+
+    def set_mainbird_rare_min_conf(self, value: float) -> None:
+        """设置稀有主鸟的置信门槛 (30-95%) / Set rare-bird confidence gate."""
+        self.config["mainbird_rare_min_conf"] = max(
+            30.0, min(95.0, float(value)))
+
+    def set_mainbird_rare_gbif(self, value: float) -> None:
+        """设置稀有主鸟的 GBIF 门槛 (10-95) / Set rare-bird GBIF gate."""
+        self.config["mainbird_rare_gbif"] = max(
             10.0, min(95.0, float(value)))
 
     def set_log_level(self, value):

@@ -1145,12 +1145,19 @@ def identify_bird(
                 pass
 
         # 地理过滤：分层候选集逐层放宽，替代旧的「一次性候选 + 三级断裂兜底」。
-        # 无 GPS 时用用户手选的地区/国家从 L4 起步；两者都缺则直接无过滤。
+        # 无 GPS 时用用户手选的地区/国家从 L4 起步；两者都缺则默认中国（CN），
+        # 兜底仍为完全无过滤。
         # Geo filter: layered candidates widened tier by tier, replacing the old
         # single candidate set with three disconnected fallbacks. Without GPS we
         # start at L4 using the user's chosen region/country; lacking both, we
-        # go unfiltered.
-        effective_region = region_code or country_code or photo_country_code
+        # default to China (CN). The final fallback is still unfiltered.
+        DEFAULT_COUNTRY_NO_GPS = "CN"
+        effective_region = (
+            region_code
+            or country_code
+            or photo_country_code
+            or DEFAULT_COUNTRY_NO_GPS
+        )
         if use_geo_filter:
             results, tier, count = _identify_with_tiers(
                 image,

@@ -583,6 +583,21 @@ def _build_context_menu(parent_widget, photo: dict, directory: str):
     species_action.triggered.connect(_edit_species)
     menu.addAction(species_action)
 
+    # 多鸟编辑（V5.0 multibird）：人工审阅/修正逐鸟识别结果，
+    # 编辑写入 sidecar JSON（不动照片 EXIF）。多鸟照片为主要场景，
+    # 单鸟照片也可用于改主鸟种。
+    # Multi-bird editor: manual review of per-bird results; edits go
+    # to the sidecar JSON, never to the photo's EXIF.
+    multibird_action = QAction(_i18n.t('browser.ctx_multibird_edit'), parent_widget)
+
+    def _edit_multibird(_checked=False, _p=photo):
+        handler = getattr(parent_widget, "_on_multibird_edit_requested", None)
+        if callable(handler):
+            handler(_p)
+
+    multibird_action.triggered.connect(_edit_multibird)
+    menu.addAction(multibird_action)
+
     # 用户配置的外部应用列表（设置 → 外部应用）
     external_apps = get_advanced_config().get_external_apps()
     if external_apps:
@@ -1485,6 +1500,25 @@ class ResultsBrowserWindow(QMainWindow):
             path = photo.get("current_path") or photo.get("original_path") or ""
             return path if path and os.path.exists(path) else None
         return None
+
+    def _on_multibird_edit_requested(self, photo: dict):
+        """
+        右键「多鸟编辑」→ 打开多鸟编辑对话框（V5.0 multibird）。
+
+        编辑写入图片同目录的 sidecar JSON（.superpicky/meta/），不碰照片
+        EXIF；物种修改会同步 bird_detections 表。保存后刷新详情面板。
+        Open the multi-bird editor dialog; edits persist to the sidecar
+        JSON beside the photo (never EXIF).
+        """
+        from PySide6.QtWidgets import QDialog
+        from ui.multibird_editor_dialog import MultibirdEditorDialog
+
+        directory = photo.get("_base_dir") or photo.get("source_dir") \
+            or self._directory
+        dialog = MultibirdEditorDialog(photo, directory, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            # 保存成功：刷新详情面板（主鸟种可能变化）
+            self._detail_panel.show_photo(photo)
 
     def _on_species_edit_requested(self, photo: dict):
         """

@@ -133,32 +133,38 @@ def _build_processing_section(photo_row: dict) -> dict:
     }
 
 
-def _build_detection_sections(detection_rows: List[dict]) -> List[dict]:
+def _build_detection_sections(detection_rows: List[dict],
+                              existing: Optional[dict] = None) -> List[dict]:
     """
     把 bird_detections 行转换为 detections 数组（坐标已是原图像素）。
 
-    mask_polygon 在库里是 JSON 字符串，此处解析回点阵数组，便于网站
-    直接消费；解析失败时置 None（不中断导出）。
+    polygon 不导出（用户确认不需要，节省空间）——库里仍有
+    mask_polygon 列，需要时可重导出或用 YOLO 确定性重算。
 
-    Convert bird_detections rows to the detections array; the stored
-    polygon JSON string is parsed back into a point array.
+    existing 为当前已存在的 sidecar JSON（可 None）。人工编辑优先：
+    - existing 中同 index 的 detection 若 edited=true，其 species/edited
+      以 JSON 为准（数据库是机器结果，人工改动不能被重导出覆盖）；
+    - 若被人工软删除（deleted=true），保留 deleted 标记。
+
+    Convert bird_detections rows to the detections array. Manual edits
+    in an existing sidecar win over DB values on re-export.
     """
+    existing_dets = {}
+    if existing:
+        for det in existing.get("detections") or []:
+            if isinstance(det, dict) and det.get("index") is not None:
+                existing_dets[det["index"]] = det
+
     sections = []
     for row in sorted(detection_rows, key=lambda r: r.get("bird_index") or 0):
-        polygon = None
-        raw_poly = row.get("mask_polygon")
-        if raw_poly:
-            try:
-                polygon = json.loads(raw_poly)
-            except (TypeError, ValueError):
-                polygon = None
+        index = row.get("bird_index")
+        prev = existing_dets.get(index) or {}
         has_species = bool(row.get("species_cn") or row.get("species_en"))
-        sections.append({
-            "index": row.get("bird_index"),
+        section = {
+            "index": index,
             "is_selected": bool(row.get("is_selected")),
             "bbox": [row.get("bbox_x"), row.get("bbox_y"),
                      row.get("bbox_w"), row.get("bbox_h")],
-            "polygon": polygon,
             "area_ratio": row.get("area_ratio"),
             "yolo_conf": row.get("yolo_conf"),
             "crop_sharpness": row.get("crop_sharpness"),
@@ -173,17 +179,27 @@ def _build_detection_sections(detection_rows: List[dict]) -> List[dict]:
             "notable": bool(row.get("notable")),
             "notable_reason": row.get("notable_reason"),
             "edited": bool(row.get("edited")),
-        })
+        }
+        # 人工编辑优先 / manual edits win over DB re-export
+        if prev.get("edited"):
+            section["species"] = prev.get("species")
+            section["edited"] = True
+        if prev.get("deleted"):
+            section["deleted"] = True
+        sections.append(section)
     return sections
 
 
-def _load_existing_edits(path: str) -> Optional[List[dict]]:
-    """读取现有 sidecar 的 edits 数组（人工编辑历史永不丢失）。"""
+def _load_existing_payload(path: str) -> Optional[dict]:
+    """
+    读取现有 sidecar JSON 全文（人工编辑合并的基准）；损坏返回 None。
+
+    Load the existing sidecar JSON for edit-preserving re-export.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        edits = data.get("edits")
-        return edits if isinstance(edits, list) else None
+        return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
 
@@ -258,15 +274,19 @@ def export_directory_sidecars(report_db, directory: str,
 
         photo_row = dict(photo_row)
         photo_row["_directory"] = directory
+        existing = _load_existing_payload(path)
         payload = {
             "schema_version": SCHEMA_VERSION,
             "_export_stamp": stamp,
             "photo": _build_photo_section(photo_row),
             "processing": _build_processing_section(photo_row),
-            "detections": _build_detection_sections(det_rows),
-            # 人工编辑历史：重导出时从现有文件回带（二期编辑工具写入）
-            "edits": _load_existing_edits(path) or [],
+            "detections": _build_detection_sections(det_rows, existing),
+            # 人工编辑历史与主鸟种选择：重导出时从现有文件回带
+            # （编辑工具写入；机器重导出不覆盖人工结果）
+            "edits": (existing or {}).get("edits") or [],
         }
+        if existing and existing.get("main_species"):
+            payload["main_species"] = existing["main_species"]
         try:
             _atomic_write_json(path, payload)
             written += 1

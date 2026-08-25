@@ -989,6 +989,15 @@ class ReportDB:
         now = _now_iso()
         with self._lock:
             with self._conn:
+                # 幂等重标：先清全部旧召回标记（仅原标记行，updated_at
+                # 只在标记变化时才被动到，避免全量 sidecar 重导出）
+                self._conn.execute(
+                    "UPDATE photos SET notable = 0, updated_at = ? "
+                    "WHERE notable = 1", (now,))
+                self._conn.execute(
+                    "UPDATE bird_detections SET notable = 0, "
+                    "notable_reason = NULL, updated_at = ? "
+                    "WHERE notable = 1", (now,))
                 for filename in photo_flags:
                     self._conn.execute(
                         "UPDATE photos SET notable = 1, updated_at = ? "

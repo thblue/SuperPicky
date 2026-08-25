@@ -736,5 +736,73 @@ class TestV54MultiMainAndSoftDelete(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestSyncManualEdits(unittest.TestCase):
+    """spb_sync_edits：sidecar JSON 人工编辑回放进 report.db。"""
+
+    def test_replay_json_edits_into_db(self):
+        """含人工痕迹的 JSON：主鸟多选/删框/改种全部落库并重算召回。"""
+        import os, shutil, tempfile
+        from spb_sync_edits import sync_manual_edits
+        from tools.report_db import ReportDB
+        d = tempfile.mkdtemp()
+        try:
+            db = ReportDB(d)
+            db.insert_photo({'filename': 'A', 'has_bird': 1, 'rating': 3,
+                             'bird_species_cn': '鸿雁'})
+            db.insert_detections_batch([
+                {'filename': 'A', 'bird_index': 0, 'is_selected': 1,
+                 'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+                 'species_cn': '鸿雁', 'species_confidence': 95.0},
+                {'filename': 'A', 'bird_index': 8, 'is_selected': 0,
+                 'bbox_x': 50, 'bbox_y': 50, 'bbox_w': 8, 'bbox_h': 8,
+                 'species_cn': '白枕鹤', 'species_confidence': 52.4},
+                {'filename': 'A', 'bird_index': 9, 'is_selected': 0,
+                 'bbox_x': 60, 'bbox_y': 60, 'bbox_w': 8, 'bbox_h': 8,
+                 'species_cn': '误识鸟', 'species_confidence': 88.0},
+            ])
+            meta = os.path.join(d, '.superpicky', 'meta')
+            os.makedirs(meta, exist_ok=True)
+            with open(os.path.join(meta, 'A.json'), 'w',
+                      encoding='utf-8') as f:
+                json.dump({
+                    'main_species': [
+                        {'cn': '鸿雁', 'en': 'Swan Goose',
+                         'scientific': 'Anser cygnoides', 'bird_index': 0},
+                        {'cn': '白枕鹤', 'en': 'White-naped Crane',
+                         'scientific': 'Antigone vipio', 'bird_index': 8},
+                    ],
+                    'detections': [
+                        {'index': 0, 'is_selected': True},
+                        {'index': 8, 'is_selected': False},
+                        {'index': 9, 'deleted': True},
+                    ],
+                    'edits': [{'actor': 'human', 'action': 'main_species_set'}],
+                }, f, ensure_ascii=False)
+
+            totals = sync_manual_edits(db, d, log=lambda *_: None)
+            self.assertEqual(totals['photos'], 1)
+            self.assertEqual(totals['main'], 1)
+            self.assertEqual(totals['deleted'], 1)
+
+            rows = {r['bird_index']: r for r in db.get_detections('A')}
+            self.assertEqual(rows[0]['is_selected'], 1)
+            self.assertEqual(rows[8]['is_selected'], 1)
+            self.assertEqual(rows[9]['deleted'], 1)
+            # 误识鸟被软删 → 不再召回（白枕鹤已成人主鸟）
+            flagged = db.get_photos_by_filters({'notable_only': True})
+            self.assertEqual(flagged, [])
+            # 物种筛选按白枕鹤命中
+            hits = db.get_photos_by_filters({'bird_species_cn': '白枕鹤'})
+            self.assertEqual([p['filename'] for p in hits], ['A'])
+            # 幂等：重复回放无副作用
+            totals2 = sync_manual_edits(db, d, log=lambda *_: None)
+            self.assertEqual(totals2['photos'], 1)
+            rows2 = {r['bird_index']: r for r in db.get_detections('A')}
+            self.assertEqual(rows2[8]['is_selected'], 1)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

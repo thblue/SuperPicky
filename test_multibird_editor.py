@@ -294,6 +294,88 @@ class TestMultibirdEditor(unittest.TestCase):
         det0 = [x for x in data['detections'] if x['index'] == 0][0]
         self.assertEqual(det0['species']['cn'], '泽鹬')
 
+    def test_remark_unclassified_bird_no_crash(self):
+        """改种未分类框（species=None）不崩溃，新种可勾为主鸟（回归 bug）。"""
+        # 把 #2 变成未分类框（JSON 导出的真实形态："species": null）
+        self._det(2)['species'] = None
+        self.dlg._rebuild_main_checkboxes()
+        self.dlg._canvas.set_selected(2)
+        self.dlg._refresh_selection_ui()
+        import ui.bird_species_edit_dialog as bsed
+        orig_cls = bsed.BirdSpeciesEditDialog
+
+        class _FakeSpeciesDialog:
+            def __init__(self, parent=None):
+                self.selected_cn = '淡眉雀鹛'
+                self.selected_en = 'X'
+                self.selected_latin = 'Alcippe x'
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+                return QDialog.Accepted
+
+        bsed.BirdSpeciesEditDialog = _FakeSpeciesDialog
+        try:
+            self.dlg._on_remark()   # 修复前此处 AttributeError 静默中断
+        finally:
+            bsed.BirdSpeciesEditDialog = orig_cls
+        det = self._det(2)
+        self.assertEqual(det['species']['cn'], '淡眉雀鹛')
+        self.assertTrue(det['edited'])
+        # 候选与复选框出现新种，且可勾选为主鸟
+        cands = [c['cn'] for c in self.dlg._main_candidates()]
+        self.assertIn('淡眉雀鹛', cands)
+        target = next(cb for cb in self.dlg._main_checkboxes
+                      if '淡眉雀鹛' in cb.text())
+        target.setChecked(True)
+        self.assertTrue(target.isChecked())
+        self.assertIn(2, self.dlg._main_indexes)
+
+    def test_rename_checked_main_follows(self):
+        """改主鸟的物种后勾选自动跟随新名字，保存后主鸟=新种。"""
+        # #0 泽鹬是勾选的主鸟；改它为白鹭
+        self.dlg._canvas.set_selected(0)
+        self.dlg._refresh_selection_ui()
+        self.assertTrue(self.dlg._main_indexes == [0])
+        import ui.bird_species_edit_dialog as bsed
+        orig_cls = bsed.BirdSpeciesEditDialog
+
+        class _FakeSpeciesDialog:
+            def __init__(self, parent=None):
+                self.selected_cn = '白鹭'
+                self.selected_en = 'Little Egret'
+                self.selected_latin = 'Egretta garzetta'
+
+            def exec(self):
+                from PySide6.QtWidgets import QDialog
+                return QDialog.Accepted
+
+        bsed.BirdSpeciesEditDialog = _FakeSpeciesDialog
+        try:
+            self.dlg._on_remark()
+        finally:
+            bsed.BirdSpeciesEditDialog = orig_cls
+        # 勾选跟随：白鹭 #0 的复选框仍处于勾选状态（序号锚定）
+        target = next(cb for cb in self.dlg._main_checkboxes
+                      if '白鹭' in cb.text())
+        self.assertTrue(target.isChecked())
+        self.assertEqual(self.dlg._main_indexes, [0])
+        # 保存：JSON 主鸟=白鹭，photos 表同步第一主鸟
+        from PySide6.QtWidgets import QDialog
+        self.dlg.accepted.connect(lambda: None)
+        self.dlg._on_save()
+        data = json.load(open(os.path.join(
+            self.d, '.superpicky', 'meta', 'F1.json'), encoding='utf-8'))
+        self.assertEqual([m['cn'] for m in data['main_species']], ['白鹭'])
+        from tools.report_db import ReportDB
+        db = ReportDB(self.d)
+        photo = db.get_photo('F1')
+        rows = {r['bird_index']: r for r in db.get_detections('F1')}
+        db._conn.close()
+        self.assertEqual(photo['bird_species_cn'], '白鹭')
+        self.assertEqual(rows[0]['species_cn'], '白鹭')
+        self.assertEqual(rows[0]['is_selected'], 1)
+
 
 class TestChipSpeciesDelete(unittest.TestCase):
     """chips 右键删除鸟种（批量软删 + 联动）。"""

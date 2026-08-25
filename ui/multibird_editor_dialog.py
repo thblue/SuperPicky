@@ -565,7 +565,9 @@ class MultibirdEditorDialog(QDialog):
         self._closing = False
 
         # 主鸟种选择状态（species key 列表）
-        self._main_keys: List[str] = []
+        # 主鸟选择按「鸟序号」跟踪（V5.4）：改种后勾选自动跟随新名字；
+        # 物种键在改名后必然失效，是"改完种主鸟勾选丢失"的根源
+        self._main_indexes: List[int] = []
         self._main_checkboxes: List[QCheckBox] = []
         # 物种修改（同步 DB 用）：bird_index → (cn, en, scientific)
         self._species_updates = {}
@@ -811,7 +813,7 @@ class MultibirdEditorDialog(QDialog):
         self._main_lay = QVBoxLayout()
         self._main_lay.setContentsMargins(0, 0, 0, 0)
         main_outer.addLayout(self._main_lay)
-        self._main_keys = self._default_main_keys()
+        self._main_indexes = self._default_main_indexes()
         self._rebuild_main_checkboxes()
         right_lay.addWidget(main_box)
 
@@ -1128,8 +1130,9 @@ class MultibirdEditorDialog(QDialog):
         # 选中鸟被删 → 清空选中
         if self._canvas._selected in removed:
             self._canvas.set_selected(-1)
-        # 主鸟种选择剔除该种（人工多选里不可能再选已删种）
-        self._main_keys = [k for k in self._main_keys if k != key]
+        # 主鸟选择剔除被删的鸟序号（人工多选里不可能再选已删种）
+        self._main_indexes = [i for i in self._main_indexes
+                              if i not in removed]
         self._canvas.set_highlight_keys(None)   # 清筛选高亮（该种已消失）
         self._rebuild_main_checkboxes()
         self._rebuild_species_chips()
@@ -1250,10 +1253,15 @@ class MultibirdEditorDialog(QDialog):
         if not (cn or en or latin):
             return
         old = copy.deepcopy(det.get("species"))
+        # 未分类框的 species 是 None：{} 默认值只在键缺失时生效，
+        # 必须用 `or {}` 防 AttributeError（改种未分类鸟的真实回归 bug）
+        # Unclassified boxes carry species=None; `or {}` avoids the
+        # AttributeError that silently killed the rename.
+        prev_species = det.get("species") or {}
         det["species"] = {
             "cn": cn, "en": en, "scientific": latin,
             "confidence": None, "class_id": None,
-            "gbif_rarity_100": det.get("species", {}).get("gbif_rarity_100"),
+            "gbif_rarity_100": prev_species.get("gbif_rarity_100"),
         }
         det["edited"] = True
         self._species_updates[det.get("index")] = (cn, en, latin)
@@ -1322,22 +1330,25 @@ class MultibirdEditorDialog(QDialog):
                 }
         return list(seen.values())
 
-    def _default_main_keys(self) -> List[str]:
-        """默认主鸟种：JSON 已有人工选择 → 沿用；否则电脑主鸟。"""
+    def _default_main_indexes(self) -> List[int]:
+        """默认主鸟的鸟序号：JSON 已有人工选择 → 沿用其 bird_index；
+        否则电脑选中的主鸟（is_selected 且未删、有物种）。"""
         existing = (self._data or {}).get("main_species") or []
-        if existing:
-            return [e.get("scientific") or e.get("cn") or ""
-                    for e in existing if e]
+        idx = [e.get("bird_index") for e in existing
+               if isinstance(e, dict) and e.get("bird_index") is not None]
+        if idx:
+            return idx
         for det in (self._data or {}).get("detections") or []:
             if det.get("is_selected") and not det.get("deleted") \
                     and det.get("species"):
-                return [self._species_key(det["species"])]
-        # 回退 photos 表的主鸟种（单鸟照）
-        cn = self._photo.get("bird_species_cn")
-        en = self._photo.get("bird_species_en")
-        if cn or en:
-            return [f"{cn or en}"]
+                return [det.get("index")]
         return []
+
+    @property
+    def _main_keys(self) -> List[str]:
+        """当前主鸟的物种键（由鸟序号派生，兼容旧测试/日志读取）。"""
+        cands = {c["bird_index"]: c for c in self._main_candidates()}
+        return [cands[i]["key"] for i in self._main_indexes if i in cands]
 
     def _rebuild_main_checkboxes(self) -> None:
         """重建主鸟种复选框（人工改分类后即时刷新）。"""
@@ -1348,9 +1359,17 @@ class MultibirdEditorDialog(QDialog):
             if w is not None:
                 w.deleteLater()
         self._main_checkboxes = []
+        # 勾选判定按物种键：JSON main_species 的 bird_index 可能指向该种
+        # 的非首个检测（候选按物种去重取首现），序号→键翻译后比对
+        index_set = set(self._main_indexes)
+        key_set = set()
+        for det in (self._data or {}).get("detections") or []:
+            if det.get("species") and not det.get("deleted") \
+                    and det.get("index") in index_set:
+                key_set.add(self._species_key(det["species"]))
         for cand in self._main_candidates():
             cb = QCheckBox(f"{cand['cn']}  #{cand['bird_index']}")
-            cb.setChecked(cand["key"] in self._main_keys)
+            cb.setChecked(cand["key"] in key_set)
             cb.stateChanged.connect(self._on_main_toggled)
             self._main_checkboxes.append(cb)
             self._main_lay.addWidget(cb)
@@ -1360,7 +1379,11 @@ class MultibirdEditorDialog(QDialog):
             self._main_lay.addWidget(tip)
 
     def _on_main_toggled(self) -> None:
-        """复选状态变化：收集勾选并强制 1 ≤ 主鸟种数 ≤ MAX_MAIN_SPECIES。"""
+        """复选状态变化：收集勾选并强制 1 ≤ 主鸟种数 ≤ MAX_MAIN_SPECIES。
+
+        主鸟状态按鸟序号存储：改种后复选框重建时勾选自动跟随，
+        物种键（学名/中文名）在改名后必然变化，不能作为状态锚。
+        """
         sender = self.sender()
         checked = [cb for cb in self._main_checkboxes if cb.isChecked()]
         if len(checked) > MAX_MAIN_SPECIES and sender is not None:
@@ -1378,8 +1401,8 @@ class MultibirdEditorDialog(QDialog):
             sender.blockSignals(False)
             return
         cands = self._main_candidates()
-        self._main_keys = [
-            cand["key"] for cand, cb in zip(cands, self._main_checkboxes)
+        self._main_indexes = [
+            cand["bird_index"] for cand, cb in zip(cands, self._main_checkboxes)
             if cb.isChecked()]
 
     # ------------------------------------------------------------------
@@ -1389,11 +1412,12 @@ class MultibirdEditorDialog(QDialog):
     def _on_save(self) -> None:
         """写入 sidecar JSON + 同步 report.db（物种/主鸟/删框），关闭对话框。"""
         from core.sidecar_export import _atomic_write_json
-        # 主鸟种选择写入顶层（候选映射回完整字段）
-        cands = {c["key"]: c for c in self._main_candidates()}
+        # 主鸟种选择写入顶层（按鸟序号映射回完整字段；序号在改种后
+        # 仍指向同一只鸟，天然跟随人工改名）
+        cands = {c["bird_index"]: c for c in self._main_candidates()}
         main_species = []
-        for key in self._main_keys:
-            c = cands.get(key)
+        for idx in self._main_indexes:
+            c = cands.get(idx)
             if c:
                 main_species.append({
                     "cn": c["cn"], "en": c["en"],

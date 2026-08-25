@@ -66,10 +66,19 @@ class AdvancedConfig:
         "arw_write_mode": "embedded",
 
         # 全局元数据写入模式（覆盖所有文件类型）:
-        #   embedded: 默认行为（ARW 走 arw_write_mode，JPG 直写）
+        #   embedded: 写入元数据（专有 RAW 走 XMP 侧车，ARW 走 arw_write_mode，JPG 直写）
         #   sidecar:  所有文件统一写 .xmp 侧车，不修改原文件
-        #   none:     跳过所有元数据写入，仅按评分整理目录
-        "metadata_write_mode": "embedded",
+        #   none:     跳过所有元数据写入，结果只落 report.db + meta/*.json
+        # 默认 none（2026-08-25）：评星/鸟种结果以 JSON 侧车为主出口（作者不用
+        # Lightroom）；EXIF/XMP 写入在 NAS 上极慢（大 JPG 整文件重写 >5s/张，
+        # 曾触发批量写入超时循环）。需要 LR 互操作时，在设置中心或 CLI
+        # --metadata-mode embedded/sidecar 改回。
+        # Default "none" (2026-08-25): ratings/species are consumed from JSON
+        # sidecars (report.db + meta/*.json); the author does not use Lightroom.
+        # EXIF/XMP writes over NAS are extremely slow (full JPG rewrite >5s/file,
+        # historically triggering batch timeout loops). Lightroom users can
+        # switch back via Settings or --metadata-mode embedded/sidecar.
+        "metadata_write_mode": "none",
         
         # 临时文件管理 V4.1
         "keep_temp_files": True,        # 保留临时预览图片（统一控制 tmp JPG + debug crops）
@@ -107,6 +116,9 @@ class AdvancedConfig:
         # V5.1: 焦点未命中时的综合主鸟重选（core/multi_bird.select_main_bird）
         "mainbird_rare_min_conf": 70,        # 「置信的稀有鸟」要求分类置信 ≥ 此值(%)
         "mainbird_rare_gbif": 50,            # 「稀有鸟」要求 GBIF 稀有度 ≥ 此值（50=罕见档）
+        # V5.2: 物种召回的采纳门槛（%）。低于逐鸟采纳阈值(35)可放行更多
+        # 低置信候选供人工核对（如 15），代价是误检会混入召回列表
+        "recall_species_threshold": 35,
 
         # 外部编辑应用（右键菜单 "用 X 打开"）
         # 每项格式：{"name": "显示名称", "path": "/Applications/...app"}
@@ -386,6 +398,11 @@ class AdvancedConfig:
         return float(self.config.get("mainbird_rare_min_conf", 70))
 
     @property
+    def recall_species_threshold(self) -> float:
+        """物种召回采纳阈值(%) / Species-recall adoption threshold."""
+        return float(self.config.get("recall_species_threshold", 35))
+
+    @property
     def mainbird_rare_gbif(self) -> float:
         """综合重选：稀有鸟要求的 GBIF 稀有度 / Rare-bird min GBIF rarity."""
         return float(self.config.get("mainbird_rare_gbif", 50))
@@ -456,6 +473,11 @@ class AdvancedConfig:
         self.config["multibird_species_threshold"] = max(
             10.0, min(95.0, float(value)))
 
+    def set_recall_species_threshold(self, value: float) -> None:
+        """设置召回采纳门槛 (5-95%) / Set recall adoption threshold."""
+        self.config["recall_species_threshold"] = max(
+            5.0, min(95.0, float(value)))
+
     def set_mainbird_rare_min_conf(self, value: float) -> None:
         """设置稀有主鸟的置信门槛 (30-95%) / Set rare-bird confidence gate."""
         self.config["mainbird_rare_min_conf"] = max(
@@ -524,8 +546,8 @@ class AdvancedConfig:
             self.config["arw_write_mode"] = value
 
     def get_metadata_write_mode(self) -> str:
-        """获取全局元数据写入模式: embedded | sidecar | none"""
-        return self.config.get("metadata_write_mode", "embedded")
+        """获取全局元数据写入模式: embedded | sidecar | none（默认 none，见 DEFAULT_CONFIG 注释）"""
+        return self.config.get("metadata_write_mode", "none")
 
     def set_metadata_write_mode(self, value):
         """设置全局元数据写入模式: embedded | sidecar | none"""

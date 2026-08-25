@@ -3338,7 +3338,7 @@ class PhotoProcessor:
                 from core.species_recall import run_species_recall
                 run_species_recall(
                     self.report_db,
-                    species_threshold=self.config.multibird_species_threshold,
+                    species_threshold=self.config.recall_species_threshold,
                     log=self._log)
             except Exception as _sr_e:
                 self._log(f"  ⚠️ Species recall failed: {_sr_e}", "warning")

@@ -295,6 +295,54 @@ class TestMultibirdEditor(unittest.TestCase):
         self.assertEqual(det0['species']['cn'], '泽鹬')
 
 
+class TestChipSpeciesDelete(unittest.TestCase):
+    """chips 右键删除鸟种（批量软删 + 联动）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.d, self.photo = _make_fixture()
+        from ui.multibird_editor_dialog import MultibirdEditorDialog
+        self.dlg = MultibirdEditorDialog(self.photo, self.d, load_async=False)
+
+    def tearDown(self):
+        self.dlg.deleteLater()
+        shutil.rmtree(self.d, ignore_errors=True)
+
+    def test_delete_species_boxes_soft_deletes_all(self):
+        """删除某鸟种 → 该种全部框软删、chips/主鸟种候选联动。"""
+        # fixture: #1 反嘴鹬 80% —— 删它
+        key = "Recurvirostra avosetta"
+        self.dlg._delete_species_boxes(key)
+        det1 = [d for d in self.dlg._data["detections"]
+                if d["index"] == 1][0]
+        self.assertTrue(det1.get("deleted"))
+        # chips 里不再有该种
+        keys = {self.dlg._chips_lay.itemAt(i).widget().property("species_key")
+                for i in range(self.dlg._chips_lay.count())}
+        self.assertNotIn(key, keys)
+        # 主鸟种候选剔除
+        cands = [c["key"] for c in self.dlg._main_candidates()]
+        self.assertNotIn(key, cands)
+        # edits 日志
+        self.assertIn("bbox_deleted",
+                      [e["action"] for e in self.dlg._data["edits"]])
+        # 其余鸟种不受影响
+        det0 = [d for d in self.dlg._data["detections"]
+                if d["index"] == 0][0]
+        self.assertFalse(det0.get("deleted"))
+
+    def test_delete_selected_species_clears_selection(self):
+        """删除的种正好是选中鸟 → 选中清空、右侧复位。"""
+        self.dlg._canvas.set_selected(1)
+        self.dlg._refresh_selection_ui()
+        self.dlg._delete_species_boxes("Recurvirostra avosetta")
+        self.assertEqual(self.dlg._canvas._selected, -1)
+
+
 class _FakeMouse:
     """mousePressEvent 需要的最小事件桩 / minimal mouse-event stub."""
 

@@ -1074,6 +1074,11 @@ class MultibirdEditorDialog(QDialog):
             chip.setProperty("species_key", key)
             chip.toggled.connect(
                 lambda checked, _k=key: self._on_chip_toggled(_k, checked))
+            # V5.2: 右键 → 删除该鸟种的全部框（软删除，误识别清理快捷入口）
+            chip.setContextMenuPolicy(Qt.CustomContextMenu)
+            chip.customContextMenuRequested.connect(
+                lambda pos, _k=key, _w=chip:
+                    self._chip_context_menu(_k, _w, pos))
             self._chips_lay.addWidget(chip)
 
     def _on_chip_toggled(self, key: str, checked: bool) -> None:
@@ -1086,6 +1091,50 @@ class MultibirdEditorDialog(QDialog):
                 self._canvas.set_selected(visible[0].get("index", -1))
                 self._bright_slider.setValue(0)
                 self._refresh_selection_ui()
+
+    def _chip_context_menu(self, key: str, chip, pos) -> None:
+        """chips 右键菜单：删除该鸟种在本照片的全部检测框。"""
+        from PySide6.QtWidgets import QMenu
+        n = sum(
+            1 for det in (self._data or {}).get("detections") or []
+            if not det.get("deleted")
+            and self._canvas._det_species_key(det) == key)
+        if n == 0:
+            return
+        menu = QMenu(chip)
+        label = next((c["cn"] for c in self._main_candidates()
+                      if c["key"] == key), key)
+        act = menu.addAction(f"删除「{label}」的全部框（{n} 处，软删除）")
+        chosen = menu.exec(chip.mapToGlobal(pos))
+        if chosen is act:
+            self._delete_species_boxes(key)
+
+    def _delete_species_boxes(self, key: str) -> None:
+        """
+        软删除某鸟种在本照片的全部检测框（右键快捷清理误识别）。
+
+        联动：右侧选中鸟若被删则清空选中、主鸟种复选剔除该种、
+        chips/画布即时刷新；保存时随 JSON 落盘（deleted=true）。
+        """
+        removed = []
+        for det in (self._data or {}).get("detections") or []:
+            if (not det.get("deleted")
+                    and self._canvas._det_species_key(det) == key):
+                det["deleted"] = True
+                self._append_edit("bbox_deleted", det.get("index"))
+                removed.append(det.get("index"))
+        if not removed:
+            return
+        # 选中鸟被删 → 清空选中
+        if self._canvas._selected in removed:
+            self._canvas.set_selected(-1)
+        # 主鸟种选择剔除该种（人工多选里不可能再选已删种）
+        self._main_keys = [k for k in self._main_keys if k != key]
+        self._canvas.set_highlight_keys(None)   # 清筛选高亮（该种已消失）
+        self._rebuild_main_checkboxes()
+        self._rebuild_species_chips()
+        self._refresh_selection_ui()
+        self._canvas.update()
 
     def _chips_state(self) -> dict:
         """当前各 chip 的勾选状态（键 → bool）。"""

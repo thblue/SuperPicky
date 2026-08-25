@@ -8,9 +8,10 @@ Sidecar JSON 导出模块（per-photo rich data sidecar）
 消费（用户的照片管理网站、人工审核工具）的对外数据契约层：
 
 - RAW/JPG 原文件零接触（非破坏工作流的数据出口）；
-- 增量导出：JSON 内记录 `_export_stamp`（photo 与其全部 detection 的
-  updated_at 最大值），未变化的照片跳过重写；旧格式（photo.library_path
-  缺失）的存量 JSON 也会被重写升级（自愈迁移，不依赖导出戳变化）；
+- 增量导出：JSON 内记录 `_export_stamp`（photo 与全部 detection 业务
+  字段的内容哈希，V5.4 起），未变化的照片跳过重写；旧格式
+  （photo.library_path 缺失）的存量 JSON 也会被重写升级（自愈迁移，
+  不依赖导出戳变化）；
 - 人工编辑（edits 数组，二期编辑工具写入）在重导出时原样保留；
 - 原子写：先写 .tmp 再 os.replace（SMB 网络盘安全）；
 - UTF-8 无 BOM，中文物种名直接可读；
@@ -29,6 +30,7 @@ consumers can locate photos after organizing moves.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Dict, List, Optional
@@ -44,17 +46,31 @@ def _sidecar_path(directory: str, prefix: str) -> str:
 
 def _export_stamp(photo_row: dict, detection_rows: List[dict]) -> str:
     """
-    计算导出戳：photo 行与全部 detection 行 updated_at 的最大值。
+    计算导出戳：photo 行 + 全部 detection 行的**业务字段内容哈希**。
 
-    用于增量判断——任何一个字段更新都会使戳变化，触发重写。
+    V5.4 起不再用 updated_at 最大值——它只有秒级精度，"编辑器保存 →
+    立即重导出"这类同秒链路（软删框/主鸟勾选/召回重标）戳不变，会漏
+    重写。内容哈希任何字段变化（含同秒变化）必然变化；纯 updated_at
+    变化（如召回重跑碰了值未变的行）不触发重写，语义更准。
 
-    Compute the export stamp (max updated_at of photo + detections)
-    for incremental re-export decisions.
+    排除字段：id / created_at / updated_at（自增与时间戳非业务内容）。
+
+    Compute the export stamp as a content hash over the business fields
+    of the photo row + its detection rows (timestamps and row ids
+    excluded). Robust to same-second write-then-export flows.
     """
-    stamps = [photo_row.get("updated_at") or ""]
-    for det in detection_rows:
-        stamps.append(det.get("updated_at") or "")
-    return max(stamps)
+    volatile = ("id", "created_at", "updated_at")
+    payload = {
+        "photo": {k: v for k, v in photo_row.items() if k not in volatile},
+        "detections": [
+            {k: v for k, v in d.items() if k not in volatile}
+            for d in sorted(detection_rows,
+                            key=lambda r: r.get("bird_index") or 0)
+        ],
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                      default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
 
 
 def _normalize_rel(value: Optional[str]) -> Optional[str]:
@@ -277,7 +293,9 @@ def _build_detection_sections(detection_rows: List[dict],
         if prev.get("edited"):
             section["species"] = prev.get("species")
             section["edited"] = True
-        if prev.get("deleted"):
+        # 软删除：JSON 已有标记或 DB 行 deleted=1（V5.4 批量清理）都保留
+        # Soft-delete: keep the flag from JSON or from the DB row.
+        if prev.get("deleted") or row.get("deleted"):
             section["deleted"] = True
         sections.append(section)
     return sections
@@ -396,3 +414,70 @@ def export_directory_sidecars(report_db, directory: str,
         except OSError as e:
             log(f"  ⚠️ Sidecar write failed [{prefix}]: {e}")
     return written
+
+
+def mark_species_deleted_in_sidecar(
+    directory: str,
+    filename: str,
+    species_cn: Optional[str] = None,
+    species_en: Optional[str] = None,
+    scientific_name: Optional[str] = None,
+) -> int:
+    """
+    在一张照片的 sidecar JSON 里软删除某鸟种的全部检测框（V5.4 批量
+    清理入口，与多鸟编辑器的删框同格式：det.deleted=true + edits 记录）。
+
+    名字匹配：中文名/英文名/学名任一非空相等。文件不存在或无匹配返回 0；
+    全部已删（幂等重入）也返回 0。
+
+    参数:
+    directory (str): 照片目录
+    filename (str): 照片前缀（无扩展名）
+    species_cn / species_en / scientific_name (Optional[str]): 鸟种名
+
+    返回:
+    int: 本次新标记删除的检测框数
+
+    Soft-delete all detections of one species in a photo's sidecar JSON
+    (same format as the multi-bird editor's box deletion).
+    """
+    import datetime
+
+    path = _sidecar_path(directory, filename)
+    data = _load_existing_payload(path)
+    if not data:
+        return 0
+    dets = data.get("detections")
+    if not isinstance(dets, list):
+        return 0
+
+    def _match(species: Optional[dict]) -> bool:
+        if not isinstance(species, dict):
+            return False
+        pairs = ((species.get("cn"), species_cn),
+                 (species.get("en"), species_en),
+                 (species.get("scientific"), scientific_name))
+        return any(a and b and str(a).strip() == str(b).strip()
+                   for a, b in pairs)
+
+    removed = 0
+    for det in dets:
+        if not isinstance(det, dict) or det.get("deleted"):
+            continue
+        if _match(det.get("species")):
+            det["deleted"] = True
+            data.setdefault("edits", []).append({
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+                "actor": "human",
+                "action": "bbox_deleted",
+                "bird_index": det.get("index"),
+                "old": None,
+                "new": None,
+            })
+            removed += 1
+    if removed:
+        try:
+            _atomic_write_json(path, data)
+        except OSError:
+            return 0
+    return removed

@@ -27,19 +27,35 @@ from tools.file_utils import sibling_jpeg
 def _display_name(photo: dict) -> str:
     """卡片底部显示名:优先鸟种(跟随语言),无鸟种则用文件名。
 
+    V5.4 多主鸟:main_species_list(人工多选的主鸟,按 bird_index 序)
+    全部并列显示「鸿雁·白枕鹤」;无多主鸟数据时回退 photos 表单字段。
     V5.2 召回照片(含本批从未当主鸟的鸟种)追加待确认种后缀,
     便于在缩略图上一眼挑出需要核对的照片。
     """
     is_en = get_i18n().current_lang.startswith("en")
-    if is_en:
-        species = photo.get("bird_species_en") or photo.get("bird_species_cn")
+    # 多主鸟列表（去重保序）/ multi-main list (dedup, keep order)
+    main_names = []
+    for pair in photo.get("main_species_list") or []:
+        try:
+            cn, en = pair
+        except (TypeError, ValueError):
+            continue
+        nm = (en or cn) if is_en else (cn or en)
+        if nm and nm not in main_names:
+            main_names.append(nm)
+    if main_names:
+        name = "·".join(main_names)
     else:
-        species = photo.get("bird_species_cn") or photo.get("bird_species_en")
-    name = species or photo.get("filename", "")
+        if is_en:
+            species = photo.get("bird_species_en") or photo.get("bird_species_cn")
+        else:
+            species = photo.get("bird_species_cn") or photo.get("bird_species_en")
+        name = species or photo.get("filename", "")
     notable = photo.get("notable_species") or []
     if notable:
         shown = "、".join(notable[:2]) + ("..." if len(notable) > 2 else "")
-        if species:
+        if main_names or photo.get("bird_species_cn") \
+                or photo.get("bird_species_en"):
             name = f"{name}-{shown}"
         else:
             name = f"待确认:{shown}"

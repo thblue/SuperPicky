@@ -83,11 +83,11 @@ class TestSchemaV10Migration(unittest.TestCase):
         try:
             self._create_v9_db(db_dir)
             db = ReportDB(db_dir)
-            # 版本连续升级到当前 schema（V5.2 起为 11）
+            # 版本连续升级到当前 schema（V5.4 起为 12）
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
             self.assertEqual(ver, SCHEMA_VERSION)
-            self.assertEqual(SCHEMA_VERSION, "11")
+            self.assertEqual(SCHEMA_VERSION, "12")
             # 旧 photos 数据仍在
             photo = db.get_photo('OLD_0001')
             self.assertIsNotNone(photo)
@@ -95,6 +95,9 @@ class TestSchemaV10Migration(unittest.TestCase):
             # bird_detections 表已创建且可写
             db.insert_detections_batch(_make_rows('OLD_0001'))
             self.assertEqual(len(db.get_detections('OLD_0001')), 2)
+            # V5.4: deleted 列存在，新写入行默认 0（非 NULL）
+            for row in db.get_detections('OLD_0001'):
+                self.assertEqual(row.get('deleted'), 0)
             db._conn.close()
         finally:
             shutil.rmtree(db_dir, ignore_errors=True)
@@ -548,6 +551,186 @@ class TestSpeciesRecall(unittest.TestCase):
             stats = run_species_recall(db, species_threshold=35.0,
                                        log=lambda *_: None)
             self.assertEqual(stats['flagged_photos'], 0)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class TestV54MultiMainAndSoftDelete(unittest.TestCase):
+    """V5.4 多主鸟筛选 + 软删除 + 批量清理 + 召回联动。"""
+
+    def _setup_db(self, d):
+        """两张照片：A 主鸟=鸿雁 + 次要白枕鹤；B 主鸟=小天鹅 + 次要白枕鹤。"""
+        from tools.report_db import ReportDB
+        db = ReportDB(d)
+        db.insert_photo({'filename': 'A', 'has_bird': 1, 'rating': 3,
+                         'bird_species_cn': '鸿雁'})
+        db.insert_photo({'filename': 'B', 'has_bird': 1, 'rating': 2,
+                         'bird_species_cn': '小天鹅'})
+        db.insert_detections_batch([
+            {'filename': 'A', 'bird_index': 0, 'is_selected': 1,
+             'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+             'species_cn': '鸿雁', 'species_en': 'Swan Goose',
+             'scientific_name': 'Anser cygnoides',
+             'species_confidence': 95.0},
+            {'filename': 'A', 'bird_index': 8, 'is_selected': 0,
+             'bbox_x': 50, 'bbox_y': 50, 'bbox_w': 8, 'bbox_h': 8,
+             'species_cn': '白枕鹤', 'species_en': 'White-naped Crane',
+             'scientific_name': 'Antigone vipio',
+             'species_confidence': 52.4},
+            {'filename': 'A', 'bird_index': 13, 'is_selected': 0,
+             'bbox_x': 60, 'bbox_y': 60, 'bbox_w': 6, 'bbox_h': 6,
+             'species_cn': '小美洲黑雁', 'species_confidence': 35.0},
+        ])
+        db.insert_detections_batch([
+            {'filename': 'B', 'bird_index': 0, 'is_selected': 1,
+             'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+             'species_cn': '小天鹅', 'species_confidence': 90.0},
+            {'filename': 'B', 'bird_index': 1, 'is_selected': 0,
+             'bbox_x': 50, 'bbox_y': 50, 'bbox_w': 8, 'bbox_h': 8,
+             'species_cn': '白枕鹤', 'species_confidence': 17.4},
+        ])
+        return db
+
+    def test_multi_main_selection_and_species_filter(self):
+        """人工多选主鸟后：两个鸟种都能筛出该照片，标题数据齐全。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            # 模拟编辑器保存：A 勾选 鸿雁+白枕鹤 双主鸟
+            changed = db.update_detection_selection('A', [0, 8])
+            self.assertEqual(changed, 1)  # 只有 #8 从 0→1
+            # 物种下拉出现白枕鹤（此前只在检测行里）
+            species = db.get_distinct_species()
+            self.assertIn('鸿雁', species)
+            self.assertIn('白枕鹤', species)
+            self.assertIn('小天鹅', species)
+            # 按白枕鹤筛选能命中 A（detection-aware 查询）
+            hits = db.get_photos_by_filters({'bird_species_cn': '白枕鹤'})
+            self.assertEqual([p['filename'] for p in hits], ['A'])
+            # 按鸿雁仍能命中 A；B 不受影响
+            hits = db.get_photos_by_filters({'bird_species_cn': '鸿雁'})
+            self.assertEqual([p['filename'] for p in hits], ['A'])
+            # 多主鸟标题数据：按 bird_index 序
+            main_map = db.get_main_species_map()
+            self.assertEqual(main_map.get('A'),
+                             [('鸿雁', 'Swan Goose'),
+                              ('白枕鹤', 'White-naped Crane')])
+            # 白枕鹤成了 A 的主鸟 → 重算召回后白枕鹤不再召回；
+            # A 仍因小美洲黑雁(35%)保持 notable；B 的 17.4% 本就不达标
+            run_species_recall(db, species_threshold=35.0,
+                               log=lambda *_: None)
+            flagged = db.get_photos_by_filters({'notable_only': True})
+            self.assertEqual([p['filename'] for p in flagged], ['A'])
+            det_map = {r['bird_index']: r for r in db.get_detections('A')}
+            self.assertIn(det_map[8]['notable'], (None, 0))   # 白枕鹤
+            self.assertEqual(det_map[13]['notable'], 1)       # 小美洲黑雁
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_batch_soft_delete_species(self):
+        """批量软删某鸟种：DB 软删 + 筛选排除 + 召回统计消失。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            # 先召回：白枕鹤(52.4%)与小美洲黑雁(35%)被标记
+            run_species_recall(db, species_threshold=35.0,
+                               log=lambda *_: None)
+            counts = {c['cn']: c for c in db.get_notable_species_counts()}
+            self.assertIn('白枕鹤', counts)
+            self.assertEqual(counts['白枕鹤']['detections'], 1)
+            self.assertEqual(counts['白枕鹤']['photos'], 1)
+
+            # 批量软删白枕鹤（A#8 与 B#1 全部，含低置信 17.4% 的 B#1）
+            files, n = db.soft_delete_species_detections(
+                species_cn='白枕鹤')
+            self.assertEqual(sorted(files), ['A', 'B'])
+            self.assertEqual(n, 2)
+            # 软删行：deleted=1、召回标记清、主鸟清
+            for row in db.get_detections('A'):
+                if row['species_cn'] == '白枕鹤':
+                    self.assertEqual(row['deleted'], 1)
+                    self.assertIn(row['notable'], (None, 0))
+                    self.assertEqual(row['is_selected'], 0)
+            # 召回统计不再包含白枕鹤；A 仍因小美洲黑雁保留 notable
+            counts = {c['cn']: c for c in db.get_notable_species_counts()}
+            self.assertNotIn('白枕鹤', counts)
+            self.assertIn('小美洲黑雁', counts)
+            flagged = db.get_photos_by_filters({'notable_only': True})
+            self.assertEqual([p['filename'] for p in flagged], ['A'])
+            # 幂等：重复删除返回 0
+            _f, n2 = db.soft_delete_species_detections(species_cn='白枕鹤')
+            self.assertEqual(n2, 0)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_recall_skips_deleted_detections(self):
+        """软删的检测行不参与召回判定（不当主鸟、也不被召回）。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        d = tempfile.mkdtemp()
+        try:
+            db = ReportDB(d)
+            db.insert_photo({'filename': 'A', 'has_bird': 1, 'rating': 3,
+                             'bird_species_cn': '鸿雁'})
+            db.insert_detections_batch([
+                {'filename': 'A', 'bird_index': 0, 'is_selected': 1,
+                 'species_cn': '鸿雁', 'species_confidence': 95.0},
+                {'filename': 'A', 'bird_index': 1, 'is_selected': 0,
+                 'species_cn': '白枕鹤', 'species_confidence': 88.0},
+            ])
+            db.soft_delete_detections('A', [1])
+            stats = run_species_recall(db, species_threshold=35.0,
+                                       log=lambda *_: None)
+            self.assertEqual(stats['flagged_photos'], 0)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_sidecar_export_carries_deleted_flag(self):
+        """DB 软删后增量重导出：sidecar JSON 带上 deleted 标记。"""
+        import os, shutil, tempfile
+        from core.sidecar_export import (
+            export_directory_sidecars, mark_species_deleted_in_sidecar)
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            export_directory_sidecars(db, d, log=lambda *_: None)
+            # sidecar 已生成，白枕鹤未删除
+            data = json.load(open(os.path.join(
+                d, '.superpicky', 'meta', 'A.json'), encoding='utf-8'))
+            det8 = next(x for x in data['detections'] if x['index'] == 8)
+            self.assertNotIn('deleted', det8)
+
+            # 批量软删（DB + JSON 同格式标记）
+            files, n = db.soft_delete_species_detections(
+                species_cn='白枕鹤')
+            removed = mark_species_deleted_in_sidecar(
+                d, 'A', species_cn='白枕鹤')
+            self.assertEqual(removed, 1)
+            data = json.load(open(os.path.join(
+                d, '.superpicky', 'meta', 'A.json'), encoding='utf-8'))
+            det8 = next(x for x in data['detections'] if x['index'] == 8)
+            self.assertTrue(det8.get('deleted'))
+            self.assertTrue(any(e.get('action') == 'bbox_deleted'
+                                for e in data.get('edits', [])))
+            # 幂等：再标一次返回 0
+            self.assertEqual(
+                mark_species_deleted_in_sidecar(d, 'A', species_cn='白枕鹤'),
+                0)
+
+            # DB 侧软删 → 增量重导出后 JSON 仍带 deleted
+            export_directory_sidecars(db, d, log=lambda *_: None)
+            data = json.load(open(os.path.join(
+                d, '.superpicky', 'meta', 'B.json'), encoding='utf-8'))
+            det1 = next(x for x in data['detections'] if x['index'] == 1)
+            self.assertTrue(det1.get('deleted'))
             db._conn.close()
         finally:
             shutil.rmtree(d, ignore_errors=True)

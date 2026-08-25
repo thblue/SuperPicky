@@ -66,9 +66,10 @@ def run_species_recall(report_db,
                 "flagged_detections": 0}
 
     # 1) 收集「当过主鸟种」的集合：选中检测 + photos 表主鸟种
+    #    （人工软删的检测行不参与任何一侧 / soft-deleted rows excluded）
     main_keys: Set[str] = set()
     for det in detections:
-        if det.get("is_selected"):
+        if det.get("is_selected") and not det.get("deleted"):
             key = _species_key(det.get("species_cn"), det.get("species_en"),
                                det.get("scientific_name"))
             if key:
@@ -85,7 +86,7 @@ def run_species_recall(report_db,
     detection_marks: List[dict] = []
     flagged_photos: Set[str] = set()
     for det in detections:
-        if det.get("is_selected"):
+        if det.get("is_selected") or det.get("deleted"):
             continue
         cn, en = det.get("species_cn"), det.get("species_en")
         if not (cn or en):

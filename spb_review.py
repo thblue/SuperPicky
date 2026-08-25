@@ -154,7 +154,10 @@ def _load_detections(photo_path: str
         try:
             with open(sidecar, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            dets = data.get("detections") or []
+            # V5.4 软删框（人工删除的误识别）不再叠加显示
+            # Soft-deleted boxes (manual misidentify cleanup) hidden.
+            dets = [d for d in (data.get("detections") or [])
+                    if not d.get("deleted")]
             if dets:
                 return dets, data
         except (OSError, ValueError):
@@ -168,6 +171,8 @@ def _load_detections(photo_path: str
             db = ReportDB(directory)
             rows = db.get_detections(prefix)
             db._conn.close()
+            # V5.4 软删行不显示 / skip soft-deleted rows
+            rows = [r for r in rows if not r.get("deleted")]
             if rows:
                 dets = []
                 for row in rows:

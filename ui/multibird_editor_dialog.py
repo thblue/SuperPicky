@@ -1360,13 +1360,21 @@ class MultibirdEditorDialog(QDialog):
             self._main_lay.addWidget(tip)
 
     def _on_main_toggled(self) -> None:
-        """复选状态变化：收集勾选并强制 ≤ MAX_MAIN_SPECIES。"""
+        """复选状态变化：收集勾选并强制 1 ≤ 主鸟种数 ≤ MAX_MAIN_SPECIES。"""
         sender = self.sender()
         checked = [cb for cb in self._main_checkboxes if cb.isChecked()]
         if len(checked) > MAX_MAIN_SPECIES and sender is not None:
             # 超限：撤销本次勾选的框并复位
             sender.blockSignals(True)
             sender.setChecked(False)
+            sender.blockSignals(False)
+            return
+        if len(checked) == 0 and sender is not None and self._main_checkboxes:
+            # 至少保留一个主鸟：撤销本次取消勾选（照片必须有主鸟种，
+            # 否则筛选/召回/标题链路失去锚点）
+            # Keep >=1 main species: a photo must keep its anchor species.
+            sender.blockSignals(True)
+            sender.setChecked(True)
             sender.blockSignals(False)
             return
         cands = self._main_candidates()
@@ -1379,7 +1387,7 @@ class MultibirdEditorDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _on_save(self) -> None:
-        """写入 sidecar JSON + 同步 bird_detections 物种，关闭对话框。"""
+        """写入 sidecar JSON + 同步 report.db（物种/主鸟/删框），关闭对话框。"""
         from core.sidecar_export import _atomic_write_json
         # 主鸟种选择写入顶层（候选映射回完整字段）
         cands = {c["key"]: c for c in self._main_candidates()}
@@ -1403,15 +1411,62 @@ class MultibirdEditorDialog(QDialog):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "保存失败 Save failed", str(e))
             return
-        # 同步 report.db 的物种（应用内视图一致；删除软标记不入库）
-        if self._species_updates:
+        # V5.4 人工结果全量同步 report.db（此前只写 JSON，浏览器筛选/
+        # 召回看不到变化），并重算召回 + 增量重导出
+        self._sync_report_db(main_species)
+        self.accept()
+
+    def _sync_report_db(self, main_species: list) -> None:
+        """
+        保存后把人工编辑同步进 report.db，保证应用内视图一致：
+
+        1. 逐鸟改种 → update_detection_species（edited=1）；
+        2. 删框 → soft_delete_detections（deleted=1，只隐藏不物理删）；
+        3. 主鸟多选 → update_detection_selection + photos 表第一主鸟
+           （缩略图标题/物种筛选的锚点）；
+        4. 重算物种召回——人工确认当过主鸟的鸟种不再召回；
+        5. 增量重导出 sidecar，召回标记/主鸟变化的照片 JSON 与 DB 对齐。
+
+        任一步失败只打印告警：sidecar JSON 已落盘（人工编辑的持久层），
+        DB 漂移会在下次批处理/导出时自愈。
+
+        Sync manual edits into report.db after save: species renames,
+        box deletions, multi-main selection, then re-run the species
+        recall and an incremental sidecar re-export.
+        """
+        try:
+            from tools.report_db import ReportDB
+            from core.species_recall import run_species_recall
+            from core.sidecar_export import export_directory_sidecars
+            from advanced_config import get_advanced_config
+            db = ReportDB(self._directory)
             try:
-                from tools.report_db import ReportDB
-                db = ReportDB(self._directory)
-                for idx, (cn, en, sci) in self._species_updates.items():
+                for idx, (cn, en, sci) in (self._species_updates or {}).items():
                     db.update_detection_species(
                         self._prefix, idx, cn, en, sci or None)
-                db._conn.close()
-            except Exception:
-                pass
-        self.accept()
+                deleted_idx = [
+                    det.get("index")
+                    for det in (self._data or {}).get("detections") or []
+                    if det.get("deleted")]
+                if deleted_idx:
+                    db.soft_delete_detections(self._prefix, deleted_idx)
+                if main_species:
+                    db.update_detection_selection(
+                        self._prefix,
+                        [m["bird_index"] for m in main_species])
+                    first = main_species[0]
+                    if first.get("cn") or first.get("en"):
+                        db.update_photo(self._prefix, {
+                            "bird_species_cn": first.get("cn") or None,
+                            "bird_species_en": first.get("en") or None,
+                        })
+                threshold = get_advanced_config().recall_species_threshold
+                run_species_recall(db, species_threshold=threshold,
+                                   log=print)
+                export_directory_sidecars(db, self._directory,
+                                          log=lambda *_: None)
+            finally:
+                db.close()
+        except Exception as e:  # noqa: BLE001（同步失败不阻断保存）
+            print(f"⚠️ 多鸟编辑 DB 同步失败 / DB sync failed "
+                  f"[{self._prefix}]: {e}")

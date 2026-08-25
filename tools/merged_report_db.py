@@ -105,13 +105,75 @@ class MergedReportDB:
                 rows = self._conn.execute(
                     f"SELECT filename, GROUP_CONCAT(DISTINCT species_cn) "
                     f"FROM {alias}.bird_detections "
-                    f"WHERE notable = 1 AND species_cn IS NOT NULL "
+                    f"WHERE notable = 1 AND deleted = 0 "
+                    f"AND species_cn IS NOT NULL "
                     f"GROUP BY filename").fetchall()
             except Exception:
                 continue
             for filename, sp in rows:
                 result[(rel_dir, filename)] = [
                     s for s in (sp or "").split(",") if s]
+        return result
+
+    def get_notable_species_counts(self) -> List[dict]:
+        """
+        汇总各挂载库的召回鸟种统计（同名字段跨库合并计数）。
+
+        返回:
+        List[dict]: 每鸟种一项，按照片数降序:
+            {cn, en, scientific, photos, detections}
+
+        Aggregate recall-species stats across attached sub-DBs.
+        """
+        agg: dict = {}
+        for alias in self._db_aliases:
+            try:
+                rows = self._conn.execute(
+                    f"SELECT species_cn, species_en, scientific_name, "
+                    f"COUNT(DISTINCT filename), COUNT(*) "
+                    f"FROM {alias}.bird_detections "
+                    f"WHERE notable = 1 AND deleted = 0 "
+                    f"AND (species_cn IS NOT NULL OR species_en IS NOT NULL) "
+                    f"GROUP BY species_cn, species_en, scientific_name"
+                ).fetchall()
+            except Exception:
+                continue
+            for cn, en, sci, photos, dets in rows:
+                key = (cn or "", en or "", sci or "")
+                item = agg.setdefault(key, {"cn": key[0], "en": key[1],
+                                            "scientific": key[2],
+                                            "photos": 0, "detections": 0})
+                item["photos"] += photos
+                item["detections"] += dets
+        return sorted(agg.values(),
+                      key=lambda it: (-it["photos"], it["cn"]))
+
+    def get_main_species_map(self) -> dict:
+        """
+        每张照片的主鸟种列表（V5.4 多主鸟标题用，合并视图版）。
+
+        返回:
+        Dict[Tuple[str, str], List[Tuple[str, str]]]:
+            {(source_dir相对路径, filename): [(中文名, 英文名), ...]}
+
+        Per-photo main-species map keyed by (source_dir, filename).
+        """
+        result: dict = {}
+        for alias in self._db_aliases:
+            rel_dir = os.path.relpath(self._alias_to_dir[alias],
+                                      self.root_dir)
+            try:
+                rows = self._conn.execute(
+                    f"SELECT filename, species_cn, species_en "
+                    f"FROM {alias}.bird_detections "
+                    f"WHERE is_selected = 1 AND deleted = 0 "
+                    f"ORDER BY filename, bird_index").fetchall()
+            except Exception:
+                continue
+            for filename, cn, en in rows:
+                if cn or en:
+                    result.setdefault((rel_dir, filename), []) \
+                        .append((cn or "", en or ""))
         return result
 
     def get_all_photos(self) -> List[dict]:
@@ -370,10 +432,31 @@ class MergedReportDB:
         elif "bird_species_cn" in filters:
             species_col = "bird_species_cn"
             species_val = filters.get("bird_species_cn")
-        
+
         if isinstance(species_val, str) and species_val.strip():
-            where_clauses.append(f"{species_col} = ?")
-            params.append(species_val.strip())
+            # V5.4 多主鸟：photos 单字段之外，任一挂载库里该照片有
+            # is_selected 检测行也算命中（多主鸟照片每个主鸟种可筛）
+            # Multi-main photos match via is_selected detections in any
+            # attached sub-DB, besides the single photos-table field.
+            name = species_val.strip()
+            det_col = ("species_en" if species_col == "bird_species_en"
+                       else "species_cn")
+            exists_parts = []
+            for alias in self._db_aliases:
+                exists_parts.append(
+                    f"EXISTS (SELECT 1 FROM {alias}.bird_detections d "
+                    f"WHERE d.filename = merged.filename "
+                    f"AND d.is_selected = 1 AND d.deleted = 0 "
+                    f"AND d.{det_col} = ?)"
+                )
+                params.append(name)
+            condition = f"{species_col} = ?"
+            if exists_parts:
+                condition += " OR " + " OR ".join(exists_parts)
+            where_clauses.append(f"({condition})")
+            params.append(name)
+            # 占位符顺序：条件内 species_col 在前、EXISTS 在后，但值全部
+            # 相同，追加顺序不影响结果 / same value everywhere, order-safe
         
         # 精选:直接用持久 picked 列(与单库一致;旧目录需重跑选鸟)
         if filters.get("picked_only", False):
@@ -403,8 +486,14 @@ class MergedReportDB:
         return results
     
     def get_distinct_species(self, use_en: bool = False, ratings: list = None) -> List[str]:
-        """获取所有目录的去重鸟种列表，ratings 非空时只返回在这些星级下有照片的鸟种"""
+        """获取所有目录的去重鸟种列表，ratings 非空时只返回在这些星级下有照片的鸟种
+
+        V5.4 多主鸟：各挂载库 is_selected=1 的逐鸟物种并入列表，
+        多主鸟照片在每个主鸟种下都能被筛出。
+        Multi-main aware: per-bird main species are UNIONed in.
+        """
         col = "bird_species_en" if use_en else "bird_species_cn"
+        det_col = "species_en" if use_en else "species_cn"
 
         if not self._db_aliases:
             return []
@@ -422,6 +511,15 @@ class MergedReportDB:
             parts.append(
                 f"SELECT DISTINCT {col} FROM {alias}.photos "
                 f"WHERE {col} IS NOT NULL AND {col} != '' AND rating != -1{rating_clause}"
+            )
+            # 检测侧：人工多选的主鸟种（与 photos 侧同星级约束）
+            parts.append(
+                f"SELECT DISTINCT d.{det_col} AS {col} "
+                f"FROM {alias}.bird_detections d "
+                f"JOIN {alias}.photos p ON p.filename = d.filename "
+                f"WHERE d.is_selected = 1 AND d.deleted = 0 "
+                f"AND d.{det_col} IS NOT NULL AND d.{det_col} != '' "
+                f"AND p.rating != -1{rating_clause}"
             )
 
         sql = f"SELECT DISTINCT {col} FROM ({' UNION '.join(parts)}) ORDER BY {col}"

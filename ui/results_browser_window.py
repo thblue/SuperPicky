@@ -799,6 +799,9 @@ class ResultsBrowserWindow(QMainWindow):
         # 左侧：过滤面板
         self._filter_panel = FilterPanel(self.i18n, self)
         self._filter_panel.filters_changed.connect(self._apply_filters)
+        # V5.4 召回鸟种批量删除（右键待确认清单里的鸟种）
+        self._filter_panel.recall_species_delete_requested.connect(
+            self._on_recall_species_delete)
         main_h.addWidget(self._filter_panel)
 
         # 中央：网格 + 工具栏
@@ -1066,6 +1069,7 @@ class ResultsBrowserWindow(QMainWindow):
         self._filter_panel.reset_all()
         species = self._db.get_distinct_species(use_en=self.i18n.current_lang.startswith('en'))
         self._filter_panel.update_species_list(species)
+        self._refresh_recall_species_list()
         if len(self._all_photos) > 0 and len(self._filtered_photos) == 0:
             self._filter_panel.select_all_ratings()
         self.setWindowTitle(f"{self.i18n.t('browser.title')} \u2014 {short_name}")
@@ -1085,6 +1089,7 @@ class ResultsBrowserWindow(QMainWindow):
         self._filter_panel.reset_all()
         species = self._db.get_distinct_species(use_en=self.i18n.current_lang.startswith('en'))
         self._filter_panel.update_species_list(species)
+        self._refresh_recall_species_list()
         if len(self._all_photos) > 0 and len(self._filtered_photos) == 0:
             self._filter_panel.select_all_ratings()
         short = os.path.basename(root_dir) or root_dir
@@ -1100,18 +1105,30 @@ class ResultsBrowserWindow(QMainWindow):
             self._load_single(value)
 
     def _attach_notable_species(self):
-        """V5.2 给照片附带待确认鸟种列表(缩略图标题显示用)。
+        """V5.2/V5.4 给照片附带鸟种注记（缩略图标题显示用）。
 
+        - notable_species: 待确认鸟种列表（召回标记）
+        - main_species_list: 多主鸟种 [(cn, en), ...]（V5.4 人工多选
+          主鸟后，标题显示全部主鸟）
         单目录与合并视图都支持: merged 版以 (source_dir, filename) 为键。
         """
         getter = getattr(self._db, "get_notable_species_map", None)
-        if not callable(getter):
-            return
-        try:
-            notable_map = getter()
-        except Exception:
-            return
-        if not notable_map:
+        if callable(getter):
+            try:
+                notable_map = getter()
+            except Exception:
+                notable_map = {}
+        else:
+            notable_map = {}
+        main_getter = getattr(self._db, "get_main_species_map", None)
+        if callable(main_getter):
+            try:
+                main_map = main_getter()
+            except Exception:
+                main_map = {}
+        else:
+            main_map = {}
+        if not notable_map and not main_map:
             return
         for p in self._all_photos:
             if "source_dir" in p:
@@ -1121,6 +1138,9 @@ class ResultsBrowserWindow(QMainWindow):
             species = notable_map.get(key)
             if species:
                 p["notable_species"] = species
+            mains = main_map.get(key)
+            if mains:
+                p["main_species_list"] = mains
 
     def _compute_burst_ids(self):
         """基于拍摄时间做 burst 分组，时间差 <= 1 秒视为同一组。"""
@@ -1586,10 +1606,152 @@ class ResultsBrowserWindow(QMainWindow):
         dialog.rating_change_requested.connect(
             lambda new_rating, _p=photo: self._on_rating_changed(_p, new_rating))
         if dialog.exec() == QDialog.Accepted:
-            # 保存成功：刷新详情面板与全屏顶条（主鸟种/星级可能变化）
+            # 保存成功：主鸟种/召回标记可能变化 → 全量刷新视图
+            # （V5.4 编辑器现在会同步 report.db，不再只是 JSON）
+            self._refresh_after_edit()
             self._detail_panel.show_photo(photo)
             if self._stack.currentIndex() == 1:
                 self._fullscreen.update_rating_display(photo)
+
+    def _refresh_after_edit(self):
+        """
+        人工编辑落库后刷新浏览器视图：照片列表、召回/主鸟注记、
+        当前筛选结果、鸟种下拉与待确认鸟种清单。
+
+        不重置用户已选的筛选条件（与 _load_single 的全量重载不同）。
+        Refresh all cached views after manual edits landed in the DB,
+        keeping the user's current filter selections.
+        """
+        if not self._db:
+            return
+        try:
+            self._all_photos = self._db.get_all_photos()
+        except Exception:
+            return
+        self._attach_notable_species()
+        self._refresh_recall_species_list()
+        self._apply_filters(self._filter_panel.get_filters())
+
+    def _refresh_recall_species_list(self):
+        """刷新左侧「召回」下方的待确认鸟种清单。"""
+        getter = getattr(self._db, "get_notable_species_counts", None)
+        if not callable(getter):
+            return
+        try:
+            counts = getter()
+        except Exception:
+            counts = []
+        self._filter_panel.update_recall_species(counts or [])
+
+    def _on_recall_species_delete(self, cn: str, en: str):
+        """
+        批量删除某鸟种在全目录的全部检测框（AI 误识别一键清理）。
+
+        链路：确认对话框 → report.db 软删除（deleted=1）→ 逐张 sidecar
+        JSON 同步 deleted 标记 → 重算物种召回 → 增量重导出 → 刷新视图。
+        合并视图下对每个子目录的库分别执行。
+
+        Batch soft-delete every detection of one species directory-wide,
+        then re-run recall and refresh. Never touches original photos.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        name = cn or en
+        if not name:
+            return
+        # 找到该鸟种的统计（照片数/检测数）用于确认文案
+        counts = []
+        getter = getattr(self._db, "get_notable_species_counts", None)
+        if callable(getter):
+            try:
+                counts = getter()
+            except Exception:
+                counts = []
+        entry = next((c for c in counts
+                      if (c.get("cn") or c.get("en")) == name), None)
+        n_photos = entry.get("photos", 0) if entry else 0
+        n_dets = entry.get("detections", 0) if entry else 0
+        if not entry:
+            return
+        ret = QMessageBox.question(
+            self,
+            self.i18n.t("browser.recall_delete_confirm_title"),
+            self.i18n.t("browser.recall_delete_confirm_text",
+                        name=name, photos=n_photos, n=n_dets),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+
+        # 1) DB 软删除（单目录/合并分别处理），返回受影响照片
+        sci = entry.get("scientific") or None
+        affected: list = []
+        try:
+            if hasattr(self._db, "sub_dirs"):
+                # 合并视图：逐子库删除
+                from tools.report_db import ReportDB
+                for sub in self._db.sub_dirs:
+                    sdb = ReportDB(sub)
+                    try:
+                        files, _n = sdb.soft_delete_species_detections(
+                            cn or None, en or None, sci)
+                        affected.extend((sub, f) for f in files)
+                    finally:
+                        sdb.close()
+            else:
+                files, _n = self._db.soft_delete_species_detections(
+                    cn or None, en or None, sci)
+                affected.extend((self._directory, f) for f in files)
+        except Exception as e:
+            QMessageBox.warning(
+                self, self.i18n.t("browser.recall_delete_confirm_title"),
+                str(e))
+            return
+
+        # 2) 逐张 sidecar JSON 补软删标记（与编辑器删框同格式）
+        try:
+            from core.sidecar_export import mark_species_deleted_in_sidecar
+            for d, f in affected:
+                mark_species_deleted_in_sidecar(
+                    d, f, species_cn=cn or None, species_en=en or None,
+                    scientific_name=sci)
+        except Exception as e:  # noqa: BLE001（JSON 失败不阻断 DB 结果）
+            print(f"⚠️ sidecar 批量标记失败 / sidecar mark failed: {e}")
+
+        # 3) 重算召回 + 增量重导出 + 刷新视图
+        self._rebuild_recall_state([d for d, _f in affected])
+        self._refresh_after_edit()
+
+    def _rebuild_recall_state(self, directories: list):
+        """
+        召回状态重建：对涉及的每个目录重算物种召回并增量重导出
+        sidecar（合并视图可能跨多个子目录）。
+
+        参数:
+        directories (list): 照片目录路径列表（召回以目录为单位整体
+            重算，幂等秒级；DB 与 JSON 的软删标记此前已落盘）
+
+        Re-run the species recall + incremental sidecar export for each
+        involved directory.
+        """
+        from core.species_recall import run_species_recall
+        from core.sidecar_export import export_directory_sidecars
+        from advanced_config import get_advanced_config
+        from tools.report_db import ReportDB
+        threshold = get_advanced_config().recall_species_threshold
+
+        for directory in sorted(set(directories)):
+            try:
+                db = ReportDB(directory)
+                try:
+                    run_species_recall(db, species_threshold=threshold,
+                                       log=print)
+                    export_directory_sidecars(db, directory,
+                                              log=lambda *_: None)
+                finally:
+                    db.close()
+            except Exception as e:  # noqa: BLE001（单目录失败不阻断其余）
+                print(f"⚠️ 召回重算失败 / recall rebuild failed "
+                      f"[{directory}]: {e}")
 
     def _on_species_edit_requested(self, photo: dict):
         """

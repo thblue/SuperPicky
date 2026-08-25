@@ -16,12 +16,12 @@ import sqlite3
 import time
 import threading
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from .file_utils import ensure_hidden_directory
 
 
 # Schema 版本，用于未来升级
-SCHEMA_VERSION = "11"
+SCHEMA_VERSION = "12"
 
 # 所有列定义（有序），用于 CREATE TABLE 和数据验证
 PHOTO_COLUMNS = [
@@ -120,6 +120,8 @@ DETECTION_COLUMNS = (
     "species_cn", "species_en", "scientific_name",
     "species_confidence", "class_id", "gbif_rarity_100",
     "notable", "notable_reason", "edited",
+    # V5.4 人工软删除标记（0=正常 1=已删框；删除只隐藏，不物理删行）
+    "deleted",
 )
 
 
@@ -266,6 +268,7 @@ class ReportDB:
                         notable INTEGER DEFAULT 0,
                         notable_reason TEXT,
                         edited INTEGER DEFAULT 0,
+                        deleted INTEGER DEFAULT 0,
                         created_at TEXT,
                         updated_at TEXT
                     )
@@ -546,6 +549,27 @@ class ReportDB:
                 current_version = "11"
                 print("✅ Database schema upgraded to v11")
 
+            # ----------------------------------------------------------------------
+            #  Upgrade: v11 -> v12 (Manual soft-delete flag on detections)
+            #  V5.4 多鸟编辑/批量清理：bird_detections 加 deleted 列
+            #  （0=正常 1=人工软删除）。软删除只隐藏框（筛选/召回/编辑器/
+            #  sidecar 导出均跳过），不物理删行，误删可手工恢复。
+            #  Adds bird_detections.deleted for manual soft-deletes.
+            # ----------------------------------------------------------------------
+            if current_version == "11":
+                print("🔄 Upgrading database schema from v11 to v12...")
+                with self._conn:
+                    try:
+                        self._conn.execute(
+                            "ALTER TABLE bird_detections ADD COLUMN "
+                            "deleted INTEGER DEFAULT 0"
+                        )
+                    except sqlite3.OperationalError:
+                        pass  # 列已存在，跳过
+                    self._update_schema_version("12")
+                current_version = "12"
+                print("✅ Database schema upgraded to v12")
+
     def _update_schema_version(self, version):
         """更新数据库中的版本号（由调用方负责提交事务）"""
         with self._lock:
@@ -723,37 +747,57 @@ class ReportDB:
         """
         获取数据库中去重后的鸟种名称列表（用于结果浏览器筛选下拉框）。
 
+        V5.4 起一张照片可有多个人工勾选的主鸟种（bird_detections
+        is_selected=1 且未软删），这些鸟种也并入下拉列表——多主鸟照片
+        在每个主鸟种下都能被筛出。photos 表单字段仍是第一主鸟。
+
         Args:
             use_en: True 使用英文鸟种列，False 使用中文鸟种列
             ratings: 若提供，只返回在这些星级下有照片的鸟种
 
         Returns:
             鸟种名称列表（已去重、去空值）
+
+        Distinct species names for the filter dropdown. Since V5.4 a
+        photo may carry multiple human-selected main species
+        (bird_detections is_selected=1, not soft-deleted); those names
+        are UNIONed in so multi-main photos surface under each of them.
         """
         column = "bird_species_en" if use_en else "bird_species_cn"
-        assert column in {"bird_species_en", "bird_species_cn"}, f"Invalid column: {column}"
-        order_clause = f"{column} COLLATE NOCASE" if use_en else column
+        det_column = "species_en" if use_en else "species_cn"
 
-        where_clauses = [
-            f"{column} IS NOT NULL",
-            f"TRIM({column}) != ''",
-            "rating != -1",
-        ]
+        # 星级约束两侧共用；列非空约束各用各的列
+        # Shared rating gate; each side keeps its own non-empty checks.
+        common: List[str] = ["rating != -1"]
         params: List[Any] = []
+        det_params: List[Any] = []
 
         if isinstance(ratings, list):
             valid = [r for r in ratings if r != -1]
             if valid:
                 placeholders = ", ".join(["?"] * len(valid))
-                where_clauses.append(f"rating IN ({placeholders})")
+                common.append(f"rating IN ({placeholders})")
                 params.extend(valid)
+                det_params.extend(valid)
 
-        where_sql = " AND ".join(where_clauses)
+        common_sql = " AND ".join(common)
+        sql = (
+            f"SELECT {column} AS name FROM photos "
+            f"WHERE {common_sql} AND {column} IS NOT NULL "
+            f"AND TRIM({column}) != '' "
+            f"UNION "
+            f"SELECT d.{det_column} AS name FROM bird_detections d "
+            f"JOIN photos p ON p.filename = d.filename "
+            f"WHERE d.is_selected = 1 AND d.deleted = 0 "
+            f"AND d.{det_column} IS NOT NULL "
+            f"AND TRIM(d.{det_column}) != '' "
+            f"AND p.{common_sql} "
+            f"ORDER BY name COLLATE NOCASE"
+        )
+        # photos 侧占位符与检测侧 JOIN 的星级占位符各一份
+        # Placeholders appear twice: photos side + JOINed detection side.
         with self._lock:
-            cursor = self._conn.execute(
-                f"SELECT DISTINCT {column} FROM photos WHERE {where_sql} ORDER BY {order_clause}",
-                params
-            )
+            cursor = self._conn.execute(sql, params + det_params)
             return [row[0] for row in cursor.fetchall()]
 
     def get_photos_by_filters(self, filters: Optional[dict] = None) -> List[dict]:
@@ -818,8 +862,22 @@ class ReportDB:
 
         if isinstance(species_val, str) and species_val.strip():
             assert species_col in {"bird_species_en", "bird_species_cn"}, f"Invalid column: {species_col}"
-            where_clauses.append(f"{species_col} = ?")
-            params.append(species_val.strip())
+            # V5.4 多主鸟：photos 单字段（第一主鸟）之外，凡有该鸟种的
+            # is_selected 检测行的照片也算命中——多主鸟照片在每个主鸟种
+            # 下都能被筛出（星级等其余条件照常 AND 组合）。
+            # Multi-main photos match via their is_selected detections as
+            # well as the single photos-table species field.
+            det_col = ("species_en" if species_col == "bird_species_en"
+                       else "species_cn")
+            name = species_val.strip()
+            where_clauses.append(
+                f"({species_col} = ? OR filename IN ("
+                f"SELECT filename FROM bird_detections "
+                f"WHERE is_selected = 1 AND deleted = 0 "
+                f"AND {det_col} = ?))"
+            )
+            params.append(name)
+            params.append(name)
 
         # 精选(picked):直接用选鸟时写入的持久旗标列(3★ 中美学∩锐度 top% 的交集)。
         # 旧目录(未重跑选鸟)该列全为 0,需重跑后才有结果。
@@ -938,6 +996,12 @@ class ReportDB:
                 )
                 for data in rows:
                     values = [data.get(c) for c in cols]
+                    # deleted 列必须落 0/1（缺失按 0），避免 NULL 导致
+                    # `deleted = 0` 条件漏匹配
+                    # deleted must be 0/1 (default 0); NULL would break
+                    # `deleted = 0` filtering.
+                    if not values[cols.index("deleted")]:
+                        values[cols.index("deleted")] = 0
                     self._conn.execute(sql, values + [now, now])
             self._safe_commit()
         return len(rows)
@@ -983,7 +1047,8 @@ class ReportDB:
             cursor = self._conn.execute(
                 "SELECT filename, GROUP_CONCAT(DISTINCT species_cn) AS sp "
                 "FROM bird_detections "
-                "WHERE notable = 1 AND species_cn IS NOT NULL "
+                "WHERE notable = 1 AND deleted = 0 "
+                "AND species_cn IS NOT NULL "
                 "GROUP BY filename")
             return {row[0]: [s for s in (row[1] or "").split(",") if s]
                     for row in cursor.fetchall()}
@@ -1064,6 +1129,175 @@ class ReportDB:
             updated = cursor.rowcount > 0
             self._safe_commit()
             return updated
+
+    def update_detection_selection(self, filename: str,
+                                   bird_indexes: List[int]) -> int:
+        """
+        人工设置一张照片的主鸟（可多只，V5.4 编辑器保存入口）。
+
+        bird_indexes 内的行 is_selected=1，其余行清 0；只更新发生变化的
+        行（updated_at 不动无变化行，避免误触发 sidecar 重导出）。
+
+        参数:
+        filename (str): 照片前缀
+        bird_indexes (List[int]): 主鸟的鸟序号列表（≤3 由调用方约束）
+
+        返回:
+        int: 发生变化的行数
+
+        Human-select main birds (multiple allowed). Only changed rows
+        are touched so unchanged photos never re-export.
+        """
+        wanted = [int(i) for i in dict.fromkeys(bird_indexes)]
+        now = _now_iso()
+        changed = 0
+        with self._lock:
+            with self._conn:
+                for row in self._conn.execute(
+                        "SELECT bird_index, is_selected, deleted "
+                        "FROM bird_detections WHERE filename = ?",
+                        (filename,)).fetchall():
+                    idx, cur, deleted = row[0], row[1], row[2]
+                    target = 1 if (idx in wanted and not deleted) else 0
+                    if cur != target:
+                        self._conn.execute(
+                            "UPDATE bird_detections SET is_selected = ?, "
+                            "updated_at = ? "
+                            "WHERE filename = ? AND bird_index = ?",
+                            (target, now, filename, idx))
+                        changed += 1
+            self._safe_commit()
+        return changed
+
+    def soft_delete_detections(self, filename: str,
+                               bird_indexes: List[int]) -> int:
+        """
+        软删除一张照片的若干检测框（人工删框，只隐藏不物理删行）。
+
+        软删行同时清除主鸟/召回标记（is_selected=0, notable=0），筛选、
+        召回、编辑器、sidecar 导出均跳过 deleted=1 的行。
+
+        参数:
+        filename (str): 照片前缀
+        bird_indexes (List[int]): 要删除的鸟序号列表
+
+        返回:
+        int: 实际标记删除的行数（幂等，重复调用返回 0）
+
+        Soft-delete detection boxes (hidden, never physically removed).
+        """
+        if not bird_indexes:
+            return 0
+        placeholders = ", ".join(["?"] * len(bird_indexes))
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE bird_detections SET deleted = 1, is_selected = 0, "
+                "notable = 0, notable_reason = NULL, updated_at = ? "
+                f"WHERE filename = ? AND bird_index IN ({placeholders}) "
+                "AND deleted = 0",
+                (_now_iso(), filename, *bird_indexes))
+            updated = cursor.rowcount
+            self._safe_commit()
+            return updated
+
+    def soft_delete_species_detections(
+        self, species_cn: Optional[str] = None,
+        species_en: Optional[str] = None,
+        scientific_name: Optional[str] = None,
+    ) -> Tuple[List[str], int]:
+        """
+        全目录软删除某鸟种的全部检测框（批量清理 AI 误识别）。
+
+        只删 is_selected=0 的行（该鸟种既然进了「待确认」列表，就从未
+        当过主鸟）；已删行跳过。名字匹配中文名/英文名/学名任一相等。
+
+        参数:
+        species_cn / species_en / scientific_name (Optional[str]): 鸟种名
+
+        返回:
+        Tuple[List[str], int]: (受影响照片前缀列表, 删除的检测行数)
+
+        Batch soft-delete every detection of one species in this
+        directory (AI-misidentify cleanup). Returns affected filenames
+        and the number of deleted rows.
+        """
+        conds, params = [], []
+        for col, val in (("species_cn", species_cn),
+                         ("species_en", species_en),
+                         ("scientific_name", scientific_name)):
+            if isinstance(val, str) and val.strip():
+                conds.append(f"{col} = ?")
+                params.append(val.strip())
+        if not conds:
+            return [], 0
+        where = ("WHERE deleted = 0 AND is_selected = 0 AND ("
+                 + " OR ".join(conds) + ")")
+        now = _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename, bird_index FROM bird_detections "
+                f"{where}", params).fetchall()
+            if not rows:
+                return [], 0
+            with self._conn:
+                for row in rows:
+                    self._conn.execute(
+                        "UPDATE bird_detections SET deleted = 1, "
+                        "is_selected = 0, notable = 0, notable_reason = NULL, "
+                        "updated_at = ? "
+                        "WHERE filename = ? AND bird_index = ?",
+                        (now, row[0], row[1]))
+            self._safe_commit()
+            filenames = sorted({row[0] for row in rows})
+            return filenames, len(rows)
+
+    def get_notable_species_counts(self) -> List[dict]:
+        """
+        汇总召回鸟种统计（V5.4 召回筛选下方的待确认鸟种列表数据）。
+
+        返回:
+        List[dict]: 每鸟种一项，按照片数降序:
+            {cn, en, scientific, photos, detections}
+
+        Aggregate recall-species stats for the pending-species list.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT species_cn, species_en, scientific_name, "
+                "COUNT(DISTINCT filename) AS photos, COUNT(*) AS dets "
+                "FROM bird_detections "
+                "WHERE notable = 1 AND deleted = 0 "
+                "AND (species_cn IS NOT NULL OR species_en IS NOT NULL) "
+                "GROUP BY species_cn, species_en, scientific_name "
+                "ORDER BY photos DESC, species_cn")
+            return [{"cn": r[0] or "", "en": r[1] or "",
+                     "scientific": r[2] or "",
+                     "photos": r[3], "detections": r[4]}
+                    for r in cursor.fetchall()]
+
+    def get_main_species_map(self) -> dict:
+        """
+        每张照片的主鸟种列表（V5.4 多主鸟缩略图标题用）。
+
+        返回:
+        Dict[str, List[Tuple[str, str]]]: {filename: [(中文名, 英文名),
+        ...]}，按 bird_index 升序；无主鸟检测的照片不在映射里。
+
+        Per-photo main-species list (ordered by bird_index) for the
+        multi-main thumbnail title.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT filename, species_cn, species_en "
+                "FROM bird_detections "
+                "WHERE is_selected = 1 AND deleted = 0 "
+                "ORDER BY filename, bird_index")
+            result: dict = {}
+            for row in cursor.fetchall():
+                if row[1] or row[2]:
+                    result.setdefault(row[0], []).append((row[1] or "",
+                                                          row[2] or ""))
+            return result
 
     def get_photos_by_species(
         self,

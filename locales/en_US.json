@@ -1302,6 +1302,7 @@
     "section_recall": "Recall",
     "recall_option": "✦ Species never main",
     "recall_species_empty": "No pending species",
+    "recall_list_tooltip": "Click a species: show only its photos (click again to clear); right-click: delete species directory-wide",
     "recall_delete_action": "Delete all '{name}' boxes",
     "recall_delete_confirm_title": "Batch delete pending species",
     "recall_delete_confirm_text": "Soft-delete every '{name}' detection directory-wide ({photos} photos / {n} boxes).\nOnly hides boxes from filtering; originals untouched, recoverable. Proceed?",

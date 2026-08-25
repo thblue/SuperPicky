@@ -104,6 +104,8 @@ class FilterPanel(QWidget):
         super().__init__(parent)
         self.i18n = i18n
         self._species_list: list = []
+        # V5.4 待确认鸟种清单的当前选中项（空串 = 不过滤）
+        self._recall_selected: str = ""
 
         # 当前激活的多选状态（set of mode keys）
         self._active_ratings: set = set(_DEFAULT_RATINGS)
@@ -205,8 +207,8 @@ class FilterPanel(QWidget):
             f"QCheckBox {{ color: {COLORS['text_secondary']}; font-size: 12px; spacing: 6px; }}"
             + checkbox_indicator_qss(15, COLORS['text_muted'], COLORS['accent'])
         )
-        self._recall_cb.stateChanged.connect(self._emit_filters)
         self._recall_cb.stateChanged.connect(self._on_recall_toggled)
+        self._recall_cb.stateChanged.connect(self._emit_filters)
         layout.addWidget(self._recall_cb)
         # V5.4 待确认鸟种清单：勾选「召回」后展开。列出本批全部待确认
         # 鸟种（照片数/检测数），右键某鸟种 → 全目录批量删除该鸟种的
@@ -215,7 +217,12 @@ class FilterPanel(QWidget):
         # click a species to batch-delete its boxes directory-wide.
         self._recall_species = QListWidget()
         self._recall_species.setVisible(False)
-        self._recall_species.setMaximumHeight(200)
+        # 面板整体在 QScrollArea 内，列表给足高度（~18 行），
+        # 减少框内小滚动条的频繁滚动
+        self._recall_species.setMaximumHeight(460)
+        self._recall_species.setMinimumHeight(120)
+        self._recall_species.setToolTip(
+            self.i18n.t("browser.recall_list_tooltip"))
         self._recall_species.setStyleSheet(f"""
             QListWidget {{
                 background-color: {COLORS['bg_input']};
@@ -234,6 +241,9 @@ class FilterPanel(QWidget):
         self._recall_species.setContextMenuPolicy(Qt.CustomContextMenu)
         self._recall_species.customContextMenuRequested.connect(
             self._on_recall_species_menu)
+        # 点击鸟种 → 网格只看含该待确认鸟种的照片（再点同项取消）
+        self._recall_species.itemClicked.connect(
+            self._on_recall_species_clicked)
         layout.addWidget(self._recall_species)
 
         layout.addWidget(self._divider())
@@ -522,7 +532,11 @@ class FilterPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _on_recall_toggled(self, state: int) -> None:
-        """「召回」勾选变化 → 展开/收起待确认鸟种清单。"""
+        """「召回」勾选变化 → 展开/收起待确认鸟种清单；取消勾选时
+        连带清掉按鸟种过滤。"""
+        if not state and self._recall_selected:
+            self._recall_selected = ""
+            self._recall_species.clearSelection()
         self._recall_species.setVisible(bool(state))
 
     def update_recall_species(self, counts: list) -> None:
@@ -533,24 +547,47 @@ class FilterPanel(QWidget):
         counts (list): get_notable_species_counts() 的返回，每项
             {cn, en, scientific, photos, detections}，按照片数降序
 
-        Rebuild the pending-species list under the recall checkbox.
+        重建后保持已选中的鸟种仍处于选中状态（若仍存在）；已消失
+        （如被批量删除/召回撤标）则清空过滤。
+
+        Rebuild the pending-species list under the recall checkbox,
+        preserving the current selection when possible.
         """
         self._recall_species.clear()
-        if not counts:
-            item = QListWidgetItem(self.i18n.t("browser.recall_species_empty"))
-            item.setFlags(Qt.NoItemFlags)
-            self._recall_species.addItem(item)
-            return
-        for it in counts:
+        current_names: set = set()
+        for it in counts or []:
             name = it.get("cn") or it.get("en") or it.get("scientific")
             if not name:
                 continue
+            current_names.add(name)
             label = (f"✦ {name}"
                      f"（{it.get('photos', 0)}张/{it.get('detections', 0)}处）")
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, (it.get("cn") or "",
                                        it.get("en") or ""))
             self._recall_species.addItem(item)
+            if name == self._recall_selected:
+                item.setSelected(True)
+        if not current_names:
+            item = QListWidgetItem(self.i18n.t("browser.recall_species_empty"))
+            item.setFlags(Qt.NoItemFlags)
+            self._recall_species.addItem(item)
+        # 选中项已消失（批量删除/召回重算后）→ 清空按鸟种过滤
+        if self._recall_selected and self._recall_selected not in current_names:
+            self._recall_selected = ""
+
+    def _on_recall_species_clicked(self, item) -> None:
+        """点击鸟种：网格只看含该待确认鸟种的照片；再点同项取消。"""
+        data = item.data(Qt.UserRole)
+        if not data:
+            return
+        name = data[0] or data[1]
+        if self._recall_selected == name:
+            self._recall_selected = ""
+            self._recall_species.clearSelection()
+        else:
+            self._recall_selected = name
+        self._emit_filters()
 
     def _on_recall_species_menu(self, pos) -> None:
         """清单右键菜单：批量删除该鸟种的全部检测框。"""
@@ -610,6 +647,8 @@ class FilterPanel(QWidget):
             "sort_by":        sort_by,
             "picked_only":    "picked" in self._active_ratings,
             "notable_only":   self._recall_cb.isChecked(),
+            # V5.4 待确认鸟种定位：只看含该召回鸟种（notable 检测）的照片
+            "notable_species": self._recall_selected,
         }
 
     # ------------------------------------------------------------------
@@ -643,6 +682,8 @@ class FilterPanel(QWidget):
         self._recall_cb.blockSignals(True)
         self._recall_cb.setChecked(False)
         self._recall_cb.blockSignals(False)
+        self._recall_selected = ""
+        self._recall_species.clearSelection()
         self._recall_species.setVisible(False)
         self.species_combo.blockSignals(True)
         self.species_combo.setCurrentIndex(0)

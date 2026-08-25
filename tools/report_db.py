@@ -888,6 +888,15 @@ class ReportDB:
         if filters.get("notable_only", False):
             where_clauses.append("notable = 1")
 
+        # V5.4 待确认鸟种定位：只看含指定召回鸟种（notable=1 未删检测）
+        # 的照片——召回清单点击某鸟种时的网格过滤
+        notable_sp = filters.get("notable_species")
+        if isinstance(notable_sp, str) and notable_sp.strip():
+            where_clauses.append(
+                "filename IN (SELECT filename FROM bird_detections "
+                "WHERE notable = 1 AND deleted = 0 AND species_cn = ?)")
+            params.append(notable_sp.strip())
+
         where_sql = ""
         if where_clauses:
             where_sql = "WHERE " + " AND ".join(where_clauses)
@@ -1219,7 +1228,23 @@ class ReportDB:
                 "AND deleted = 0",
                 (_now_iso(), filename, *bird_indexes))
             updated = cursor.rowcount
-            self._safe_commit()
+            if updated:
+                with self._conn:
+                    # 照片级召回标记同步修正：本照片的待确认种被删光时
+                    # 立即归位（不依赖后台召回重算，编辑器保存后视图
+                    # 即刻正确）
+                    # Fix photo-level notable right away so the editor
+                    # save path shows correct state without waiting for
+                    # the background recall rebuild.
+                    self._conn.execute(
+                        "UPDATE photos SET notable = "
+                        "CASE WHEN EXISTS (SELECT 1 FROM bird_detections d "
+                        "WHERE d.filename = photos.filename "
+                        "AND d.notable = 1 AND d.deleted = 0) "
+                        "THEN 1 ELSE 0 END, updated_at = ? "
+                        "WHERE filename = ? AND notable = 1",
+                        (_now_iso(), filename))
+                self._safe_commit()
             return updated
 
     def soft_delete_species_detections(

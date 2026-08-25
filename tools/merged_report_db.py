@@ -462,6 +462,25 @@ class MergedReportDB:
         if filters.get("picked_only", False):
             where_clauses.append("picked = 1")
 
+        # V5.2 物种召回筛选 + V5.4 待确认鸟种定位（逐挂载库 EXISTS）
+        if filters.get("notable_only", False):
+            where_clauses.append("notable = 1")
+        notable_sp = filters.get("notable_species")
+        if isinstance(notable_sp, str) and notable_sp.strip():
+            name = notable_sp.strip()
+            exists_parts = []
+            for alias in self._db_aliases:
+                exists_parts.append(
+                    f"EXISTS (SELECT 1 FROM {alias}.bird_detections d "
+                    f"WHERE d.filename = merged.filename "
+                    f"AND d.notable = 1 AND d.deleted = 0 "
+                    f"AND d.species_cn = ?)")
+                params.append(name)
+            if exists_parts:
+                where_clauses.append("(" + " OR ".join(exists_parts) + ")")
+            else:
+                where_clauses.append("0")
+
         where_sql = " AND ".join(where_clauses) if where_clauses else ""
 
         # 排序

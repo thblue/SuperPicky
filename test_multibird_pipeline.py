@@ -855,6 +855,76 @@ class TestV54SavePerformancePaths(unittest.TestCase):
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_notable_species_filter_and_instant_notable_fix(self):
+        """按待确认鸟种过滤 + 编辑器删框后 photos.notable 立即归位。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            db.insert_photo({'filename': 'B', 'has_bird': 1, 'rating': 2,
+                             'bird_species_cn': '小天鹅'})
+            db.insert_detections_batch([
+                {'filename': 'B', 'bird_index': 0, 'is_selected': 1,
+                 'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+                 'species_cn': '小天鹅', 'species_confidence': 90.0},
+            ])
+            run_species_recall(db, species_threshold=35.0,
+                               log=lambda *_: None)
+            # A 有待确认的白枕鹤，B 没有
+            hits = db.get_photos_by_filters(
+                {'notable_species': '白枕鹤'})
+            self.assertEqual([p['filename'] for p in hits], ['A'])
+            # 与 notable_only 组合仍成立
+            hits = db.get_photos_by_filters(
+                {'notable_only': True, 'notable_species': '白枕鹤'})
+            self.assertEqual([p['filename'] for p in hits], ['A'])
+
+            # 编辑器删框路径：删掉 A 的白枕鹤 → photos.notable 立即归位
+            self.assertEqual(db.get_photo('A')['notable'], 1)
+            db.soft_delete_detections('A', [1])
+            self.assertIn(db.get_photo('A')['notable'], (None, 0))
+            # 召回筛选不再出现 A
+            self.assertEqual(
+                db.get_photos_by_filters({'notable_only': True}), [])
+            # 按白枕鹤定位也无结果
+            self.assertEqual(
+                db.get_photos_by_filters({'notable_species': '白枕鹤'}), [])
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_filter_panel_recall_species_click(self):
+        """召回清单点击：设置/取消 notable_species 过滤；重建保持选中。"""
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(
+            ['test', '-platform', 'offscreen'])
+        from ui.filter_panel import FilterPanel
+        from tools.i18n import get_i18n
+        panel = FilterPanel(get_i18n())
+        counts = [{'cn': '白鹈鹕', 'en': 'Great White Pelican',
+                   'scientific': '', 'photos': 3, 'detections': 4},
+                  {'cn': '沙丘鹤', 'en': 'Sandhill Crane',
+                   'scientific': '', 'photos': 2, 'detections': 2}]
+        panel.update_recall_species(counts)
+        panel._recall_cb.setChecked(True)
+        # 点击第一项 → 过滤生效
+        panel._on_recall_species_clicked(panel._recall_species.item(0))
+        self.assertEqual(panel.get_filters()['notable_species'], '白鹈鹕')
+        # 重建清单后选中保持
+        panel.update_recall_species(counts)
+        self.assertEqual(panel.get_filters()['notable_species'], '白鹈鹕')
+        # 选中项消失（批量删除后）→ 过滤清空
+        panel.update_recall_species(counts[1:])
+        self.assertEqual(panel.get_filters()['notable_species'], '')
+        # 再点同项 → 取消
+        panel._on_recall_species_clicked(panel._recall_species.item(0))
+        self.assertEqual(panel.get_filters()['notable_species'], '沙丘鹤')
+        panel._on_recall_species_clicked(panel._recall_species.item(0))
+        self.assertEqual(panel.get_filters()['notable_species'], '')
+
     def test_soft_delete_fixes_photo_notable_without_recall(self):
         """批量软删后 photos.notable 即时修正，无需等召回重算。"""
         import os, shutil, tempfile

@@ -1339,8 +1339,20 @@ class ExifToolManager:
 
                 # 读取输出：我们需要读取 N 次 {ready}
                 num_executes = args_list.count('-execute')
-                # 按文件数线性放大超时
-                total_timeout = max(30.0, num_executes * 5.0)
+                # 按文件数线性放大超时。网络路径(UNC)整文件重写远慢于本地盘
+                # （实测 NAS 上 -overwrite_original_in_place 约 6 秒+/张），
+                # 沿用 5 秒/张会导致大批量反复超时→杀进程→整批重写，故放宽到 20 秒/张。
+                # Scale the timeout linearly with file count. UNC (network) paths
+                # rewrite whole files far slower than local disks (~6s+/photo on
+                # NAS with -overwrite_original_in_place), so the old 5s/photo made
+                # large batches time out repeatedly (kill + full rework); relax to
+                # 20s/photo for UNC, keep 5s/photo locally.
+                is_network = any(
+                    f.startswith('\\\\') or f.startswith('//')
+                    for f in files_to_process
+                )
+                per_file_timeout = 20.0 if is_network else 5.0
+                total_timeout = max(30.0, num_executes * per_file_timeout)
                 start_time = time.time()
 
                 error_count = 0

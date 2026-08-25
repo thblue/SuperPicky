@@ -970,6 +970,24 @@ class ReportDB:
             )
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_notable_species_map(self) -> dict:
+        """
+        V5.2 返回召回照片的「待确认鸟种」映射。
+
+        返回:
+        Dict[str, List[str]]: {filename: [召回鸟种中文名, ...]}
+
+        Return the buried-species map for recalled photos.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT filename, GROUP_CONCAT(DISTINCT species_cn) AS sp "
+                "FROM bird_detections "
+                "WHERE notable = 1 AND species_cn IS NOT NULL "
+                "GROUP BY filename")
+            return {row[0]: [s for s in (row[1] or "").split(",") if s]
+                    for row in cursor.fetchall()}
+
     def apply_recall_marks(self, photo_flags: List[str],
                            detection_marks: List[dict]) -> int:
         """

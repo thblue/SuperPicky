@@ -698,6 +698,20 @@ def _move_to_trash(filepath: str) -> bool:
         return False
 
 
+def _load_error_msg(parent, text: str) -> None:
+    """
+    目录加载失败的提示：有界面时弹窗，离屏/无头时打印。
+
+    离屏模式（QT_QPA_PLATFORM=offscreen）下模态 QMessageBox 永远等不到
+    用户点击，脚本化使用会挂死——改为打印并返回。
+    Print instead of a modal dialog under the offscreen platform.
+    """
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        print(f"[ResultsBrowser] load error: {text}")
+        return
+    QMessageBox.warning(parent, "Error", text)
+
+
 class ResultsBrowserWindow(QMainWindow):
     """
     独立的选鸟结果浏览器窗口。
@@ -1040,13 +1054,14 @@ class ResultsBrowserWindow(QMainWindow):
         try:
             self._db = ReportDB(directory)
         except Exception as e:
-            QMessageBox.warning(self, "Error", str(e))
+            _load_error_msg(self, str(e))
             return
         self._directory = directory
         short_name = os.path.basename(directory) or directory
         self._dir_label.setText(short_name)
         self._dir_label.setToolTip(directory)
         self._all_photos = self._db.get_all_photos()
+        self._attach_notable_species()
         self._compute_burst_ids()
         self._filter_panel.reset_all()
         species = self._db.get_distinct_species(use_en=self.i18n.current_lang.startswith('en'))
@@ -1061,10 +1076,11 @@ class ResultsBrowserWindow(QMainWindow):
         try:
             self._db = MergedReportDB(root_dir, sub_dirs)
         except Exception as e:
-            QMessageBox.warning(self, "Error", str(e))
+            _load_error_msg(self, str(e))
             return
         self._directory = root_dir
         self._all_photos = self._db.get_all_photos()
+        self._attach_notable_species()
         self._compute_burst_ids()
         self._filter_panel.reset_all()
         species = self._db.get_distinct_species(use_en=self.i18n.current_lang.startswith('en'))
@@ -1083,6 +1099,29 @@ class ResultsBrowserWindow(QMainWindow):
         else:
             self._load_single(value)
 
+    def _attach_notable_species(self):
+        """V5.2 给照片附带待确认鸟种列表(缩略图标题显示用)。
+
+        单目录与合并视图都支持: merged 版以 (source_dir, filename) 为键。
+        """
+        getter = getattr(self._db, "get_notable_species_map", None)
+        if not callable(getter):
+            return
+        try:
+            notable_map = getter()
+        except Exception:
+            return
+        if not notable_map:
+            return
+        for p in self._all_photos:
+            if "source_dir" in p:
+                key = (p.get("source_dir"), p.get("filename"))
+            else:
+                key = p.get("filename")
+            species = notable_map.get(key)
+            if species:
+                p["notable_species"] = species
+
     def _compute_burst_ids(self):
         """基于拍摄时间做 burst 分组，时间差 <= 1 秒视为同一组。"""
         if not self._db:
@@ -1096,6 +1135,7 @@ class ResultsBrowserWindow(QMainWindow):
             self._all_photos = self._db.get_all_photos()
         else:
             self._all_photos = photos
+        self._attach_notable_species()
 
         if not self._all_photos:
             self._burst_totals = Counter()

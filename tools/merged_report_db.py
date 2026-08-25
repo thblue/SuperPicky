@@ -87,6 +87,33 @@ class MergedReportDB:
         
         return sql, params
 
+    def get_notable_species_map(self) -> dict:
+        """
+        V5.2 各挂载库的召回鸟种映射合并。
+
+        返回:
+        Dict[Tuple[str, str], List[str]]: {(source_dir相对路径, filename):
+        [召回鸟种, ...]}，与照片行的 source_dir 字段同坐标系
+
+        Merged buried-species map keyed by (source_dir, filename).
+        """
+        result: dict = {}
+        for alias in self._db_aliases:
+            rel_dir = os.path.relpath(self._alias_to_dir[alias],
+                                      self.root_dir)
+            try:
+                rows = self._conn.execute(
+                    f"SELECT filename, GROUP_CONCAT(DISTINCT species_cn) "
+                    f"FROM {alias}.bird_detections "
+                    f"WHERE notable = 1 AND species_cn IS NOT NULL "
+                    f"GROUP BY filename").fetchall()
+            except Exception:
+                continue
+            for filename, sp in rows:
+                result[(rel_dir, filename)] = [
+                    s for s in (sp or "").split(",") if s]
+        return result
+
     def get_all_photos(self) -> List[dict]:
         """获取所有目录的照片记录"""
         with self._lock:

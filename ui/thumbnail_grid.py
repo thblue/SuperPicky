@@ -25,13 +25,25 @@ from tools.file_utils import sibling_jpeg
 
 
 def _display_name(photo: dict) -> str:
-    """卡片底部显示名:优先鸟种(跟随语言),无鸟种则用文件名。"""
+    """卡片底部显示名:优先鸟种(跟随语言),无鸟种则用文件名。
+
+    V5.2 召回照片(含本批从未当主鸟的鸟种)追加待确认种后缀,
+    便于在缩略图上一眼挑出需要核对的照片。
+    """
     is_en = get_i18n().current_lang.startswith("en")
     if is_en:
         species = photo.get("bird_species_en") or photo.get("bird_species_cn")
     else:
         species = photo.get("bird_species_cn") or photo.get("bird_species_en")
-    return species or photo.get("filename", "")
+    name = species or photo.get("filename", "")
+    notable = photo.get("notable_species") or []
+    if notable:
+        shown = "、".join(notable[:2]) + ("..." if len(notable) > 2 else "")
+        if species:
+            name = f"{name}-{shown}"
+        else:
+            name = f"待确认:{shown}"
+    return name
 
 
 def _tile_label_text(photo: dict, burst_suffix: str = "") -> str:
@@ -472,9 +484,12 @@ class ThumbnailCard(QFrame):
         self.setToolTip(photo.get("filename", ""))
         self.name_label = QLabel(_tile_label_text(photo, burst_suffix))
         self.name_label.setAlignment(Qt.AlignCenter)
+        # V5.2 召回照片标题金色,未召回保持原灰色
+        _label_color = ("#ffc800" if photo.get("notable_species")
+                        else COLORS['text_tertiary'])
         self.name_label.setStyleSheet(f"""
             QLabel {{
-                color: {COLORS['text_tertiary']};
+                color: {_label_color};
                 font-size: 10px;
                 background: transparent;
             }}

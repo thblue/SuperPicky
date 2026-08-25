@@ -630,7 +630,8 @@ class MultibirdEditorDialog(QDialog):
             "■ <span style='color:#28a745'>已采纳</span>  "
             "■ <span style='color:#ffa500'>低置信</span>  "
             "■ <span style='color:#a0a0a0'>未分类</span>  "
-            "◎ <span style='color:#00ffd2'>对焦点</span>  · 点击框选中")
+            "◎ <span style='color:#00ffd2'>对焦点</span>  "
+            "✦ <span style='color:#ffc800'>召回</span>  · 点击框选中")
         self._legend_label.setStyleSheet(
             f"color: {COLORS['text_muted']}; font-size: 12px; padding: 2px;")
         left_lay.addWidget(self._legend_label)
@@ -1046,15 +1047,30 @@ class MultibirdEditorDialog(QDialog):
             counts[key] = counts.get(key, 0) + 1
             if key not in labels:
                 labels[key] = self._canvas._det_species_label(det)
+        # V5.2 召回鸟种（含 notable 检测的鸟种）→ chips 金色标记，
+        # 点击即可高亮定位（与筛选联动）
+        notable_keys = {
+            self._canvas._det_species_key(det)
+            for det in (self._data or {}).get("detections") or []
+            if det.get("notable") and not det.get("deleted")
+        }
         for key, n in sorted(counts.items(), key=lambda kv: -kv[1]):
             display = labels.get(key) or key
             label = display if len(display) <= 14 else display[:13] + "…"
-            chip = QPushButton(f"{label} ×{n}")
+            is_notable = key in notable_keys
+            chip = QPushButton((("✦ " if is_notable else "") + f"{label} ×{n}"))
             chip.setObjectName("tertiary")
             chip.setCheckable(True)
             chip.setCursor(Qt.PointingHandCursor)
-            chip.setStyleSheet(
-                "QPushButton { padding: 2px 10px; font-size: 12px; }")
+            if is_notable:
+                chip.setStyleSheet(
+                    "QPushButton { padding: 2px 10px; font-size: 12px;"
+                    " color: #ffc800; border: 1px solid #a08000;"
+                    " border-radius: 10px; }"
+                    "QPushButton:checked { background: rgba(255,200,0,40); }")
+            else:
+                chip.setStyleSheet(
+                    "QPushButton { padding: 2px 10px; font-size: 12px; }")
             chip.setProperty("species_key", key)
             chip.toggled.connect(
                 lambda checked, _k=key: self._on_chip_toggled(_k, checked))

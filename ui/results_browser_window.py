@@ -719,6 +719,8 @@ class ResultsBrowserWindow(QMainWindow):
     可以在主窗口之外独立显示/隐藏，不会阻塞主窗口操作。
     """
     closed = Signal()   # 窗口关闭时通知主窗口
+    # V5.4 后台召回重算+全量导出完成（工作线程 → 主线程刷新视图）
+    _recall_rebuild_done = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -733,6 +735,13 @@ class ResultsBrowserWindow(QMainWindow):
         self._is_merged: bool = False
         self._sub_dirs: list = []
         self._fullscreen_nav_photos: list = []
+        # V5.4 召回重算后台任务：编辑器保存/批量删除后目录级重活不阻塞
+        # UI，完成后经信号回主线程刷新（串行队列防并发重入）
+        import threading as _threading
+        self._recall_lock = _threading.Lock()
+        self._recall_pending: set = set()
+        self._recall_running: bool = False
+        self._recall_rebuild_done.connect(self._on_recall_rebuild_done)
 
         self._setup_window()
         self._setup_menu()
@@ -1606,9 +1615,11 @@ class ResultsBrowserWindow(QMainWindow):
         dialog.rating_change_requested.connect(
             lambda new_rating, _p=photo: self._on_rating_changed(_p, new_rating))
         if dialog.exec() == QDialog.Accepted:
-            # 保存成功：主鸟种/召回标记可能变化 → 全量刷新视图
-            # （V5.4 编辑器现在会同步 report.db，不再只是 JSON）
+            # 保存成功：编辑器已把本照片写入 DB/JSON（秒级）。先刷新一次
+            # 立即反映主鸟/物种变化；目录级召回重算+全量导出（NAS 上较
+            # 慢）丢给后台线程，完成后再自动刷新一次
             self._refresh_after_edit()
+            self._schedule_recall_rebuild([directory])
             self._detail_panel.show_photo(photo)
             if self._stack.currentIndex() == 1:
                 self._fullscreen.update_rating_display(photo)
@@ -1717,8 +1728,56 @@ class ResultsBrowserWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001（JSON 失败不阻断 DB 结果）
             print(f"⚠️ sidecar 批量标记失败 / sidecar mark failed: {e}")
 
-        # 3) 重算召回 + 增量重导出 + 刷新视图
-        self._rebuild_recall_state([d for d, _f in affected])
+        # 3) 视图立即刷新（批量软删已即时修正 photos.notable），
+        #    召回重算 + 全量导出交后台线程
+        self._refresh_after_edit()
+        self._schedule_recall_rebuild([d for d, _f in affected])
+
+    def _schedule_recall_rebuild(self, directories: list):
+        """
+        目录级召回重算 + 增量导出丢给后台线程（V5.4 性能优化）。
+
+        编辑器保存/批量删除后的视图刷新不受 NAS 上全表读取/全量导出
+        阻塞；后台完成后经 _recall_rebuild_done 信号回主线程再刷新。
+        串行队列：多次触发合并去重，同时最多一个工作线程。
+
+        参数:
+        directories (list): 需要重算的照片目录列表（合并视图可多个）
+
+        Schedule the directory-wide recall rebuild + re-export on a
+        background worker; UI refreshes again via signal on completion.
+        """
+        import threading
+
+        with self._recall_lock:
+            self._recall_pending.update(directories)
+            if self._recall_running:
+                return
+            self._recall_running = True
+
+        def _worker():
+            while True:
+                with self._recall_lock:
+                    dirs = sorted(self._recall_pending)
+                    self._recall_pending.clear()
+                if not dirs:
+                    with self._recall_lock:
+                        self._recall_running = False
+                    return
+                try:
+                    self._rebuild_recall_state(dirs)
+                except Exception as e:  # noqa: BLE001（后台失败不打断 UI）
+                    print(f"⚠️ 后台召回重算失败 / background recall "
+                          f"rebuild failed: {e}")
+                # 跨线程信号 → Qt 自动排队到主线程
+                self._recall_rebuild_done.emit()
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="recall-rebuild").start()
+
+    @Slot()
+    def _on_recall_rebuild_done(self):
+        """后台召回重算完成：主线程刷新视图（召回标记/标题/清单）。"""
         self._refresh_after_edit()
 
     def _rebuild_recall_state(self, directories: list):

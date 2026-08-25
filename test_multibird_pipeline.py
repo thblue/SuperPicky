@@ -804,5 +804,114 @@ class TestSyncManualEdits(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestV54SavePerformancePaths(unittest.TestCase):
+    """V5.4 保存提速相关路径：瘦身读取/子集导出/软删即时修正照片标记。"""
+
+    def _setup_db(self, d):
+        from tools.report_db import ReportDB
+        db = ReportDB(d)
+        db.insert_photo({'filename': 'A', 'has_bird': 1, 'rating': 3,
+                         'bird_species_cn': '鸿雁'})
+        db.insert_detections_batch([
+            {'filename': 'A', 'bird_index': 0, 'is_selected': 1,
+             'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+             'mask_polygon': json.dumps([[1, 2], [3, 4]]),
+             'species_cn': '鸿雁', 'species_confidence': 95.0},
+            {'filename': 'A', 'bird_index': 1, 'is_selected': 0,
+             'bbox_x': 50, 'bbox_y': 50, 'bbox_w': 8, 'bbox_h': 8,
+             'mask_polygon': json.dumps([[5, 6], [7, 8]]),
+             'species_cn': '白枕鹤', 'species_confidence': 52.4},
+        ])
+        return db
+
+    def test_slim_detections_and_stamp_consistency(self):
+        """瘦身读取跳过 polygon；单照片导出与全量导出的导出戳一致。"""
+        import os, shutil, tempfile
+        from core.sidecar_export import (
+            _export_stamp, export_directory_sidecars)
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            slim = db.get_all_detections(include_polygon=False)
+            full = db.get_all_detections()
+            self.assertNotIn('mask_polygon', slim[0])
+            self.assertIn('mask_polygon', full[0])
+            # 戳一致性：单照片全列 vs 全表瘦身（polygon 不入哈希）
+            photo = db.get_photo('A')
+            stamp_full = _export_stamp(photo, full)
+            stamp_slim = _export_stamp(photo, slim)
+            self.assertEqual(stamp_full, stamp_slim)
+
+            # 单照片导出（编辑器保存路径）与全量导出的文件内容一致
+            export_directory_sidecars(db, d, only_filenames=['A'],
+                                      log=lambda *_: None)
+            a1 = open(os.path.join(d, '.superpicky', 'meta', 'A.json'),
+                      encoding='utf-8').read()
+            export_directory_sidecars(db, d, log=lambda *_: None)
+            a2 = open(os.path.join(d, '.superpicky', 'meta', 'A.json'),
+                      encoding='utf-8').read()
+            self.assertEqual(a1, a2)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_soft_delete_fixes_photo_notable_without_recall(self):
+        """批量软删后 photos.notable 即时修正，无需等召回重算。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            run_species_recall(db, species_threshold=35.0,
+                               log=lambda *_: None)
+            self.assertEqual(db.get_photo('A')['notable'], 1)
+            # 删光唯一的待确认种 → 照片标记立即归位
+            files, n = db.soft_delete_species_detections(species_cn='白枕鹤')
+            self.assertEqual((files, n), (['A'], 1))
+            self.assertIn(db.get_photo('A')['notable'], (None, 0))
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+    def test_export_stamp_cache_skips_file_reads(self):
+        """戳缓存命中时不再打开 JSON；DB 变化仍触发重写；人工 JSON 保留。"""
+        import os, shutil, tempfile
+        from unittest.mock import patch
+        from core.sidecar_export import export_directory_sidecars
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            n1 = export_directory_sidecars(db, d, log=lambda *_: None)
+            self.assertEqual(n1, 1)
+            self.assertEqual(len(db.get_export_stamps()), 1)
+
+            # 人工在 JSON 里加的标记（缓存命中 → 导出不碰文件，得以保留）
+            path = os.path.join(d, '.superpicky', 'meta', 'A.json')
+            data = json.load(open(path, encoding='utf-8'))
+            data['custom_marker'] = True
+            json.dump(data, open(path, 'w', encoding='utf-8'),
+                      ensure_ascii=False)
+
+            # 第二次：DB 未变 → 0 重写，且不读文件（_needs_rewrite 不被调）
+            with patch('core.sidecar_export._needs_rewrite',
+                       side_effect=AssertionError("不应打开文件")) as nr:
+                n2 = export_directory_sidecars(db, d, log=lambda *_: None)
+            self.assertEqual(n2, 0)
+            self.assertEqual(nr.call_count, 0)
+            data = json.load(open(path, encoding='utf-8'))
+            self.assertTrue(data.get('custom_marker'))
+
+            # DB 变化（主鸟勾选）→ 戳变化 → 重写且缓存更新
+            db.update_detection_selection('A', [0, 1])
+            n3 = export_directory_sidecars(db, d, log=lambda *_: None)
+            self.assertEqual(n3, 1)
+            stamps = db.get_export_stamps()
+            self.assertEqual(len(stamps), 1)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

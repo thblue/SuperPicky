@@ -1418,27 +1418,26 @@ class MultibirdEditorDialog(QDialog):
 
     def _sync_report_db(self, main_species: list) -> None:
         """
-        保存后把人工编辑同步进 report.db，保证应用内视图一致：
+        保存后把人工编辑同步进 report.db（只做本照片的小写入，秒级）：
 
         1. 逐鸟改种 → update_detection_species（edited=1）；
         2. 删框 → soft_delete_detections（deleted=1，只隐藏不物理删）；
-        3. 主鸟多选 → update_detection_selection + photos 表第一主鸟
-           （缩略图标题/物种筛选的锚点）；
-        4. 重算物种召回——人工确认当过主鸟的鸟种不再召回；
-        5. 增量重导出 sidecar，召回标记/主鸟变化的照片 JSON 与 DB 对齐。
+        3. 主鸟多选 → update_detection_selection + photos 表第一主鸟；
+        4. 本照片 sidecar 增量导出。
+
+        目录级的召回重算 + 全量导出不再阻塞保存（NAS 上秒十级太慢），
+        由宿主浏览器在对话框关闭后丢给后台线程执行、完成时刷新视图。
 
         任一步失败只打印告警：sidecar JSON 已落盘（人工编辑的持久层），
         DB 漂移会在下次批处理/导出时自愈。
 
-        Sync manual edits into report.db after save: species renames,
-        box deletions, multi-main selection, then re-run the species
-        recall and an incremental sidecar re-export.
+        Sync manual edits into report.db after save with small per-photo
+        writes only; the directory-wide recall rebuild + re-export is
+        scheduled by the host browser on a background thread.
         """
         try:
             from tools.report_db import ReportDB
-            from core.species_recall import run_species_recall
             from core.sidecar_export import export_directory_sidecars
-            from advanced_config import get_advanced_config
             db = ReportDB(self._directory)
             try:
                 for idx, (cn, en, sci) in (self._species_updates or {}).items():
@@ -1460,11 +1459,9 @@ class MultibirdEditorDialog(QDialog):
                             "bird_species_cn": first.get("cn") or None,
                             "bird_species_en": first.get("en") or None,
                         })
-                threshold = get_advanced_config().recall_species_threshold
-                run_species_recall(db, species_threshold=threshold,
-                                   log=print)
-                export_directory_sidecars(db, self._directory,
-                                          log=lambda *_: None)
+                export_directory_sidecars(
+                    db, self._directory, only_filenames=[self._prefix],
+                    log=lambda *_: None)
             finally:
                 db.close()
         except Exception as e:  # noqa: BLE001（同步失败不阻断保存）

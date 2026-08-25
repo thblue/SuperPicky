@@ -1026,11 +1026,33 @@ class ReportDB:
             )
             return [dict(r) for r in cursor.fetchall()]
 
-    def get_all_detections(self) -> List[dict]:
-        """返回全表检测记录，按 filename、bird_index 升序。/ All detections."""
+    def get_all_detections(self, include_polygon: bool = True) -> List[dict]:
+        """
+        返回全表检测记录，按 filename、bird_index 升序。
+
+        参数:
+        include_polygon (bool): False 时跳过 mask_polygon 列（每行数百
+            字节的轮廓 JSON）。召回/导出等只需要物种与标记字段，NAS 等
+            网络盘上全表拉取时瘦身可显著减少传输量。
+
+        返回:
+        List[dict]: 检测记录列表
+
+        All detections ordered by filename/bird_index. Set
+        include_polygon=False to skip the bulky mask_polygon column.
+        """
+        cols = "*" if include_polygon else (
+            "id, filename, bird_index, is_selected, "
+            "bbox_x, bbox_y, bbox_w, bbox_h, "
+            "area_ratio, yolo_conf, crop_sharpness, "
+            "species_cn, species_en, scientific_name, "
+            "species_confidence, class_id, gbif_rarity_100, "
+            "notable, notable_reason, edited, deleted, "
+            "created_at, updated_at")
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT * FROM bird_detections ORDER BY filename, bird_index"
+                f"SELECT {cols} FROM bird_detections "
+                f"ORDER BY filename, bird_index"
             )
             return [dict(r) for r in cursor.fetchall()]
 
@@ -1247,6 +1269,19 @@ class ReportDB:
                         "updated_at = ? "
                         "WHERE filename = ? AND bird_index = ?",
                         (now, row[0], row[1]))
+                # photos.notable 同步修正：某照片的待确认种被删光时，
+                # 照片级标记立即归位（不依赖后续召回重算）
+                # Fix photo-level notable flags right away for photos
+                # whose only pending species was just deleted.
+                for filename in sorted({r[0] for r in rows}):
+                    self._conn.execute(
+                        "UPDATE photos SET notable = "
+                        "CASE WHEN EXISTS (SELECT 1 FROM bird_detections d "
+                        "WHERE d.filename = photos.filename "
+                        "AND d.notable = 1 AND d.deleted = 0) "
+                        "THEN 1 ELSE 0 END, updated_at = ? "
+                        "WHERE filename = ? AND notable = 1",
+                        (now, filename))
             self._safe_commit()
             filenames = sorted({row[0] for row in rows})
             return filenames, len(rows)
@@ -1274,6 +1309,55 @@ class ReportDB:
                      "scientific": r[2] or "",
                      "photos": r[3], "detections": r[4]}
                     for r in cursor.fetchall()]
+
+    def get_export_stamps(self) -> Dict[str, str]:
+        """
+        读 sidecar 导出戳缓存 {filename: stamp}（表惰性创建）。
+
+        V5.4 性能优化：导出器据此跳过"DB 内容未变化"的照片，不再逐个
+        打开 NAS 上的 JSON 比对戳（1240 个文件 × ~30ms 是全量导出的
+        主要成本）。缓存只影响"是否重写文件"，不影响导出内容本身；
+        缓存缺失/不匹配时导出器自动回退到读文件比对并回填缓存。
+
+        返回:
+        Dict[str, str]: {照片前缀: 导出戳}
+
+        Read the export-stamp cache (lazily created table) so the
+        exporter can skip unchanged photos without opening each JSON.
+        """
+        with self._lock:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS export_stamps ("
+                "filename TEXT PRIMARY KEY, stamp TEXT)")
+            rows = self._conn.execute(
+                "SELECT filename, stamp FROM export_stamps").fetchall()
+            return {r[0]: r[1] for r in rows}
+
+    def upsert_export_stamps(self, stamps: Dict[str, str]) -> int:
+        """
+        批量写导出戳缓存（单事务）。
+
+        参数:
+        stamps (Dict[str, str]): {照片前缀: 导出戳}
+
+        返回:
+        int: 写入行数
+
+        Bulk-upsert the export-stamp cache in one transaction.
+        """
+        if not stamps:
+            return 0
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS export_stamps ("
+                    "filename TEXT PRIMARY KEY, stamp TEXT)")
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO export_stamps "
+                    "(filename, stamp) VALUES (?, ?)",
+                    list(stamps.items()))
+            self._safe_commit()
+        return len(stamps)
 
     def get_main_species_map(self) -> dict:
         """

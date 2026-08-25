@@ -59,7 +59,7 @@ def run_species_recall(report_db,
 
     Run the batch-local recall and persist notable flags.
     """
-    detections = report_db.get_all_detections()
+    detections = report_db.get_all_detections(include_polygon=False)
     photos = report_db.get_all_photos()
     if not detections:
         return {"never_main_species": [], "flagged_photos": 0,

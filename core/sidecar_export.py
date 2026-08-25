@@ -53,13 +53,16 @@ def _export_stamp(photo_row: dict, detection_rows: List[dict]) -> str:
     重写。内容哈希任何字段变化（含同秒变化）必然变化；纯 updated_at
     变化（如召回重跑碰了值未变的行）不触发重写，语义更准。
 
-    排除字段：id / created_at / updated_at（自增与时间戳非业务内容）。
+    排除字段：id / created_at / updated_at（自增与时间戳非业务内容）；
+    mask_polygon（不导出到 JSON，且全表读取时可瘦身跳过——两条路径
+    ——单照片全列 / 全表瘦身——必须哈希一致）。
 
     Compute the export stamp as a content hash over the business fields
-    of the photo row + its detection rows (timestamps and row ids
-    excluded). Robust to same-second write-then-export flows.
+    of the photo row + its detection rows. Timestamps, row ids and the
+    non-exported mask_polygon are excluded so full-table (slim) and
+    single-photo (full) fetch paths hash identically.
     """
-    volatile = ("id", "created_at", "updated_at")
+    volatile = ("id", "created_at", "updated_at", "mask_polygon")
     payload = {
         "photo": {k: v for k, v in photo_row.items() if k not in volatile},
         "detections": [
@@ -359,7 +362,8 @@ def _atomic_write_json(path: str, payload: dict) -> None:
 
 
 def export_directory_sidecars(report_db, directory: str,
-                              log=print) -> int:
+                              log=print,
+                              only_filenames: Optional[List[str]] = None) -> int:
     """
     把一个照片目录的 report.db 全量导出为 per-photo sidecar JSON。
 
@@ -367,30 +371,63 @@ def export_directory_sidecars(report_db, directory: str,
     report_db: 已打开的 ReportDB 实例（photos + bird_detections）
     directory (str): 照片目录（sidecar 写入其 .superpicky/meta/ 下）
     log: 日志函数（默认 print）
+    only_filenames (Optional[List[str]]): 只导出这些照片（V5.4 编辑器
+        保存路径——单照片秒级落盘，全目录重算在后台做）
 
     返回:
     int: 本次实际写入（含跳过外的重写）的 JSON 数量
 
-    Export every photo in the report DB as an incremental per-photo JSON
-    sidecar. Returns the number of files written this run.
+    Export every photo (or only_filenames subset) as an incremental
+    per-photo JSON sidecar. Returns the number of files written.
     """
     if report_db is None:
         return 0
-    photos = report_db.get_all_photos()
-    detections = report_db.get_all_detections()
+    if only_filenames is not None and len(only_filenames) <= 50:
+        # 小子集（编辑器保存路径）：逐照片取行，不做全表读取——NAS 上
+        # 单照片导出保持秒级。_export_stamp 已排除 polygon，单照片全列
+        # 读取与全表瘦身读取的哈希一致。
+        # Small subset (editor-save path): fetch per photo instead of a
+        # full-table scan; stamps stay identical across both paths.
+        photos = [p for p in (report_db.get_photo(f)
+                              for f in only_filenames) if p]
+        detections = []
+        for f in only_filenames:
+            detections.extend(report_db.get_detections(f))
+    else:
+        photos = report_db.get_all_photos()
+        # 全表瘦身读取：导出不写 polygon，NAS 上省掉每行数百字节传输
+        # Slim full-table fetch: export never writes polygon anyway.
+        detections = report_db.get_all_detections(include_polygon=False)
     detections_by_filename: Dict[str, List[dict]] = {}
     for det in detections:
         detections_by_filename.setdefault(det.get("filename"), []).append(det)
 
+    # V5.4 导出戳缓存：DB 内容未变化（且文件在）的照片直接跳过，
+    # 不再打开每个 JSON 比对——NAS 上 1240 次文件读取是全量导出的
+    # 主要成本。缓存缺失/不匹配时回退到读文件并回填。
+    # Export-stamp cache: skip photos whose DB content is unchanged
+    # without opening their JSON files at all.
+    try:
+        cached_stamps = report_db.get_export_stamps()
+    except Exception:
+        cached_stamps = {}
+
     written = 0
+    new_stamps: Dict[str, str] = {}
     for photo_row in photos:
         prefix = photo_row.get("filename")
         if not prefix:
             continue
+        if only_filenames is not None and prefix not in only_filenames:
+            continue
         det_rows = detections_by_filename.get(prefix, [])
         stamp = _export_stamp(photo_row, det_rows)
         path = _sidecar_path(directory, prefix)
+        if (cached_stamps.get(prefix) == stamp
+                and os.path.exists(path)):
+            continue  # DB 未变化 → 文件不必动（人工 JSON 编辑得以保留）
         if not _needs_rewrite(path, stamp):
+            new_stamps[prefix] = stamp  # 回填缓存（曾走读文件路径）
             continue
 
         photo_row = dict(photo_row)
@@ -411,8 +448,15 @@ def export_directory_sidecars(report_db, directory: str,
         try:
             _atomic_write_json(path, payload)
             written += 1
+            new_stamps[prefix] = stamp
         except OSError as e:
             log(f"  ⚠️ Sidecar write failed [{prefix}]: {e}")
+    # 写入成功的戳回填缓存（下次同内容直接跳过，不打开文件）
+    if new_stamps:
+        try:
+            report_db.upsert_export_stamps(new_stamps)
+        except Exception as e:  # noqa: BLE001（缓存失败只影响下次性能）
+            log(f"  ⚠️ Export-stamp cache write failed: {e}")
     return written
 
 

@@ -9,14 +9,22 @@ Sidecar JSON 导出模块（per-photo rich data sidecar）
 
 - RAW/JPG 原文件零接触（非破坏工作流的数据出口）；
 - 增量导出：JSON 内记录 `_export_stamp`（photo 与其全部 detection 的
-  updated_at 最大值），未变化的照片跳过重写；
+  updated_at 最大值），未变化的照片跳过重写；旧格式（photo.library_path
+  缺失）的存量 JSON 也会被重写升级（自愈迁移，不依赖导出戳变化）；
 - 人工编辑（edits 数组，二期编辑工具写入）在重导出时原样保留；
 - 原子写：先写 .tmp 再 os.replace（SMB 网络盘安全）；
-- UTF-8 无 BOM，中文物种名直接可读。
+- UTF-8 无 BOM，中文物种名直接可读；
+- V5.3 契约增强：`photo.filename` 带扩展名；`photo.library_path` 为照片
+  相对库根（处理目录）的当前真实位置（整理移动/连拍重组后仍有效）；
+  `photo.preview_path` 为可直接显示的 JPEG 路径（RAW 预览缓存或伴随
+  JPG）。下游消费方（BirdIndex 等）应以 library_path 定位照片文件，
+  不再从 sidecar 文件名推导。sidecar 文件名本身维持 `<前缀>.json`。
 
 Exports per-photo JSON sidecars from report.db at batch end. The JSON
 is the external contract for downstream consumers (management website,
-review tools). Incremental, edit-preserving, atomic, UTF-8.
+review tools). Incremental, edit-preserving, atomic, UTF-8. V5.3 adds
+an extension-bearing filename plus library_path/preview_path so
+consumers can locate photos after organizing moves.
 """
 
 from __future__ import annotations
@@ -49,40 +57,120 @@ def _export_stamp(photo_row: dict, detection_rows: List[dict]) -> str:
     return max(stamps)
 
 
+def _normalize_rel(value: Optional[str]) -> Optional[str]:
+    """
+    把库内相对路径规范为正斜杠（跨平台契约：Windows 侧 DB 存反斜杠，
+    JSON 统一输出 "/"，macOS/Linux 天然一致）。
+
+    参数:
+    value (str): DB 中的相对路径（可能是 \\ 或 / 分隔），可为 None
+
+    返回:
+    Optional[str]: 正斜杠路径；输入 None 返回 None
+
+    Normalize an in-library relative path to forward slashes for the
+    cross-platform JSON contract.
+    """
+    if not value:
+        return None
+    return value.replace(os.sep, "/")
+
+
+def _is_jpeg_ext(path: str) -> bool:
+    """判断路径扩展名是否 JPEG。/ True when the path has a JPEG extension."""
+    return path.lower().endswith((".jpg", ".jpeg"))
+
+
 def _build_photo_section(photo_row: dict) -> dict:
     """
-    从 photos 行提取照片基础信息（EXIF 摘要 + GPS + 文件信息）。
+    从 photos 行提取照片基础信息（EXIF 摘要 + GPS + 文件信息 + 定位契约字段）。
 
-    文件大小/mtime 在文件存在时实时读取；路径记录相对照片目录的
-    相对路径（跨机器可移植），取不到时回退原始值。
+    V5.3 定位契约（下游 BirdIndex 依赖）：
+    - filename：带扩展名的照片文件名（取 original_path 的 basename；
+      original_path 写库时优先 RAW，见 photo_processor 阶段3 路径记录）；
+    - library_path：照片相对库根（处理目录）的**当前真实位置**，
+      来源 current_path（整理移动/连拍重组后由处理流程更新），
+      为空或仍指向 .superpicky/ 缓存（未整理库的临时分析 JPEG）时
+      回退 original_path；指向伴随 JPG 而同目录存在 RAW（历史 JPG
+      覆盖数据）时规范化为 RAW（主文件语义）；
+    - relative_path：首次处理时的位置（original_path 原样，存档语义；
+      旧版对相对路径再跑 relpath 会按进程 cwd 解析产生 `..\\..\\` 畸形值，
+      已修复为直接输出）；
+    - preview_path：可直接显示的 JPEG（RAW 预览缓存或伴随 JPG），
+      可为 None；
+    - size_bytes/mtime：按 library_path 相对 directory 解析到磁盘读取，
+      文件不存在（如 NAS 离线）时为 None。
 
-    Build the "photo" section from a photos row: EXIF summary, GPS and
-    file info (size/mtime read live when the file exists).
+    参数:
+    photo_row (dict): photos 表行（含 _directory 注入的库根目录）
+
+    返回:
+    dict: photo 段字典
+
+    Build the "photo" section: EXIF summary, GPS, file info and the
+    V5.3 locating contract fields (filename with extension, current
+    library_path, archive relative_path, preview_path).
     """
     directory = photo_row.get("_directory") or ""
-    rel_path = None
     original_path = photo_row.get("original_path")
+    current_path = photo_row.get("current_path")
+
+    # 文件名带扩展名：original_path 含扩展名且优先 RAW；缺失时回退
+    # 库主键前缀（无扩展名，仅极端情况下 original_path 为空时出现）
     if original_path:
-        try:
-            rel_path = os.path.relpath(original_path, directory)
-        except ValueError:
-            rel_path = original_path
+        filename = os.path.basename(original_path)
+    else:
+        filename = photo_row.get("filename")
+
+    # 当前真实位置优先 current_path（整理后仍有效），回退 original_path。
+    # 防御：ai_model 初始入库时 current_path 指向 YOLO 分析用的临时 JPEG
+    # （RAW 转换产物，位于 .superpicky/cache/ 下）；未经阶段5 整理覆盖的库
+    # 该值会一直停留在缓存目录，不是照片本体的位置——此时回退 original_path
+    # （其写入时已排除 cache 路径且优先 RAW）。
+    # Prefer current_path (kept fresh by organizing moves); fall back to
+    # original_path. Guard: on unorganized libraries current_path still
+    # points at the temp analysis JPEG under .superpicky/cache/, which is
+    # not the photo itself — original_path is cache-free and RAW-first.
+    library_rel = current_path or original_path
+    if library_rel and current_path:
+        rel_norm = _normalize_rel(current_path) or ""
+        if rel_norm.startswith(".superpicky/") or "/.superpicky/" in rel_norm:
+            library_rel = original_path
+        elif (_is_jpeg_ext(current_path) and original_path
+              and not _is_jpeg_ext(original_path)):
+            # 历史数据规范化（V5.3 前旧整理循环的 JPG 覆盖问题）：
+            # current_path 指向伴随 JPG 而 original_path 是 RAW 时，主文件
+            # 应为 RAW——用 current_path 的目录 + original_path 的扩展名推导
+            # 候选，磁盘确认存在才采用（RAW 已被单独删除时保留 JPG 原值）。
+            # Normalize legacy rows whose current_path was overwritten by
+            # the companion JPG: prefer the same-folder RAW (extension from
+            # the RAW-first original_path) when it exists on disk.
+            candidate = os.path.join(
+                os.path.dirname(current_path),
+                os.path.splitext(os.path.basename(current_path))[0]
+                + os.path.splitext(original_path)[1])
+            if directory and os.path.exists(os.path.join(directory, candidate)):
+                library_rel = candidate
 
     size_bytes = None
     mtime = None
-    if original_path and os.path.exists(original_path):
+    if library_rel and directory:
+        abs_path = os.path.join(directory, library_rel)
         try:
-            size_bytes = os.path.getsize(original_path)
-            mtime_iso = os.path.getmtime(original_path)
-            import datetime
-            mtime = datetime.datetime.fromtimestamp(
-                mtime_iso).isoformat(timespec="seconds")
+            if os.path.exists(abs_path):
+                size_bytes = os.path.getsize(abs_path)
+                mtime_iso = os.path.getmtime(abs_path)
+                import datetime
+                mtime = datetime.datetime.fromtimestamp(
+                    mtime_iso).isoformat(timespec="seconds")
         except OSError:
             pass
 
     return {
-        "filename": photo_row.get("filename"),
-        "relative_path": rel_path,
+        "filename": filename,
+        "library_path": _normalize_rel(library_rel),
+        "relative_path": _normalize_rel(original_path),
+        "preview_path": _normalize_rel(photo_row.get("temp_jpeg_path")),
         "size_bytes": size_bytes,
         "mtime": mtime,
         "camera_model": photo_row.get("camera_model"),
@@ -211,17 +299,27 @@ def _load_existing_payload(path: str) -> Optional[dict]:
 
 def _needs_rewrite(path: str, stamp: str) -> bool:
     """
-    增量判断：文件不存在、解析失败或导出戳变化时才需要重写。
+    增量判断：文件不存在、解析失败、导出戳变化，或**旧格式自愈**时重写。
 
-    Incremental check: rewrite only when missing, corrupt, or the
-    export stamp changed.
+    自愈条件：现有 JSON 的 photo.library_path 缺失（V5.3 之前的存量
+    sidecar）。存量库的 DB updated_at 未变化时导出戳不变，若只比对戳，
+    旧文件永远不会升级到新格式，故单独判断字段存在性。
+
+    Incremental check: rewrite when missing, corrupt, stamp changed, or
+    when the file predates the V5.3 contract (no photo.library_path) —
+    the stamp alone would never trigger those upgrades.
     """
     if not os.path.exists(path):
         return True
     try:
         with open(path, "r", encoding="utf-8") as f:
             existing = json.load(f)
-        return existing.get("_export_stamp") != stamp
+        if existing.get("_export_stamp") != stamp:
+            return True
+        photo_section = existing.get("photo")
+        if not isinstance(photo_section, dict) or "library_path" not in photo_section:
+            return True
+        return False
     except (OSError, ValueError):
         return True
 

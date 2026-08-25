@@ -607,6 +607,29 @@ class PhotoProcessor:
             # 阶段8: 清理过期缓存 (V4.1)
             self._cleanup_expired_cache()
 
+            # 阶段8.5: V5.3 sidecar 收尾导出——每照片 JSON（非破坏工作流的
+            # 数据出口、网站数据源）写入 .superpicky/meta/<前缀>.json。
+            # 必须放在精选旗标/整理移动/连拍重组/临时路径入库全部完成之后：
+            # library_path（current_path）、preview_path（temp_jpeg_path）等
+            # 定位字段要在照片的最终位置确定后才落盘，否则导出即过期。
+            # 增量导出戳（updated_at 最大值）保证收尾这轮只重写动过的照片。
+            # V5.3: final per-photo sidecar export AFTER picked-flag
+            # calculation, rating-folder moves, burst consolidation and
+            # temp-path persistence, so locating fields (library_path /
+            # preview_path) reflect the final on-disk layout. Incremental
+            # stamps keep this second pass cheap.
+            if self.report_db is not None:
+                try:
+                    from core.sidecar_export import export_directory_sidecars
+                    _n_sidecar = export_directory_sidecars(
+                        self.report_db, self.dir_path, log=self._log)
+                    if _n_sidecar:
+                        self._log(
+                            f"  📝 Sidecar 导出: {_n_sidecar} 个 JSON → "
+                            f".superpicky/meta/ (per-photo rich data)")
+                except Exception as _sc_e:
+                    self._log(f"  ⚠️ Sidecar export failed: {_sc_e}", "warning")
+
             # V4.5: 全部阶段（含识鸟收尾/精选/文件整理）完成后才发 100%，
             # 与统一工作单元进度（封顶 99%）配套，杜绝「100% 后还在干活」。
             # V4.5: Emit 100% only after every phase (BirdID drain / picks /
@@ -3305,10 +3328,11 @@ class PhotoProcessor:
         # 注意：report_db 在 run() 方法结束时关闭，因为后续阶段仍需要使用
         
         # V5.2(species-recall): 批末物种召回——标记含「本批从未当主鸟」
-        # 鸟种的照片（notable，与星级/精选正交），须在全部识别完成、
-        # sidecar 导出之前运行，标记随 JSON 一起落地。
-        # V5.2: batch-end species recall before the sidecar export so
-        # the notable flags land in the JSON as well.
+        # 鸟种的照片（notable，与星级/精选正交），须在全部识别完成后、
+        # sidecar 收尾导出（process() 阶段8.5）之前运行，标记随 JSON 落地。
+        # V5.2: batch-end species recall runs after all recognition and
+        # before the final sidecar export (process() stage 8.5) so the
+        # notable flags land in the JSON as well.
         if self.report_db is not None:
             try:
                 from core.species_recall import run_species_recall
@@ -3318,21 +3342,6 @@ class PhotoProcessor:
                     log=self._log)
             except Exception as _sr_e:
                 self._log(f"  ⚠️ Species recall failed: {_sr_e}", "warning")
-
-        # V5.0(sidecar): 批末导出每照片 JSON（非破坏工作流的数据出口，
-        # 网站数据源），写入 .superpicky/meta/<前缀>.json。增量、保 edits。
-        # V5.0: export per-photo JSON sidecars (external data contract).
-        if self.report_db is not None:
-            try:
-                from core.sidecar_export import export_directory_sidecars
-                _n_sidecar = export_directory_sidecars(
-                    self.report_db, self.dir_path, log=self._log)
-                if _n_sidecar:
-                    self._log(
-                        f"  📝 Sidecar 导出: {_n_sidecar} 个 JSON → "
-                        f".superpicky/meta/ (per-photo rich data)")
-            except Exception as _sc_e:
-                self._log(f"  ⚠️ Sidecar export failed: {_sc_e}", "warning")
 
         self._perf_finalize()
         
@@ -3869,24 +3878,40 @@ class PhotoProcessor:
         
         # V4.0.5: 更正 current_path - 更新数据库中所有移动文件的位置
         # 这确保 current_path 指向最新的原始文件位置 (如 3star_excellent/Bird/DSC_1234.NEF)
+        # V5.3: current_path 语义定死为「主文件（RAW，无 RAW 时纯 JPEG）」。
+        # files_to_move 每个 prefix 的顺序是 RAW→XMP→JPG，旧逻辑逐条写
+        # current_path 会让伴随 JPG 覆盖 RAW（与 rating_mover 只写 RAW 的
+        # 语义冲突，也让 sidecar 导出的 library_path 指向 JPG）。
+        # 伴随 JPG 只更新 temp_jpeg_path；纯 JPEG 照片自己就是主文件。
+        # V5.3: current_path always points at the master file (RAW, or
+        # the JPEG itself for JPEG-only shots). Companion JPGs update
+        # temp_jpeg_path only — otherwise the JPG entry overwrites the
+        # RAW path written moments earlier in the same loop.
         if hasattr(self, 'report_db') and self.report_db:
             try:
+                main_file_seen = set()  # 已写 current_path 的 prefix / prefixes with current_path set
                 for file_info in files_to_move:
                     # 原文件名（带后缀）
                     orig_filename = file_info['filename']
-                    # XMP 侧车文件与 RAW 共用同一个 prefix，跳过 XMP 的 current_path 更新
-                    # 否则 XMP 会覆盖 RAW 已写入的正确路径，导致连拍合并时定位不到原图
+                    # XMP 侧车文件与 RAW 共用同一个 prefix，跳过（不占主文件位）
                     if orig_filename.lower().endswith('.xmp'):
                         continue
                     # 文件前缀（不带后缀，也是数据库的主键/索引）
                     file_prefix = os.path.splitext(orig_filename)[0]
                     # 新的相对路径
                     new_rel_path = os.path.join(file_info['folder'], orig_filename)
-                    
-                    update_data = {'current_path': new_rel_path}
-                    # 若移动的是 JPG 文件，同步更新 temp_jpeg_path 使路径始终有效
-                    if orig_filename.lower().endswith(('.jpg', '.jpeg')):
+                    is_jpeg = orig_filename.lower().endswith(('.jpg', '.jpeg'))
+
+                    update_data = {}
+                    if is_jpeg:
+                        # 纯 JPEG 照片（该 prefix 无 RAW）自己就是主文件；
+                        # RAW 的伴随 JPG 只更新 temp_jpeg_path 供显示链复用
+                        if file_prefix not in main_file_seen:
+                            update_data['current_path'] = new_rel_path
                         update_data['temp_jpeg_path'] = new_rel_path
+                    else:
+                        update_data['current_path'] = new_rel_path
+                        main_file_seen.add(file_prefix)
                     self.report_db.update_photo(file_prefix, update_data)
             except Exception as e:
                 self._log(f"  ⚠️  Failed to update current_path in DB: {e}", "warning")

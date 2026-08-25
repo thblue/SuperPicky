@@ -192,6 +192,19 @@ class FilterPanel(QWidget):
         layout.addWidget(self._divider())
 
         # --- 排序方式 ---
+        # V5.2 物种召回筛选：只看含「本批从未当主鸟」鸟种的照片
+        layout.addWidget(self._divider())
+        layout.addWidget(_section_label(self.i18n.t("browser.section_recall")))
+        self._recall_cb = QCheckBox(self.i18n.t("browser.recall_option"))
+        self._recall_cb.setChecked(False)
+        self._recall_cb.setStyleSheet(
+            f"QCheckBox {{ color: {COLORS['text_secondary']}; font-size: 12px; spacing: 6px; }}"
+            + checkbox_indicator_qss(15, COLORS['text_muted'], COLORS['accent'])
+        )
+        self._recall_cb.stateChanged.connect(self._emit_filters)
+        layout.addWidget(self._recall_cb)
+
+        layout.addWidget(self._divider())
         layout.addWidget(_section_label(self.i18n.t("browser.section_sort")))
         self._sort_combo = QComboBox()
         self._sort_combo.addItem(self.i18n.t("browser.sort_rarity"), "rarity_desc")
@@ -512,6 +525,7 @@ class FilterPanel(QWidget):
             species_key:      bird_species,
             "sort_by":        sort_by,
             "picked_only":    "picked" in self._active_ratings,
+            "notable_only":   self._recall_cb.isChecked(),
         }
 
     # ------------------------------------------------------------------
@@ -542,6 +556,9 @@ class FilterPanel(QWidget):
             cb.blockSignals(False)
 
         # 鸟种 → 全部
+        self._recall_cb.blockSignals(True)
+        self._recall_cb.setChecked(False)
+        self._recall_cb.blockSignals(False)
         self.species_combo.blockSignals(True)
         self.species_combo.setCurrentIndex(0)
         self.species_combo.blockSignals(False)

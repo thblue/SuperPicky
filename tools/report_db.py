@@ -21,7 +21,7 @@ from .file_utils import ensure_hidden_directory
 
 
 # Schema 版本，用于未来升级
-SCHEMA_VERSION = "10"
+SCHEMA_VERSION = "11"
 
 # 所有列定义（有序），用于 CREATE TABLE 和数据验证
 PHOTO_COLUMNS = [
@@ -38,6 +38,7 @@ PHOTO_COLUMNS = [
     ("flight_conf",   "REAL", None),
     ("rating",        "INTEGER", 0),          # -1/0/1/2/3
     ("picked",        "INTEGER", 0),          # 精选旗标:选鸟时 3★ 中美学∩锐度 top% 的交集(0/1)
+    ("notable",       "INTEGER", 0),          # V5.2 物种召回旗标:含本批从未当主鸟的鸟种(0/1)
     ("focus_status",  "TEXT", None),           # BEST/GOOD/BAD/WORST
     ("focus_x",       "REAL", None),
     ("focus_y",       "REAL", None),
@@ -526,6 +527,25 @@ class ReportDB:
                 current_version = "10"
                 print("✅ Database schema upgraded to v10")
 
+            # ----------------------------------------------------------------------
+            #  Upgrade: v10 -> v11 (Species recall flag on photos)
+            #  V5.2 物种召回：photos 加 notable 列（批内从未当主鸟的鸟种标记）。
+            #  纯加列，bird_detections 的 notable 列 v10 已有。
+            #  Adds photos.notable for the species-recall feature.
+            # ----------------------------------------------------------------------
+            if current_version == "10":
+                print("🔄 Upgrading database schema from v10 to v11...")
+                with self._conn:
+                    try:
+                        self._conn.execute(
+                            "ALTER TABLE photos ADD COLUMN notable INTEGER"
+                        )
+                    except sqlite3.OperationalError:
+                        pass  # 列已存在，跳过
+                    self._update_schema_version("11")
+                current_version = "11"
+                print("✅ Database schema upgraded to v11")
+
     def _update_schema_version(self, version):
         """更新数据库中的版本号（由调用方负责提交事务）"""
         with self._lock:
@@ -806,6 +826,10 @@ class ReportDB:
         if filters.get("picked_only", False):
             where_clauses.append("picked = 1")
 
+        # V5.2 物种召回筛选：只看含「本批从未当主鸟」鸟种的照片
+        if filters.get("notable_only", False):
+            where_clauses.append("notable = 1")
+
         where_sql = ""
         if where_clauses:
             where_sql = "WHERE " + " AND ".join(where_clauses)
@@ -945,6 +969,39 @@ class ReportDB:
                 "SELECT * FROM bird_detections ORDER BY filename, bird_index"
             )
             return [dict(r) for r in cursor.fetchall()]
+
+    def apply_recall_marks(self, photo_flags: List[str],
+                           detection_marks: List[dict]) -> int:
+        """
+        V5.2 物种召回：批量写入照片级与逐鸟级召回标记（单事务）。
+
+        参数:
+        photo_flags (List[str]): 要标记 notable=1 的照片前缀列表
+        detection_marks (List[dict]): 每项 {filename, bird_index,
+            notable_reason}，写入 bird_detections.notable/reason
+
+        返回:
+        int: 标记的照片数
+
+        Bulk-apply species-recall flags to photos + detections in one
+        transaction.
+        """
+        now = _now_iso()
+        with self._lock:
+            with self._conn:
+                for filename in photo_flags:
+                    self._conn.execute(
+                        "UPDATE photos SET notable = 1, updated_at = ? "
+                        "WHERE filename = ?", (now, filename))
+                for m in detection_marks:
+                    self._conn.execute(
+                        "UPDATE bird_detections SET notable = 1, "
+                        "notable_reason = ?, updated_at = ? "
+                        "WHERE filename = ? AND bird_index = ?",
+                        (m.get("notable_reason"), now,
+                         m.get("filename"), m.get("bird_index")))
+            self._safe_commit()
+        return len(photo_flags)
 
     def update_detection_species(
         self,

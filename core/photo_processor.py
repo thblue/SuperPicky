@@ -3304,6 +3304,21 @@ class PhotoProcessor:
         
         # 注意：report_db 在 run() 方法结束时关闭，因为后续阶段仍需要使用
         
+        # V5.2(species-recall): 批末物种召回——标记含「本批从未当主鸟」
+        # 鸟种的照片（notable，与星级/精选正交），须在全部识别完成、
+        # sidecar 导出之前运行，标记随 JSON 一起落地。
+        # V5.2: batch-end species recall before the sidecar export so
+        # the notable flags land in the JSON as well.
+        if self.report_db is not None:
+            try:
+                from core.species_recall import run_species_recall
+                run_species_recall(
+                    self.report_db,
+                    species_threshold=self.config.multibird_species_threshold,
+                    log=self._log)
+            except Exception as _sr_e:
+                self._log(f"  ⚠️ Species recall failed: {_sr_e}", "warning")
+
         # V5.0(sidecar): 批末导出每照片 JSON（非破坏工作流的数据出口，
         # 网站数据源），写入 .superpicky/meta/<前缀>.json。增量、保 edits。
         # V5.0: export per-photo JSON sidecars (external data contract).

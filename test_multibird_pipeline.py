@@ -83,11 +83,11 @@ class TestSchemaV10Migration(unittest.TestCase):
         try:
             self._create_v9_db(db_dir)
             db = ReportDB(db_dir)
-            # 版本已升到 10
+            # 版本连续升级到当前 schema（V5.2 起为 11）
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-            self.assertEqual(ver, "10")
-            self.assertEqual(SCHEMA_VERSION, "10")
+            self.assertEqual(ver, SCHEMA_VERSION)
+            self.assertEqual(SCHEMA_VERSION, "11")
             # 旧 photos 数据仍在
             photo = db.get_photo('OLD_0001')
             self.assertIsNotNone(photo)
@@ -459,6 +459,98 @@ class TestComprehensiveMainBird(unittest.TestCase):
              'gbif_rarity_100': 5.0, 'crop_sharpness': 500.0, 'area_ratio': 0.1},
         ]
         self.assertEqual(select_main_bird(rows), 1)
+
+
+class TestSpeciesRecall(unittest.TestCase):
+    """core/species_recall.run_species_recall 批内物种召回。"""
+
+    def _setup_db(self, d):
+        """三张照片：A 主鸟=泽鹬、次要=反嘴鹬；B 主鸟=泽鹬；C 无主鸟种、次要=黑腹滨鹬。"""
+        from tools.report_db import ReportDB
+        db = ReportDB(d)
+        db.insert_photo({'filename': 'A', 'has_bird': 1, 'rating': 3,
+                         'bird_species_cn': '泽鹬'})
+        db.insert_photo({'filename': 'B', 'has_bird': 1, 'rating': 2,
+                         'bird_species_cn': '泽鹬'})
+        db.insert_photo({'filename': 'C', 'has_bird': 1, 'rating': 1})
+        db.insert_detections_batch([
+            {'filename': 'A', 'bird_index': 0, 'is_selected': 1,
+             'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+             'species_cn': '泽鹬', 'species_en': 'Common Greenshank',
+             'scientific_name': 'Tringa nebularia',
+             'species_confidence': 95.0},
+            {'filename': 'A', 'bird_index': 1, 'is_selected': 0,
+             'bbox_x': 50, 'bbox_y': 50, 'bbox_w': 10, 'bbox_h': 10,
+             'species_cn': '反嘴鹬', 'species_en': 'Pied Avocet',
+             'scientific_name': 'Recurvirostra avosetta',
+             'species_confidence': 80.0},
+        ])
+        db.insert_detections_batch([
+            # 低置信的反嘴鹬（C 照片）：不该触发召回
+            {'filename': 'C', 'bird_index': 0, 'is_selected': 0,
+             'bbox_x': 0, 'bbox_y': 0, 'bbox_w': 10, 'bbox_h': 10,
+             'species_cn': '反嘴鹬', 'species_confidence': 20.0},
+            {'filename': 'C', 'bird_index': 1, 'is_selected': 0,
+             'bbox_x': 20, 'bbox_y': 20, 'bbox_w': 10, 'bbox_h': 10,
+             'species_cn': '黑腹滨鹬', 'species_confidence': 60.0},
+        ])
+        return db
+
+    def test_recall_flags_never_main_species(self):
+        """从未当主鸟的鸟种（反嘴鹬[高置信]、黑腹滨鹬）→ 照片打标。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        d = tempfile.mkdtemp()
+        try:
+            db = self._setup_db(d)
+            logs = []
+            stats = run_species_recall(db, species_threshold=35.0,
+                                       log=logs.append)
+            # 泽鹬当过主鸟（A/B）→ 不召回；反嘴鹬(80%)与黑腹滨鹬(60%)召回
+            self.assertEqual(sorted(stats['never_main_species']),
+                             ['反嘴鹬', '黑腹滨鹬'])
+            self.assertEqual(stats['flagged_photos'], 2)      # A 和 C
+            self.assertEqual(stats['flagged_detections'], 2)  # A#1 与 C#1
+            # photos.notable 落库 + notable_only 筛选
+            flagged = db.get_photos_by_filters({'notable_only': True})
+            self.assertEqual(sorted(p['filename'] for p in flagged),
+                             ['A', 'C'])
+            # detection 级标记与原因
+            rows = db.get_detections('A')
+            self.assertEqual(rows[1]['notable'], 1)
+            self.assertEqual(rows[1]['notable_reason'],
+                             'never_main_species')
+            self.assertIn(rows[0]['notable'], (None, 0))
+            # 低置信的 C#0 反嘴鹬未标记
+            rows_c = db.get_detections('C')
+            self.assertIn(rows_c[0]['notable'], (None, 0))
+            self.assertEqual(rows_c[1]['notable'], 1)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_recall_noop_when_all_species_main(self):
+        """所有鸟种都当过主鸟 → 无标记。"""
+        import os, shutil, tempfile
+        from core.species_recall import run_species_recall
+        from tools.report_db import ReportDB
+        d = tempfile.mkdtemp()
+        try:
+            db = ReportDB(d)
+            db.insert_photo({'filename': 'A', 'has_bird': 1,
+                             'bird_species_cn': '泽鹬'})
+            db.insert_detections_batch([
+                {'filename': 'A', 'bird_index': 0, 'is_selected': 1,
+                 'species_cn': '泽鹬', 'species_confidence': 90.0},
+                {'filename': 'A', 'bird_index': 1, 'is_selected': 0,
+                 'species_cn': '泽鹬', 'species_confidence': 85.0},
+            ])
+            stats = run_species_recall(db, species_threshold=35.0,
+                                       log=lambda *_: None)
+            self.assertEqual(stats['flagged_photos'], 0)
+            db._conn.close()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == '__main__':

@@ -1299,6 +1299,8 @@
     "next_arrow": "Next ▶",
     "flying_option": "Flying",
     "non_flying_option": "Non-flying",
+    "section_recall": "Recall",
+    "recall_option": "✦ Species never main",
     "compare_btn": "🔀 Compare",
     "selected_count": "{n} Selected",
     "focus_toggle_tooltip": "Toggle Focus Overlay (F)",

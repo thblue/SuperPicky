@@ -133,6 +133,8 @@ def _build_processing_section(photo_row: dict) -> dict:
         "burst_id": photo_row.get("burst_id"),
         "burst_position": photo_row.get("burst_position"),
         "gbif_rarity_100": photo_row.get("gbif_rarity_100"),
+        # V5.2 物种召回：含本批从未当主鸟的鸟种（与星级/精选正交）
+        "notable": bool(photo_row.get("notable")),
     }
 
 

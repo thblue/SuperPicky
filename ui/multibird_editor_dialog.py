@@ -457,6 +457,10 @@ class _BirdCanvas(QWidget):
                 selected_rect = (rect, det)
                 continue
             painter.drawRect(*rect)
+            # V5.2 召回鸟：框右上角画金色 ✦（本批从未当主鸟的鸟种）
+            if det.get("notable"):
+                painter.setPen(QPen(QColor(255, 200, 0)))
+                painter.drawText(rect[0] + rect[2] - 16, rect[1] + 12, "✦")
         # 对焦点标记（十字+圆圈，青色）
         if self._focus_point is not None:
             fx, fy = self._focus_point
@@ -943,6 +947,8 @@ class MultibirdEditorDialog(QDialog):
         yolo_conf = det.get("yolo_conf")
         if yolo_conf is not None:
             info += f" · YOLO {yolo_conf:.2f}"
+        if det.get("notable"):
+            info += "  ✦ 召回鸟种（本批从未当主鸟，建议核对）"
         self._info_label.setText(info)
 
     def _show_crop(self, det: dict) -> None:

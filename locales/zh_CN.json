@@ -1299,6 +1299,8 @@
     "next_arrow": "下一张 ▶",
     "flying_option": "飞行中",
     "non_flying_option": "非飞行",
+    "section_recall": "召回",
+    "recall_option": "✦ 含未当主鸟的鸟种",
     "compare_btn": "🔀 对比",
     "selected_count": "已选 {n} 张",
     "focus_toggle_tooltip": "切换焦点叠加显示 (F)",

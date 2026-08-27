@@ -1329,7 +1329,12 @@
     "delete_failed_msg": "无法将文件移入回收站：\n{error}",
     "no_result": "⚠ 无结果",
     "matched_count": "{count} 张匹配",
-    "crop_advice_btn": "裁剪建议"
+    "crop_advice_btn": "裁剪建议",
+    "launcher_title": "打开照片目录",
+    "launcher_recent_hint": "双击目录直接打开；标记 (脱机) 的目录当前不可访问",
+    "launcher_no_recent": "暂无最近目录 —— 点击「浏览」选择照片目录",
+    "launcher_open": "打开",
+    "launcher_clear_confirm": "确定清空最近目录历史吗？（不影响照片和处理结果）"
   },
   "video": {
     "title_phase1": "视频分析（Phase 1 · 仅 YOLO 有鸟/无鸟）",

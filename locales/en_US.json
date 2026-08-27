@@ -1329,7 +1329,12 @@
     "delete_failed_msg": "Failed to move file to Trash:\n{error}",
     "no_result": "⚠ No results",
     "matched_count": "{count} matched",
-    "crop_advice_btn": "Crop Advice"
+    "crop_advice_btn": "Crop Advice",
+    "launcher_title": "Open Photo Folder",
+    "launcher_recent_hint": "Double-click a folder to open it; folders marked (Offline) are unavailable",
+    "launcher_no_recent": "No recent folders yet — click Browse to pick a photo folder",
+    "launcher_open": "Open",
+    "launcher_clear_confirm": "Clear the recent-folders history? (photos and results are not affected)"
   },
   "video": {
     "title_phase1": "Video Analysis (Phase 1 · YOLO bird/no-bird only)",

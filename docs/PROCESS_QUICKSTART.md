@@ -19,11 +19,18 @@ cd G:/code/SuperPicky
 > 识鸟确认**（`ai_model.py` 的 `_birdid_confirm`）不受此开关门控——漏 `-i` 它们照跑，
 > 但召回消费的是库内旧分类数据。
 
-跑完用浏览器人工复核/改种：
+跑完用浏览器人工复核/改种。两种方式：
 
 ```bash
+# 方式一：CLI 直开（目录本身或其子目录含处理结果即可；传父目录自动合并多个子目录）
 .venv/Scripts/python.exe -X utf8 spb_browse.py "<同目录>"
+
+# 方式二：SPBBrowse.exe（双击，无参数时弹「打开照片目录」启动器）
+#   最近目录 + 浏览按钮，与主程序共用 advanced_config.json 的最近目录历史
+dist_SPBBrowse\SPBBrowse\SPBBrowse.exe
 ```
+
+浏览器「文件」菜单里有 **打开目录（Ctrl+O）** 和 **最近目录** 子菜单，浏览中随时切换目录，不必退出重开。exe 打包配置在 `spb_browse_win.spec`，构建：`build_spb_browse.bat`（排除 torch/模型/exiftool 二进制，体积远小于主程序；打星遵守 `metadata_write_mode`——`none` 时只进 report.db 不写照片 XMP，鸟种搜索所需的 ioc 库保留）。
 
 实测参考（RTX 3090，NAS 目录）：2881 张约 64 分钟（≈1.3 秒/张），CPU/GPU 满载阶段在前 50 分钟。
 
@@ -89,7 +96,8 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 
 | 命令 | 用途 |
 |---|---|
-| `spb_browse.py <目录>` | 结果浏览器（缩略图 + 详情 + 多鸟编辑右键） |
+| `spb_browse.py <目录>` | 结果浏览器（缩略图 + 详情 + 多鸟编辑右键；无参数弹启动器） |
+| `build_spb_browse.bat` | 打包 SPBBrowse.exe（独立结果浏览器，`dist_SPBBrowse\SPBBrowse\`） |
 | `superpicky_cli.py restar <目录> -s 500 -n 5.5` | 只重新评星（不重跑检测） |
 | `superpicky_cli.py reset <目录> -y` | 重置目录（移回文件、清评分，**破坏性，先想清楚**） |
 | `superpicky_cli.py info <目录>` | 查看目录处理状态 |

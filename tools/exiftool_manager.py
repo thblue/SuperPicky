@@ -959,6 +959,10 @@ class ExifToolManager:
         """
         设置照片评分和旗标 (Lightroom标准)
 
+        全局 metadata_write_mode == "none" 时跳过写入并返回 True（用户配置
+        意图，与 set_metadata 的策略一致；结果浏览器打星走本方法，配置为
+        none 时星级只进 report.db，不动照片文件）。
+
         Args:
             file_path: 文件路径
             rating: 评分 (-1=拒绝, 0=无评分, 1-5=星级)
@@ -968,11 +972,27 @@ class ExifToolManager:
             # V3.2: 移除 brisque_score 参数
 
         Returns:
-            是否成功
+            是否成功（按配置跳过也算成功）
+
+        Set photo rating and pick flag (Lightroom standard). Honors the
+        global metadata_write_mode: "none" skips writing and returns True,
+        matching set_metadata — the results browser routes star ratings
+        through this method, so with mode=none ratings land in report.db
+        only and photo files stay untouched.
         """
         if not os.path.exists(file_path):
             print(f"❌ File not found: {file_path}")
             return False
+
+        # V4.5.1: 尊重全局写入模式——none 时不碰照片文件（此前仅 set_metadata
+        # 检查本配置，本方法无条件写，与调用方注释「mode=none 时内部自动跳过」不符）
+        # V4.5.1: honor the global write mode — "none" must not touch photo
+        # files (previously only set_metadata checked it while this method
+        # wrote unconditionally, contradicting its callers' comments).
+        global_mode = self._get_metadata_write_mode()
+        if global_mode == "none":
+            print(f"[ExifTool] metadata_write_mode=none, 跳过 set_rating_and_pick: {os.path.basename(file_path)}")
+            return True
 
         # 专有 RAW 强制走 XMP 侧车路由 / proprietary RAW routes to XMP sidecar
         if self._is_sidecar_raw(file_path):

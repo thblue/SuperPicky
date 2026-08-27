@@ -21,11 +21,12 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QStatusBar,
     QSlider, QComboBox, QMessageBox, QSizePolicy, QApplication,
-    QStackedWidget, QMenu
+    QStackedWidget, QMenu, QFileDialog
 )
-from PySide6.QtCore import Qt, Signal, Slot, QProcess, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QProcess, QSize, QTimer, QStandardPaths
 from PySide6.QtGui import QAction, QKeyEvent, QIcon
 
+from advanced_config import get_advanced_config
 from ui.icon_utils import load_tinted_icon, ICON_IDLE
 
 from ui.styles import COLORS, GLOBAL_STYLE, FONTS
@@ -725,6 +726,13 @@ class ResultsBrowserWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.i18n = get_i18n()
+        # 最近目录历史（与主程序共用 advanced_config.json 单例），
+        # 供「文件」菜单的最近目录子菜单与 open_directory 记录使用。
+        # Recent-folder history shared with the main app via the
+        # advanced_config singleton; used by the File menu's recent list
+        # and recorded by open_directory.
+        self._adv_config = get_advanced_config()
+        self._recent_menu: Optional[QMenu] = None
         self._db: Optional[ReportDB] = None
         self._correction_tracker = None  # 惰性创建的纠错记录器 / lazily-created CorrectionTracker
         self._directory: str = ""
@@ -774,12 +782,80 @@ class ResultsBrowserWindow(QMainWindow):
 
         file_menu = menubar.addMenu(self.i18n.t("menu.file"))
 
+        # 打开目录 / Ctrl+O：浏览中直接切换目录（当前窗口重新加载，
+        # 不新开窗口），省去退出 exe 重开的来回。
+        # Open directory (Ctrl+O): switch folders in-place by reloading
+        # the current window instead of relaunching the exe.
+        open_action = QAction(self.i18n.t("browser.open_dir"), self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._on_open_directory_action)
+        file_menu.addAction(open_action)
+
+        # 最近目录子菜单（与主程序互通同一份 advanced_config.json）
+        # Recent-folders submenu, shared with the main app.
+        self._recent_menu = file_menu.addMenu(self.i18n.t("menu.recent_dirs"))
+        self._refresh_recent_menu()
+
         file_menu.addSeparator()
 
         close_action = QAction(self.i18n.t("buttons.close"), self)
         close_action.setShortcut("Ctrl+W")
         close_action.triggered.connect(self.close)
         file_menu.addAction(close_action)
+
+    def _on_open_directory_action(self):
+        """
+        「文件 → 打开目录…」：弹系统目录选择框并在当前窗口加载。
+
+        起始目录优先当前已加载目录（若仍存在），否则回退系统「图片」
+        目录——与主窗口 _browse_directory 的策略一致。
+        """
+        start_dir = self._directory or ""
+        if not (start_dir and os.path.isdir(start_dir)):
+            start_dir = QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.PicturesLocation
+            ) or ""
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            self.i18n.t("labels.select_photo_dir"),
+            start_dir,
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if directory:
+            self.open_directory(os.path.normpath(directory))
+
+    def _refresh_recent_menu(self):
+        """重建「最近目录」子菜单（打开目录后调用），模式与主窗口一致。"""
+        if self._recent_menu is None:
+            return
+        self._recent_menu.clear()
+        dirs = self._adv_config.get_recent_directories()
+        offline_prefix = self.i18n.t("menu.recent_dirs_offline")
+        if dirs:
+            for d in dirs:
+                available = os.path.isdir(d)
+                label = d if available else f"{offline_prefix} {d}"
+                action = QAction(label, self)
+                if available:
+                    action.triggered.connect(
+                        lambda checked=False, path=d: self.open_directory(path)
+                    )
+                else:
+                    action.triggered.connect(
+                        lambda checked=False, msg=self.i18n.t("messages.dir_unavailable"):
+                        QMessageBox.warning(self, self.i18n.t("errors.error_title"), msg)
+                    )
+                self._recent_menu.addAction(action)
+            self._recent_menu.addSeparator()
+        clear_action = QAction(self.i18n.t("menu.recent_dirs_clear"), self)
+        clear_action.triggered.connect(self._clear_recent_directories)
+        self._recent_menu.addAction(clear_action)
+
+    def _clear_recent_directories(self):
+        """清空最近目录历史（与主窗口共用同一存储，两边同步消失）。"""
+        self._adv_config.config["recent_directories"] = []
+        self._adv_config.save()
+        self._refresh_recent_menu()
 
     def _setup_ui(self):
         """
@@ -1040,6 +1116,15 @@ class ResultsBrowserWindow(QMainWindow):
 
         self._dir_combo.blockSignals(False)
         self._directory = directory
+
+        # 记录最近目录历史（与主程序互通）。CLI / 启动器 / Ctrl+O /
+        # 最近菜单 / 主窗口「查看结果」全部入口都在此收口；主窗口路径
+        # 此前已记录过，add_recent_directory 自带去重置顶，无副作用。
+        # Record into the shared recent-folders history so every entry
+        # path converges here. add_recent_directory de-duplicates and
+        # moves the entry to the front, so recording twice is harmless.
+        self._adv_config.add_recent_directory(directory)
+        self._refresh_recent_menu()
 
         if len(processed) > 1:
             self._load_merged(directory, processed)

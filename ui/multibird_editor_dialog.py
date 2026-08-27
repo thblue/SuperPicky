@@ -583,15 +583,43 @@ class MultibirdEditorDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _photo_file(self) -> Optional[str]:
-        """解析照片实际文件路径（current/original → 前缀扫描）。"""
-        for key in ("current_path", "original_path"):
-            rel = self._photo.get(key)
+        """
+        解析照片实际文件路径（temp_jpeg → current/original → 前缀扫描）。
+
+        回退链与详情面板/全屏查看器（detail_panel._resolve_image_path）保持
+        一致：cv2 不解 RAW，CR3/NEF 等原片必须优先换成可显示的 JPG——
+        ① temp_jpeg_path（处理时生成的预览 JPG，report.db 字段）；
+        ② current/original 若为 RAW，找同目录同名 JPG 边车（RAW+JPG 成对
+          拍摄场景），本身就是 JPG 则直接用；
+        ③ 前缀扫描兜底（jpg 优先）。SPBBrowse.exe 不带 rawpy/torch 全件
+          解码链，这条回退链是它在 RAW 目录下能工作的前提。
+
+        Resolve the photo's displayable file, mirroring the detail panel's
+        fallback chain: cv2 cannot decode RAW, so CR3/NEF originals must be
+        swapped for a displayable JPG — temp_jpeg_path first, then the
+        sibling JPG next to the RAW, then a prefix scan. This chain is what
+        lets SPBBrowse.exe (no rawpy/torch decode chain) work on RAW folders.
+        """
+        def _abs(rel: Optional[str]) -> Optional[str]:
             if not rel:
-                continue
-            p = rel if os.path.isabs(rel) else os.path.join(self._directory, rel)
-            if os.path.exists(p):
-                return p
-        # 兜底：按前缀在目录里找（jpg 优先，可显示性最好）
+                return None
+            return rel if os.path.isabs(rel) else os.path.join(self._directory, rel)
+
+        from tools.file_utils import sibling_jpeg
+
+        # ① 处理时生成的预览 JPG / temp preview JPEG from processing
+        temp = _abs(self._photo.get("temp_jpeg_path"))
+        if temp and os.path.exists(temp):
+            return temp
+
+        # ② current/original：RAW 换同名 JPG 边车，JPG 直接用
+        for key in ("current_path", "original_path"):
+            p = _abs(self._photo.get(key))
+            if p and os.path.exists(p):
+                sib = sibling_jpeg(p)
+                return sib if sib else p
+
+        # ③ 前缀扫描兜底（jpg 优先，可显示性最好）
         for ext in (".jpg", ".jpeg", ".cr3", ".nef", ".arw", ".dng",
                     ".cr2", ".png"):
             p = os.path.join(self._directory, self._prefix + ext)

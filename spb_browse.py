@@ -74,6 +74,78 @@ def _pick_directory_via_launcher(app) -> str:
     return ""
 
 
+def _run_selftest() -> int:
+    """
+    打包冒烟自测（隐藏参数 --selftest，仅用于 exe 回归验证）。
+
+    在临时目录构造最小数据（sidecar JSON + 假 RAW + 同名 JPG），
+    完整走一遍多鸟编辑器的图片回退链与鸟种搜索对话框的懒加载链——
+    这两条是 SPBBrowse.exe 最脆弱的链路（cv2/rawpy/懒加载模块缺失时
+    只会静默失败）。全部通过返回 0，任一失败打印异常返回 1。
+
+    Packaged smoke test (hidden --selftest). Builds throwaway data and
+    exercises the multibird editor's image fallback chain plus the species
+    dialog's lazy-import chain — the two paths that fail silently in the
+    exe when a module is missing. Returns 0 on success, 1 on failure.
+    """
+    import json
+    import shutil
+    import tempfile
+    import traceback
+
+    import numpy as np
+
+    tmp = os.path.join(tempfile.gettempdir(), 'spb_browse_selftest')
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        os.makedirs(os.path.join(tmp, '.superpicky', 'meta'))
+
+        # 假 RAW + 同名 JPG 边车 + sidecar JSON
+        import cv2
+        cv2.imwrite(os.path.join(tmp, 'SELFTEST.jpg'),
+                    np.full((64, 64, 3), (30, 160, 220), np.uint8))
+        with open(os.path.join(tmp, 'SELFTEST.cr3'), 'wb') as f:
+            f.write(b'not-a-real-raw')
+        with open(os.path.join(tmp, '.superpicky', 'meta', 'SELFTEST.json'),
+                  'w', encoding='utf-8') as f:
+            json.dump({"detections": [
+                {"index": 0, "is_selected": True, "x": 8, "y": 8,
+                 "w": 40, "h": 40,
+                 "species": {"cn": "测试鸟", "en": "Test Bird",
+                             "scientific": "Testus testus",
+                             "confidence": 0.9}},
+            ], "main_species": ["测试鸟"]}, f, ensure_ascii=False)
+
+        # ① 多鸟编辑：RAW 应回退同名 JPG 并解码成功
+        from ui.multibird_editor_dialog import MultibirdEditorDialog
+        dlg = MultibirdEditorDialog(
+            {'filename': 'SELFTEST',
+             'current_path': os.path.join(tmp, 'SELFTEST.cr3'),
+             'original_path': os.path.join(tmp, 'SELFTEST.cr3')},
+            tmp, load_async=False)
+        assert dlg._img_bgr is not None, 'multibird image fallback failed'
+        dlg.close()
+        print('selftest: multibird fallback OK')
+
+        # ② 鸟种搜索对话框（懒加载链）
+        from ui.bird_species_edit_dialog import BirdSpeciesEditDialog
+        sd = BirdSpeciesEditDialog()
+        sd.close()
+        print('selftest: species dialog OK')
+
+        # ③ rawpy 可导入（纯 RAW 兜底解码器；缺失时仅同名 JPG 场景可用）
+        import rawpy  # noqa: F401
+        print('selftest: rawpy OK')
+        return 0
+    except Exception:
+        traceback.print_exc()
+        return 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main(argv=None) -> int:
     """命令行入口 / CLI entry point."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -83,6 +155,9 @@ def main(argv=None) -> int:
     from ui.results_browser_window import ResultsBrowserWindow
 
     app = QApplication.instance() or QApplication(argv)
+
+    if argv and argv[0] == '--selftest':
+        return _run_selftest()
 
     if argv:
         # 带参数：CLI 直开 / with argument: open directly

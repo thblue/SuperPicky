@@ -26,6 +26,12 @@ sys.path.append(os.path.abspath('.'))
 
 base_path = os.path.abspath('.')
 
+# rawpy 数据文件（CR3/NEF 等 RAW 解码兜底，多鸟编辑器加载纯 RAW 原片用）
+# rawpy data files for the torch-free RAW decode fallback.
+from PyInstaller.utils.hooks import collect_data_files
+
+rawpy_datas = collect_data_files('rawpy')
+
 # 浏览器实际需要的资源目录（落入 _internal/）
 # Resources the browser actually needs (landed under _internal/).
 all_datas = [
@@ -36,6 +42,7 @@ all_datas = [
     # 鸟种搜索数据库（birdname_search_widget / bird_species_edit_dialog）
     (os.path.join(base_path, 'ioc'), 'ioc'),
 ]
+all_datas.extend(rawpy_datas)
 
 a = Analysis(
     ['spb_browse.py'],
@@ -52,6 +59,9 @@ a = Analysis(
         # cv2 + numpy used at top level by the multibird editor / crop studio
         'cv2',
         'numpy',
+        # RAW 直读兜底（_read_image 第三级，绕开 bird_identifier 的 torch）
+        # torch-free RAW decode fallback (tier 3 of _read_image)
+        'rawpy',
         # ── 入口脚本函数体内延迟导入（PyInstaller 静态分析发现不了）──
         # lazily imported inside spb_browse.main()
         'ui.browse_launcher_dialog',
@@ -97,11 +107,15 @@ a = Analysis(
     runtime_hooks=['pyi_rth_cv2.py'] if os.path.exists('pyi_rth_cv2.py') else [],
     # 浏览器链路不使用的重型依赖全部排除，显著缩减体积
     # Exclude heavy deps unused by the browser to shrink the bundle.
+    # 注意：rawpy 必须保留（多鸟编辑器读 RAW 原片；bird_identifier 因 torch
+    # 被排除而不可用，rawpy 是轻量环境唯一的 RAW 解码路径）
+    # Note: rawpy must stay — it is the only RAW decoder left once
+    # bird_identifier (torch-gated) is excluded.
     excludes=[
         'torch', 'torchvision', 'ultralytics', 'timm',
         'matplotlib',
         'flask', 'cryptography',
-        'rawpy', 'imageio', 'pillow_heif', 'pi_heif',
+        'imageio', 'pillow_heif', 'pi_heif',
         'imagehash', 'pywt',
         'PyQt5', 'PyQt6', 'tkinter',
     ],

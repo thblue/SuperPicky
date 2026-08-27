@@ -101,13 +101,22 @@ def _read_image(path: str) -> Optional[np.ndarray]:
     """
     读取图片为 BGR（兼容中文路径；RAW/HEIF 回退 birdid.load_image）。
 
+    三级解码链 / three-tier decode chain:
+      1. np.fromfile + cv2.imdecode（中文路径安全，JPG/PNG 等）
+      2. birdid.load_image（RAW/HEIF 全功能：缩略图快速路径等；
+         依赖 bird_identifier 顶层 torch，SPBBrowse.exe 等轻量环境不可用）
+      3. rawpy 直读兜底（纯 RAW 解码，不依赖 torch——轻量打包环境
+         在 birdid 不可用时仍能解 CR3/NEF 等原片）
+
     参数:
     path (str): 图片路径
 
     返回:
     Optional[np.ndarray]: BGR 图像；失败返回 None
 
-    Read an image as BGR, Chinese-path safe; RAW/HEIF via birdid.
+    Read an image as BGR, Chinese-path safe. RAW/HEIF falls back to
+    birdid.load_image, then to a torch-free rawpy direct read so lightly
+    packaged environments (SPBBrowse.exe) can still decode RAW originals.
     """
     try:
         data = np.fromfile(path, dtype=np.uint8)
@@ -123,6 +132,15 @@ def _read_image(path: str) -> Optional[np.ndarray]:
         if pil is not None:
             return cv2.cvtColor(np.array(pil.convert("RGB")),
                                 cv2.COLOR_RGB2BGR)
+    except Exception:
+        pass
+    # rawpy 兜底：绕开 bird_identifier 的 torch 依赖，纯 RAW 解码
+    # rawpy fallback: torch-free RAW decode for lightweight environments
+    try:
+        import rawpy
+        with rawpy.imread(path) as raw:
+            rgb = raw.postprocess(use_camera_wb=True)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     except Exception:
         pass
     return None

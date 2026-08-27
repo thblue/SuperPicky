@@ -7,8 +7,14 @@
 
 ```bash
 cd G:/code/SuperPicky
-.venv/Scripts/python.exe -X utf8 superpicky_cli.py process "//NAS-server/PHOTO/观鸟/2026 观鸟/XXXX"
+.venv/Scripts/python.exe -X utf8 superpicky_cli.py process -i "//NAS-server/PHOTO/观鸟/2026 观鸟/XXXX"
 ```
+
+> **`-i` 必须显式加**（`--auto-identify`）：CLI 的识鸟总开关**只认这个参数，不回落配置文件**
+> （`tools/cli_settings.py` 的 `auto_identify=bool(_arg(...) or False)`）。主鸟识别、
+> 多鸟逐鸟分类、鸟种分目录、BirdID 地理过滤都挂在这个开关后面
+> （`core/photo_processor.py` 的识鸟执行器与提交门控）。漏掉时不报错——
+> 评分照常跑，但鸟种**沿用库里旧数据**，极易误以为识别过了。
 
 跑完用浏览器人工复核/改种：
 
@@ -51,6 +57,7 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 | 连拍检测 | 关 | `burst_check` |
 | 定星算法 | V2 配额制（3★ 20%、2★ 40%） | `rating_algorithm` / `custom_quota3/2` |
 | 多鸟分类 | 开（面积≥0.1%、采纳≥35%） | `multibird_enabled` 等 |
+| **识鸟总开关（CLI）** | **仅 `-i` 参数，无配置回落** | `auto_identify`（settings 级） |
 | 补救扫描（小图漏检重扫） | 开 | `rescue_scan_enabled` |
 | 目录布局 | flat（不移动文件） | `folder_layout` |
 | 元数据写入 | none（不写 EXIF） | `metadata_write_mode` |
@@ -86,6 +93,7 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 
 ## 已知坑
 
+- **忘加 `-i` = 静默跳过识鸟**：不报错、评分照跑，鸟种沿用库里旧数据（photos 主鸟种 / bird_detections 旧分类行原样保留，不会丢，但也不更新）。判断方法：日志里搜 `Multi-bird` / `Low confidence`，有才是真跑了识鸟。
 - **NAS 目录偶发 WinError 5**：断点文件 `resume_state.json` 在 SMB 上每张重命名一次，NAS 索引/杀毒短暂锁文件会导致个别照片被跳过（8/24 跑丢过 42 张，概率 ≈1.5%）。跑完看日志末尾「N 张照片处理异常被跳过」汇总；被跳过的保留上次结果。
 - **重跑前备份 report.db**：重跑会按新结果覆盖库内计算字段。惯例是在 `.superpicky/` 里留 `report.db.bak_<原因>_<时间戳>`。
 - 跑之前确认没有别的进程在写同一目录（浏览器开着编辑时不要重跑）。

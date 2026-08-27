@@ -916,6 +916,14 @@ class ResultsBrowserWindow(QMainWindow):
         # V5.4 召回鸟种批量删除（右键待确认清单里的鸟种）
         self._filter_panel.recall_species_delete_requested.connect(
             self._on_recall_species_delete)
+        # 鸟种下拉框右键「整批删除」→ 含主鸟的全量软删（AI 整批识别错）
+        # Species-dropdown bulk delete → main-species-inclusive cleanup.
+        self._filter_panel.species_bulk_delete_requested.connect(
+            self._on_species_bulk_delete)
+        # 鸟种下拉框右键「整批改种」→ 弹搜索对话框选新种后全目录改写
+        # Species-dropdown bulk rename → pick a new species, rewrite all.
+        self._filter_panel.species_bulk_rename_requested.connect(
+            self._on_species_bulk_rename)
         main_h.addWidget(self._filter_panel)
 
         # 中央：网格 + 工具栏
@@ -1789,6 +1797,162 @@ class ResultsBrowserWindow(QMainWindow):
         except Exception:
             counts = []
         self._filter_panel.update_recall_species(counts or [])
+
+    def _on_species_bulk_rename(self, display_name: str):
+        """
+        鸟种下拉框右键「整批改为其他鸟种」：全目录批量改写（含主鸟）。
+
+        面向「整批照片识别成了 A，实际全是 B」——先弹鸟种搜索对话框选
+        新种（复用单张改种的同一个搜索 UI），确认后：
+          1. bird_detections 该鸟种全部未删框（含主鸟框）改写为新名；
+          2. photos 主鸟种命中旧名的行改写为新名（星级不动）；
+          3. sidecar 同步（框 species + main_species 替换）；
+          4. 视图刷新 + 后台召回重算（召回按新名重新评估）。
+        合并视图下对每个子目录分别执行。
+
+        Bulk rename from the species dropdown: pick the new species via
+        the shared search dialog, then rewrite every identification
+        (main-bird included) directory-wide and refresh.
+        """
+        from PySide6.QtWidgets import QDialog, QMessageBox
+
+        old_name = (display_name or "").strip()
+        if not old_name:
+            return
+
+        from ui.bird_species_edit_dialog import BirdSpeciesEditDialog
+        dialog = BirdSpeciesEditDialog(parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_cn = dialog.selected_cn
+        new_en = dialog.selected_en
+        new_sci = dialog.selected_latin or None
+        if not new_cn and not new_en:
+            return
+
+        n_photos = sum(
+            1 for p in self._all_photos
+            if (p.get("bird_species_cn") == old_name
+                or p.get("bird_species_en") == old_name))
+        ret = QMessageBox.question(
+            self,
+            self.i18n.t("browser.species_bulk_rename_title"),
+            self.i18n.t("browser.species_bulk_rename_confirm",
+                        old=old_name,
+                        new=(new_cn or new_en),
+                        photos=n_photos),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+
+        # 1) DB 全量改写（单目录/合并分别处理），返回受影响照片
+        affected: list = []
+        try:
+            if hasattr(self._db, "sub_dirs"):
+                from tools.report_db import ReportDB
+                for sub in self._db.sub_dirs:
+                    sdb = ReportDB(sub)
+                    try:
+                        files, _n = sdb.rename_species_everywhere(
+                            old_name, old_name, None,
+                            new_cn, new_en, new_sci)
+                        affected.extend((sub, f) for f in files)
+                    finally:
+                        sdb.close()
+            else:
+                files, _n = self._db.rename_species_everywhere(
+                    old_name, old_name, None, new_cn, new_en, new_sci)
+                affected.extend((self._directory, f) for f in files)
+        except Exception as e:
+            QMessageBox.warning(
+                self, self.i18n.t("browser.species_bulk_rename_title"),
+                str(e))
+            return
+
+        # 2) 逐张 sidecar 同步（框 species 改写 + main_species 替换）
+        try:
+            from core.sidecar_export import rename_species_in_sidecar
+            for d, f in affected:
+                rename_species_in_sidecar(
+                    d, f, new_cn=new_cn, new_en=new_en, new_sci=new_sci,
+                    old_cn=old_name, old_en=old_name)
+        except Exception as e:  # noqa: BLE001（JSON 失败不阻断 DB 结果）
+            print(f"⚠️ sidecar 批量改名失败 / sidecar rename failed: {e}")
+
+        # 3) 视图立即刷新；召回重算 + 全量导出交后台线程
+        self._refresh_after_edit()
+        self._schedule_recall_rebuild([d for d, _f in affected])
+
+    def _on_species_bulk_delete(self, display_name: str):
+        """
+        鸟种下拉框右键「整批删除」：含主鸟的全量软删（AI 整批识别错）。
+
+        与召回清单的删除（_on_recall_species_delete，只删待确认框）不同，
+        本入口面向「整批照片的主鸟种识别错了」——删除该鸟种全部检测框
+        （含 is_selected=1 的主鸟框）并清空 photos 主鸟种，照片回到无鸟
+        种状态（星级不动）。名字按中/英文任一命中（下拉框显示名随界面
+        语言，两种列都匹配）。链路：确认 → DB 软删 → sidecar 同步（框
+        +main_species）→ 视图刷新 → 后台召回重算。
+
+        Bulk delete from the species dropdown: main-species-inclusive soft
+        delete for the whole-batch-misidentified case. Confirm → DB soft
+        delete → sidecar sync → refresh → background recall rebuild.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        name = (display_name or "").strip()
+        if not name:
+            return
+        n_photos = sum(
+            1 for p in self._all_photos
+            if (p.get("bird_species_cn") == name
+                or p.get("bird_species_en") == name))
+        if n_photos == 0 and not self._db:
+            return
+        ret = QMessageBox.question(
+            self,
+            self.i18n.t("browser.species_bulk_delete_title"),
+            self.i18n.t("browser.species_bulk_delete_confirm",
+                        name=name, photos=n_photos),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+
+        # 1) DB 全量软删（单目录/合并分别处理），返回受影响照片
+        affected: list = []
+        try:
+            if hasattr(self._db, "sub_dirs"):
+                from tools.report_db import ReportDB
+                for sub in self._db.sub_dirs:
+                    sdb = ReportDB(sub)
+                    try:
+                        files, _n = sdb.soft_delete_species_everywhere(
+                            name, name)
+                        affected.extend((sub, f) for f in files)
+                    finally:
+                        sdb.close()
+            else:
+                files, _n = self._db.soft_delete_species_everywhere(
+                    name, name)
+                affected.extend((self._directory, f) for f in files)
+        except Exception as e:
+            QMessageBox.warning(
+                self, self.i18n.t("browser.species_bulk_delete_title"),
+                str(e))
+            return
+
+        # 2) 逐张 sidecar 同步（检测框软删 + main_species 移除同名项）
+        try:
+            from core.sidecar_export import mark_species_deleted_in_sidecar
+            for d, f in affected:
+                mark_species_deleted_in_sidecar(
+                    d, f, species_cn=name, species_en=name)
+        except Exception as e:  # noqa: BLE001（JSON 失败不阻断 DB 结果）
+            print(f"⚠️ sidecar 批量标记失败 / sidecar mark failed: {e}")
+
+        # 3) 视图立即刷新；召回重算 + 全量导出交后台线程
+        self._refresh_after_edit()
+        self._schedule_recall_rebuild([d for d, _f in affected])
 
     def _on_recall_species_delete(self, cn: str, en: str):
         """

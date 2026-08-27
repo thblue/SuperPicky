@@ -1339,7 +1339,13 @@
     "launcher_processed_group": "Processed folders (process run)",
     "launcher_scan": "Scan & Import...",
     "launcher_scan_done": "Imported {n} new folders",
-    "launcher_scan_none": "No processed results found under this folder"
+    "launcher_scan_none": "No processed results found under this folder",
+    "species_bulk_delete_title": "Bulk Delete Species Identifications",
+    "species_bulk_delete_action": "Delete all \"{name}\" identifications (incl. main bird)",
+    "species_bulk_delete_confirm": "This deletes every \"{name}\" identification directory-wide (main-bird boxes included; {photos} photos list it as main species).\nPhotos fall back to no-species; ratings unchanged; soft-deleted and recoverable; originals untouched. Continue?",
+    "species_bulk_rename_title": "Bulk Rename Species",
+    "species_bulk_rename_action": "Rename all \"{name}\" to another species...",
+    "species_bulk_rename_confirm": "This renames every \"{old}\" identification directory-wide to \"{new}\" (main-bird boxes included; {photos} photos list it as main species).\nRatings unchanged; originals untouched; sidecar edits are traceable. Continue?"
   },
   "video": {
     "title_phase1": "Video Analysis (Phase 1 · YOLO bird/no-bird only)",

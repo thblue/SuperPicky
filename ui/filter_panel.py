@@ -99,6 +99,17 @@ class FilterPanel(QWidget):
     # V5.4 召回鸟种批量删除请求：参数 (中文名, 英文名)，由宿主浏览器
     # 执行确认对话框 + DB/JSON 删除 + 召回重算
     recall_species_delete_requested = Signal(str, str)
+    # 鸟种下拉框右键「整批删除」请求：参数为当前选中的鸟种显示名
+    # （中/英文视界面语言），由宿主解析并执行含主鸟的全量软删
+    # Bulk-delete request from the species dropdown's context menu; the
+    # host resolves the display name and runs the main-species-inclusive
+    # soft delete.
+    species_bulk_delete_requested = Signal(str)
+    # 鸟种下拉框右键「整批改种」请求：参数为当前选中的鸟种显示名，
+    # 由宿主弹鸟种搜索对话框选新种后批量改写（含主鸟）
+    # Bulk-rename request from the same context menu; the host picks the
+    # new species via the search dialog and rewrites directory-wide.
+    species_bulk_rename_requested = Signal(str)
 
     def __init__(self, i18n, parent=None):
         super().__init__(parent)
@@ -147,6 +158,12 @@ class FilterPanel(QWidget):
         layout.addWidget(_section_label(self.i18n.t("browser.section_species")))
         self.species_combo = QComboBox()
         self.species_combo.addItem(self.i18n.t("browser.species_all"), "")
+        # 右键当前选中鸟种 → 整批删除（含主鸟）：AI 整批识别错时一键清理
+        # Right-click the selected species → bulk delete (main-bird
+        # included) for batch misidentification cleanup.
+        self.species_combo.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.species_combo.customContextMenuRequested.connect(
+            self._on_species_combo_context_menu)
         self.species_combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: {COLORS['bg_input']};
@@ -531,6 +548,27 @@ class FilterPanel(QWidget):
             self.species_combo.setCurrentIndex(idx)
         self.species_combo.blockSignals(False)
         self._refresh_species_icon()
+
+    def _on_species_combo_context_menu(self, pos) -> None:
+        """
+        鸟种下拉框右键菜单：整批删除 / 整批改为其他鸟种。
+
+        只在下拉框收起状态下右键控件本身生效（作用于当前选中项，
+        非弹出列表中的某一行）；选中「全部」时菜单不可用。
+        """
+        name = self.species_combo.currentData()
+        if not name:
+            return  # 「全部」或空 / "All" or empty selection
+        menu = QMenu(self.species_combo)
+        del_act = menu.addAction(
+            self.i18n.t("browser.species_bulk_delete_action", name=name))
+        rename_act = menu.addAction(
+            self.i18n.t("browser.species_bulk_rename_action", name=name))
+        chosen = menu.exec(self.species_combo.mapToGlobal(pos))
+        if chosen is del_act:
+            self.species_bulk_delete_requested.emit(name)
+        elif chosen is rename_act:
+            self.species_bulk_rename_requested.emit(name)
 
     # ------------------------------------------------------------------
     #  V5.4 召回待确认鸟种清单 / pending recall-species list

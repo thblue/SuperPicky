@@ -1316,7 +1316,160 @@ class ReportDB:
                         "WHERE filename = ? AND notable = 1",
                         (now, filename))
             self._safe_commit()
-            filenames = sorted({row[0] for row in rows})
+            filenames = sorted({row[0] for r in rows})
+            return filenames, len(rows)
+
+    def soft_delete_species_everywhere(
+        self, species_cn: Optional[str] = None,
+        species_en: Optional[str] = None,
+        scientific_name: Optional[str] = None,
+    ) -> Tuple[List[str], int]:
+        """
+        全目录软删除某鸟种的**全部**识别（含主鸟框，并清 photos 主鸟种）。
+
+        与 soft_delete_species_detections 的区别：后者只删「待确认」框
+        （is_selected=0，召回清单里的鸟种从未当过主鸟）；本方法面向
+        「整批照片的主鸟种识别错了」的场景——
+          1. bird_detections 该鸟种全部未删行软删（含 is_selected=1 的
+             主鸟框：deleted=1, is_selected=0, notable=0）；
+          2. photos 表主鸟种（bird_species_cn/en）命中该名的行清空为
+             NULL，照片回到「无鸟种」状态（星级不动，需要时另跑 restar）；
+          3. photos.notable 同步修正（照抄待确认删除的归位逻辑）。
+        名字匹配中文名/英文名/学名任一相等；软删可恢复，原照片不动。
+
+        参数:
+        species_cn / species_en / scientific_name (Optional[str]): 鸟种名
+
+        返回:
+        Tuple[List[str], int]: (受影响照片前缀列表, 删除的检测行数)
+
+        Batch soft-delete EVERY identification of one species, including
+        main-bird rows, and clear the matching photos.main-species fields.
+        For the "the whole batch was misidentified as species X" case.
+        Soft-deleted rows stay recoverable; original photos untouched.
+        """
+        conds, params = [], []
+        for col, val in (("species_cn", species_cn),
+                         ("species_en", species_en),
+                         ("scientific_name", scientific_name)):
+            if isinstance(val, str) and val.strip():
+                conds.append(f"{col} = ?")
+                params.append(val.strip())
+        if not conds:
+            return [], 0
+        det_where = ("WHERE deleted = 0 AND (" + " OR ".join(conds) + ")")
+        now = _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename, bird_index FROM bird_detections "
+                f"{det_where}", params).fetchall()
+            with self._conn:
+                for row in rows:
+                    self._conn.execute(
+                        "UPDATE bird_detections SET deleted = 1, "
+                        "is_selected = 0, notable = 0, notable_reason = NULL, "
+                        "updated_at = ? "
+                        "WHERE filename = ? AND bird_index = ?",
+                        (now, row[0], row[1]))
+                # 主鸟种清空（cn/en 任一命中该名字）
+                # Clear photos.main-species wherever the name matches.
+                photo_conds, photo_args = [], []
+                for col_pair_val in (species_cn, species_en):
+                    if isinstance(col_pair_val, str) and col_pair_val.strip():
+                        photo_conds.append(
+                            "(bird_species_cn = ? OR bird_species_en = ?)")
+                        photo_args.extend([col_pair_val.strip(),
+                                           col_pair_val.strip()])
+                if photo_conds:
+                    self._conn.execute(
+                        "UPDATE photos SET bird_species_cn = NULL, "
+                        "bird_species_en = NULL, updated_at = ? "
+                        "WHERE " + " OR ".join(photo_conds),
+                        [now] + photo_args)
+                # photos.notable 归位：待确认种被删光的照片立即摘标记
+                for filename in sorted({r[0] for r in rows}):
+                    self._conn.execute(
+                        "UPDATE photos SET notable = "
+                        "CASE WHEN EXISTS (SELECT 1 FROM bird_detections d "
+                        "WHERE d.filename = photos.filename "
+                        "AND d.notable = 1 AND d.deleted = 0) "
+                        "THEN 1 ELSE 0 END, updated_at = ? "
+                        "WHERE filename = ? AND notable = 1",
+                        (now, filename))
+            self._safe_commit()
+            filenames = sorted({row[0] for r in rows})
+            return filenames, len(rows)
+
+    def rename_species_everywhere(
+        self, old_cn: Optional[str] = None, old_en: Optional[str] = None,
+        old_sci: Optional[str] = None,
+        new_cn: Optional[str] = None, new_en: Optional[str] = None,
+        new_sci: Optional[str] = None,
+    ) -> Tuple[List[str], int]:
+        """
+        全目录批量把某鸟种**全部**识别改为另一个鸟种（含主鸟）。
+
+        与 soft_delete_species_everywhere 同族，面向「整批照片的鸟种
+        识别错了、且知道正确答案」的场景——
+          1. bird_detections 该鸟种全部未删行（含 is_selected=1 主鸟框）
+             的 species_cn/en/scientific_name 改为新名；
+          2. photos 主鸟种（bird_species_cn/en）命中旧名的行改写为新名；
+          3. notable 等召回标记保持，交由后续召回重算按新名重新评估。
+        旧名匹配中文名/英文名/学名任一相等；原照片不动。
+
+        参数:
+        old_cn / old_en / old_sci (Optional[str]): 旧鸟种名（任一非空）
+        new_cn / new_en / new_sci (Optional[str]): 新鸟种名（未提供的
+            维度写 NULL——调用方应至少给中文名或英文名）
+
+        返回:
+        Tuple[List[str], int]: (受影响照片前缀列表, 改写的检测行数)
+
+        Batch-rename every identification of one species (main-bird rows
+        included) to another species directory-wide, for the
+        "whole batch misidentified, correct answer known" case.
+        """
+        conds, params = [], []
+        for col, val in (("species_cn", old_cn),
+                         ("species_en", old_en),
+                         ("scientific_name", old_sci)):
+            if isinstance(val, str) and val.strip():
+                conds.append(f"{col} = ?")
+                params.append(val.strip())
+        if not conds or not any(
+                isinstance(v, str) and v.strip()
+                for v in (new_cn, new_en, new_sci)):
+            return [], 0
+        det_where = ("WHERE deleted = 0 AND (" + " OR ".join(conds) + ")")
+        now = _now_iso()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename, bird_index FROM bird_detections "
+                f"{det_where}", params).fetchall()
+            with self._conn:
+                for row in rows:
+                    self._conn.execute(
+                        "UPDATE bird_detections SET species_cn = ?, "
+                        "species_en = ?, scientific_name = ?, updated_at = ? "
+                        "WHERE filename = ? AND bird_index = ?",
+                        (new_cn or None, new_en or None, new_sci or None,
+                         now, row[0], row[1]))
+                # photos 主鸟种改写（cn/en 任一命中旧名）
+                # Rewrite photos.main-species wherever the old name matches.
+                photo_conds, photo_args = [], []
+                for v in (old_cn, old_en):
+                    if isinstance(v, str) and v.strip():
+                        photo_conds.append(
+                            "(bird_species_cn = ? OR bird_species_en = ?)")
+                        photo_args.extend([v.strip(), v.strip()])
+                if photo_conds:
+                    self._conn.execute(
+                        "UPDATE photos SET bird_species_cn = ?, "
+                        "bird_species_en = ?, updated_at = ? "
+                        "WHERE " + " OR ".join(photo_conds),
+                        [new_cn or None, new_en or None, now] + photo_args)
+            self._safe_commit()
+            filenames = sorted({row[0] for r in rows})
             return filenames, len(rows)
 
     def get_notable_species_counts(self) -> List[dict]:

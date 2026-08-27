@@ -519,9 +519,118 @@ def mark_species_deleted_in_sidecar(
                 "new": None,
             })
             removed += 1
+
+    # 主鸟种数组同步清理：整批删除（soft_delete_species_everywhere）时，
+    # 顶层 main_species 里的同名项一并移除，否则错误的「主鸟」名会残留
+    # 在 JSON 里继续导出到 BirdIndex。仅当确有框被删时才动（与 DB 侧
+    # 「photos 主鸟种只在该名有检测行时清空」的粒度保持一致）。
+    # Also drop the same name from the top-level main_species array when
+    # boxes were deleted, so the wrong "main bird" name does not linger
+    # in the JSON exports.
+    main = data.get("main_species")
+    if removed and isinstance(main, list):
+        names = {v for v in (species_cn, species_en, scientific_name)
+                 if isinstance(v, str) and v.strip()}
+        if names:
+            new_main = [m for m in main
+                        if not (isinstance(m, str) and m.strip() in names)]
+            if new_main != main:
+                data["main_species"] = new_main
+
     if removed:
         try:
             _atomic_write_json(path, data)
         except OSError:
             return 0
     return removed
+
+
+def rename_species_in_sidecar(
+    directory: str,
+    filename: str,
+    new_cn: Optional[str] = None,
+    new_en: Optional[str] = None,
+    new_sci: Optional[str] = None,
+    old_cn: Optional[str] = None,
+    old_en: Optional[str] = None,
+    old_sci: Optional[str] = None,
+) -> int:
+    """
+    在一张照片的 sidecar JSON 里把某鸟种的检测框批量改为另一个鸟种。
+
+    与 report_db.rename_species_everywhere 配套（整批改种的 sidecar 同步）：
+    - 检测框：species 匹配旧名（cn/en/scientific 任一非空相等）的未删框
+      改写为新名（未提供的新名维度写 None）；
+    - main_species：数组里的旧中文名替换为新中文名（若有提供）；
+    - edits 追加 species_renamed 记录（actor=human，含旧/新名）。
+    文件不存在、无匹配或全部已改（幂等重入）时返回 0。
+
+    参数:
+    directory (str): 照片目录
+    filename (str): 照片前缀（无扩展名）
+    new_cn / new_en / new_sci (Optional[str]): 新鸟种名
+    old_cn / old_en / old_sci (Optional[str]): 旧鸟种名（匹配条件）
+
+    返回:
+    int: 本次改写的检测框数
+
+    Batch-rename one species' detections in a photo's sidecar JSON to
+    another species, paired with report_db.rename_species_everywhere.
+    """
+    import datetime
+
+    path = _sidecar_path(directory, filename)
+    data = _load_existing_payload(path)
+    if not data:
+        return 0
+    dets = data.get("detections")
+    if not isinstance(dets, list):
+        return 0
+
+    def _match(species: Optional[dict]) -> bool:
+        if not isinstance(species, dict):
+            return False
+        pairs = ((species.get("cn"), old_cn),
+                 (species.get("en"), old_en),
+                 (species.get("scientific"), old_sci))
+        return any(a and b and str(a).strip() == str(b).strip()
+                   for a, b in pairs)
+
+    old_names = [v for v in (old_cn, old_en, old_sci)
+                 if isinstance(v, str) and v.strip()]
+
+    renamed = 0
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    for det in dets:
+        if not isinstance(det, dict) or det.get("deleted"):
+            continue
+        if _match(det.get("species")):
+            det["species"] = {"cn": new_cn, "en": new_en,
+                              "scientific": new_sci}
+            data.setdefault("edits", []).append({
+                "timestamp": stamp,
+                "actor": "human",
+                "action": "species_renamed",
+                "bird_index": det.get("index"),
+                "old": {"cn": old_cn, "en": old_en, "scientific": old_sci},
+                "new": {"cn": new_cn, "en": new_en, "scientific": new_sci},
+            })
+            renamed += 1
+
+    # main_species 里的旧名替换为新名（数组存显示名，通常为中文名）
+    # Replace old names in the top-level main_species array.
+    main = data.get("main_species")
+    if renamed and isinstance(main, list) and new_cn:
+        old_set = {v for v in (old_cn, old_en, old_sci)
+                   if isinstance(v, str) and v.strip()}
+        new_main = [new_cn if (isinstance(m, str) and m.strip() in old_set)
+                    else m for m in main]
+        if new_main != main:
+            data["main_species"] = new_main
+
+    if renamed:
+        try:
+            _atomic_write_json(path, data)
+        except OSError:
+            return 0
+    return renamed

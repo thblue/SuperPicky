@@ -1339,7 +1339,13 @@
     "launcher_processed_group": "已处理目录（跑过 process）",
     "launcher_scan": "扫描导入…",
     "launcher_scan_done": "已导入 {n} 个新目录",
-    "launcher_scan_none": "该目录下没有找到已处理结果"
+    "launcher_scan_none": "该目录下没有找到已处理结果",
+    "species_bulk_delete_title": "批量删除鸟种识别",
+    "species_bulk_delete_action": "删除「{name}」全部识别（含主鸟）",
+    "species_bulk_delete_confirm": "将删除全目录所有「{name}」识别（含主鸟框；主鸟种为它的照片 {photos} 张）。\n照片回到无鸟种状态，星级不变；软删可恢复，原照片不动。确定？",
+    "species_bulk_rename_title": "整批改换鸟种",
+    "species_bulk_rename_action": "整批把「{name}」改为其他鸟种…",
+    "species_bulk_rename_confirm": "将把全目录所有「{old}」识别改为「{new}」（含主鸟框；主鸟种为它的照片 {photos} 张）。\n星级不变；原照片不动，sidecar 记录改动可追溯。确定？"
   },
   "video": {
     "title_phase1": "视频分析（Phase 1 · 仅 YOLO 有鸟/无鸟）",

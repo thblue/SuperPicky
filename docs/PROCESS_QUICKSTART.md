@@ -15,6 +15,9 @@ cd G:/code/SuperPicky
 > 多鸟逐鸟分类、鸟种分目录、BirdID 地理过滤都挂在这个开关后面
 > （`core/photo_processor.py` 的识鸟执行器与提交门控）。漏掉时不报错——
 > 评分照常跑，但鸟种**沿用库里旧数据**，极易误以为识别过了。
+> 注意：**物种召回**（批末 notable 标记，`core/species_recall.py`）与**补救扫描里的
+> 识鸟确认**（`ai_model.py` 的 `_birdid_confirm`）不受此开关门控——漏 `-i` 它们照跑，
+> 但召回消费的是库内旧分类数据。
 
 跑完用浏览器人工复核/改种：
 
@@ -75,6 +78,8 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 ... process "<目录>" --folder-layout rating-first
 
 # 识鸟地理过滤（默认开；海外拍摄时指定国家更准）
+# 注意：不传 --birdid-country 时真实链路是「GPS反查国 → 兜底硬编码CN」，
+# 不读 advanced_config 里的 birdid_country_code；国内目录建议显式传 CN 最稳
 ... process "<目录>" --birdid-country AU
 ```
 
@@ -94,6 +99,6 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 ## 已知坑
 
 - **忘加 `-i` = 静默跳过识鸟**：不报错、评分照跑，鸟种沿用库里旧数据（photos 主鸟种 / bird_detections 旧分类行原样保留，不会丢，但也不更新）。判断方法：日志里搜 `Multi-bird` / `Low confidence`，有才是真跑了识鸟。
-- **NAS 目录偶发 WinError 5**：断点文件 `resume_state.json` 在 SMB 上每张重命名一次，NAS 索引/杀毒短暂锁文件会导致个别照片被跳过（8/24 跑丢过 42 张，概率 ≈1.5%）。跑完看日志末尾「N 张照片处理异常被跳过」汇总；被跳过的保留上次结果。
+- **NAS 目录偶发 WinError 5**：断点文件 `resume_state.json` 在 SMB 上每张重命名一次，NAS 索引/杀毒短暂锁文件会导致个别照片被跳过（8/24 跑丢过 42 张，概率 ≈1.5%）。跑完看日志末尾「N 张照片处理异常被跳过」汇总；被跳过的保留上次结果。2026-08-27 起 `tools/resume_state.py` 写入端已加退避重试+静默降级（重试耗尽只告警一次，不再把当张照片连坐成失败），「跑完核对 report.db 行数 vs 文件数」的习惯仍保留。
 - **重跑前备份 report.db**：重跑会按新结果覆盖库内计算字段。惯例是在 `.superpicky/` 里留 `report.db.bak_<原因>_<时间戳>`。
 - 跑之前确认没有别的进程在写同一目录（浏览器开着编辑时不要重跑）。

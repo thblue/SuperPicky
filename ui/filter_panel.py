@@ -251,6 +251,11 @@ class FilterPanel(QWidget):
         self._sort_combo = QComboBox()
         self._sort_combo.addItem(self.i18n.t("browser.sort_rarity"), "rarity_desc")
         self._sort_combo.addItem(self.i18n.t("browser.sort_filename"), "filename")
+        # 按拍摄时间（= 原始拍摄顺序）：选中后左右翻页即时间上前后相邻的照片，
+        # 便于结合前后连拍辅助判断鸟种。
+        # By capture time (= original shooting order): prev/next paging then
+        # walks time-adjacent photos for identification context.
+        self._sort_combo.addItem(self.i18n.t("browser.sort_capture_time"), "capture_time")
         self._sort_combo.addItem(self.i18n.t("browser.sort_sharpness"), "sharpness_desc")
         self._sort_combo.addItem(self.i18n.t("browser.sort_aesthetic"), "aesthetic_desc")
         self._sort_combo.addItem(self.i18n.t("browser.sort_species_beauty"), "species_beauty_desc")

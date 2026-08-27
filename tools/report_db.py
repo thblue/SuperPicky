@@ -914,6 +914,14 @@ class ReportDB:
             # V9: 按鸟种颜值(iRateBird)降序 — 无数据排最后
             # V9: sort by species beauty (iRateBird) desc — missing data last
             order_sql = "ORDER BY COALESCE(aesthetic_index, -1e99) DESC, filename ASC"
+        elif sort_by == "capture_time":
+            # 按拍摄时间升序（= 原始拍摄顺序）：无拍摄时间的排最后；
+            # 同秒按文件名 tiebreak —— 相机计数序号即真实先后。
+            # Sort by capture time asc (= original shooting order); photos
+            # without EXIF time go last; same-second tiebreak by filename
+            # (camera counter names reflect the real order).
+            order_sql = ("ORDER BY (date_time_original IS NULL) ASC, "
+                         "date_time_original ASC, filename ASC")
         else:
             order_sql = "ORDER BY filename ASC"
 

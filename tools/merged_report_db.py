@@ -493,6 +493,14 @@ class MergedReportDB:
         elif sort_by == "rarity_desc":
             # V4.2.7: GBIF 罕见度降序，最罕见的鸟先看
             order = "ORDER BY COALESCE(gbif_rarity_100, -1e99) DESC, filename ASC"
+        elif sort_by == "capture_time":
+            # 按拍摄时间升序（= 原始拍摄顺序）：无拍摄时间的排最后；
+            # 同秒 tiebreak 先 source_dir 再文件名（合并视图跨子目录）。
+            # Sort by capture time asc (= original shooting order); photos
+            # without EXIF time go last; tiebreak by source_dir then
+            # filename (merged view spans sub-directories).
+            order = ("ORDER BY (date_time_original IS NULL) ASC, "
+                     "date_time_original ASC, source_dir ASC, filename ASC")
         else:
             order = "ORDER BY source_dir ASC, filename ASC"
         

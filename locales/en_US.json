@@ -38,7 +38,8 @@
     "recent_dirs_clear": "Clear History",
     "recent_dirs_offline": "(Offline)",
     "video_analysis": "Video Analysis…",
-    "video_menu": "Video"
+    "video_menu": "Video",
+    "processed_dirs": "Processed Folders"
   },
   "buttons": {
     "select_dir": "📁 Select Source Folder",
@@ -1334,7 +1335,11 @@
     "launcher_recent_hint": "Double-click a folder to open it; folders marked (Offline) are unavailable",
     "launcher_no_recent": "No recent folders yet — click Browse to pick a photo folder",
     "launcher_open": "Open",
-    "launcher_clear_confirm": "Clear the recent-folders history? (photos and results are not affected)"
+    "launcher_clear_confirm": "Clear the recent-folders history? (photos and results are not affected)",
+    "launcher_processed_group": "Processed folders (process run)",
+    "launcher_scan": "Scan & Import...",
+    "launcher_scan_done": "Imported {n} new folders",
+    "launcher_scan_none": "No processed results found under this folder"
   },
   "video": {
     "title_phase1": "Video Analysis (Phase 1 · YOLO bird/no-bird only)",

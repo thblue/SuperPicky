@@ -173,6 +173,13 @@ class AdvancedConfig:
         # 最近选鸟目录历史（最多保留 10 个，按最近使用时间倒序）
         "recent_directories": [],
 
+        # 已处理目录清单（跑过 process 的目录，PhotoProcessor.process 自动记录；
+        # 最多保留 100 个，按最近处理时间倒序。SPBBrowse 启动器从这里列出可选）
+        # Processed-folder registry: directories that have been through
+        # process, recorded automatically by PhotoProcessor.process. Most
+        # recent first, capped at 100. Listed by the SPBBrowse launcher.
+        "processed_directories": [],
+
         # 主窗口位置和最大化状态。普通几何与最大化状态分开存储，便于跨屏幕校验。
         # Main-window placement and maximized state. Normal geometry is stored
         # separately from maximized state so it can be validated across monitors.
@@ -930,6 +937,53 @@ class AdvancedConfig:
         dirs.insert(0, directory)
         self.config["recent_directories"] = dirs[:10]
         self.save()
+
+    # ──────────────────────────────────────────────
+    # 已处理目录清单（跑过 process 的目录）
+    # ──────────────────────────────────────────────
+    def get_processed_directories(self) -> list:
+        """返回全部已处理目录（不过滤），按最近处理时间倒序，供启动器/菜单使用。"""
+        return list(self.config.get("processed_directories", []))
+
+    def add_processed_directory(self, directory: str) -> None:
+        """
+        将目录记入已处理清单头部（normpath 归一化，去重），最多保留 100 条，并保存。
+
+        重复处理同一路径会把它移到最前——清单顺序即最近处理顺序。
+        """
+        directory = os.path.normpath(directory)
+        dirs = [
+            d for d in self.config.get("processed_directories", [])
+            if os.path.normpath(d) != directory
+        ]
+        dirs.insert(0, directory)
+        self.config["processed_directories"] = dirs[:100]
+        self.save()
+
+    def add_processed_directories(self, directories: list) -> int:
+        """
+        批量合并目录进已处理清单（扫描导入用），保持传入顺序优先靠前，去重。
+
+        参数:
+        directories (list): 待合并的目录路径列表
+
+        返回:
+        int: 实际新增的目录数量（清单中原本不存在的）
+
+        返回新增数供 UI 提示「已导入 N 个」；全为重复时返回 0。
+        """
+        existing = {os.path.normpath(d) for d in self.config.get("processed_directories", [])}
+        fresh = []
+        for d in directories:
+            normalized = os.path.normpath(d)
+            if normalized not in existing:
+                existing.add(normalized)
+                fresh.append(normalized)
+        if fresh:
+            self.config["processed_directories"] = fresh + self.config.get("processed_directories", [])
+            self.config["processed_directories"] = self.config["processed_directories"][:100]
+            self.save()
+        return len(fresh)
 
     def get_dict(self):
         """获取配置字典（用于传递给其他模块）"""

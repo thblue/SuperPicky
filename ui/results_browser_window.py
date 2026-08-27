@@ -733,6 +733,7 @@ class ResultsBrowserWindow(QMainWindow):
         # and recorded by open_directory.
         self._adv_config = get_advanced_config()
         self._recent_menu: Optional[QMenu] = None
+        self._processed_menu: Optional[QMenu] = None
         self._db: Optional[ReportDB] = None
         self._correction_tracker = None  # 惰性创建的纠错记录器 / lazily-created CorrectionTracker
         self._directory: str = ""
@@ -791,6 +792,11 @@ class ResultsBrowserWindow(QMainWindow):
         open_action.triggered.connect(self._on_open_directory_action)
         file_menu.addAction(open_action)
 
+        # 已处理目录子菜单（跑过 process 的目录，PhotoProcessor 自动记录）
+        # Processed-folders submenu, recorded automatically by process runs.
+        self._processed_menu = file_menu.addMenu(self.i18n.t("menu.processed_dirs"))
+        self._refresh_processed_menu()
+
         # 最近目录子菜单（与主程序互通同一份 advanced_config.json）
         # Recent-folders submenu, shared with the main app.
         self._recent_menu = file_menu.addMenu(self.i18n.t("menu.recent_dirs"))
@@ -826,10 +832,31 @@ class ResultsBrowserWindow(QMainWindow):
 
     def _refresh_recent_menu(self):
         """重建「最近目录」子菜单（打开目录后调用），模式与主窗口一致。"""
-        if self._recent_menu is None:
+        self._rebuild_directory_menu(
+            self._recent_menu, self._adv_config.get_recent_directories(),
+            with_clear=True,
+        )
+
+    def _refresh_processed_menu(self):
+        """重建「已处理目录」子菜单（跑过 process 的目录清单）。"""
+        self._rebuild_directory_menu(
+            self._processed_menu, self._adv_config.get_processed_directories(),
+            with_clear=False,
+        )
+
+    def _rebuild_directory_menu(
+        self, menu: Optional[QMenu], dirs: list, with_clear: bool = True
+    ):
+        """
+        按目录列表重建子菜单：可用项点击即切换、脱机项提示。
+
+        供「最近目录」与「已处理目录」两个子菜单共用同一模式；
+        with_clear 控制是否附「清除历史」尾项（仅最近菜单有——已处理
+        清单由 process 自动记录维护，不提供手动清除）。
+        """
+        if menu is None:
             return
-        self._recent_menu.clear()
-        dirs = self._adv_config.get_recent_directories()
+        menu.clear()
         offline_prefix = self.i18n.t("menu.recent_dirs_offline")
         if dirs:
             for d in dirs:
@@ -845,11 +872,13 @@ class ResultsBrowserWindow(QMainWindow):
                         lambda checked=False, msg=self.i18n.t("messages.dir_unavailable"):
                         QMessageBox.warning(self, self.i18n.t("errors.error_title"), msg)
                     )
-                self._recent_menu.addAction(action)
-            self._recent_menu.addSeparator()
-        clear_action = QAction(self.i18n.t("menu.recent_dirs_clear"), self)
-        clear_action.triggered.connect(self._clear_recent_directories)
-        self._recent_menu.addAction(clear_action)
+                menu.addAction(action)
+            if with_clear:
+                menu.addSeparator()
+        if with_clear:
+            clear_action = QAction(self.i18n.t("menu.recent_dirs_clear"), self)
+            clear_action.triggered.connect(self._clear_recent_directories)
+            menu.addAction(clear_action)
 
     def _clear_recent_directories(self):
         """清空最近目录历史（与主窗口共用同一存储，两边同步消失）。"""
@@ -1125,6 +1154,7 @@ class ResultsBrowserWindow(QMainWindow):
         # moves the entry to the front, so recording twice is harmless.
         self._adv_config.add_recent_directory(directory)
         self._refresh_recent_menu()
+        self._refresh_processed_menu()
 
         if len(processed) > 1:
             self._load_merged(directory, processed)

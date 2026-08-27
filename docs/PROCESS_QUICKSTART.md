@@ -30,7 +30,14 @@ cd G:/code/SuperPicky
 dist_SPBBrowse\SPBBrowse\SPBBrowse.exe
 ```
 
-浏览器「文件」菜单里有 **打开目录（Ctrl+O）** 和 **最近目录** 子菜单，浏览中随时切换目录，不必退出重开。exe 打包配置在 `spb_browse_win.spec`，构建：`build_spb_browse.bat`（排除 torch/模型/exiftool 二进制，体积远小于主程序；打星遵守 `metadata_write_mode`——`none` 时只进 report.db 不写照片 XMP，鸟种搜索所需的 ioc 库保留）。
+浏览器「文件」菜单里有 **打开目录（Ctrl+O）**、**已处理目录** 和 **最近目录** 子菜单，浏览中随时切换目录，不必退出重开。
+
+> **已处理目录清单**：跑过 `process` 的目录会自动记入 `advanced_config.json` 的
+> `processed_directories`（`PhotoProcessor.process` 收口，CLI/GUI 都记，最近处理的排最上）。
+> SPBBrowse.exe 启动器直接列出整个清单，双击即开，不用翻 NAS。
+> **存量目录一次性导入**：启动器里点「扫描导入…」，选 NAS 观鸟根目录
+> （如 `\\NAS-server\PHOTO\观鸟`），自动发现所有含 `report.db` 的子目录灌入清单。
+> exe 打包配置在 `spb_browse_win.spec`，构建：`build_spb_browse.bat`（排除 torch/模型/exiftool 二进制，体积远小于主程序；打星遵守 `metadata_write_mode`——`none` 时只进 report.db 不写照片 XMP，鸟种搜索所需的 ioc 库保留）。
 
 实测参考（RTX 3090，NAS 目录）：2881 张约 64 分钟（≈1.3 秒/张），CPU/GPU 满载阶段在前 50 分钟。
 

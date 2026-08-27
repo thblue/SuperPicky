@@ -539,6 +539,15 @@ class PhotoProcessor:
         advanced_config = get_advanced_config()
         metadata_write_mode = str(advanced_config.get_metadata_write_mode()).strip().lower()
 
+        # 记入「已处理目录」清单（CLI/GUI 全部处理路径在此收口），
+        # SPBBrowse 启动器据此列出可选目录；开始处理即记录，中断/断点
+        # 续跑的目录也算「处理过」（report.db 已有部分结果可浏览）。
+        # Record into the processed-folders registry (single choke point for
+        # every CLI/GUI processing path) so the SPBBrowse launcher can list
+        # it. Recorded when processing starts: interrupted/resumed folders
+        # count too, since their report.db already holds partial results.
+        advanced_config.add_processed_directory(self.dir_path)
+
         try:
             if metadata_write_mode != "none":
                 exiftool_mgr = get_exiftool_manager()

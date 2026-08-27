@@ -30,7 +30,7 @@ cd G:/code/SuperPicky
 dist_SPBBrowse\SPBBrowse\SPBBrowse.exe
 ```
 
-浏览器「文件」菜单里有 **打开目录（Ctrl+O）**、**已处理目录** 和 **最近目录** 子菜单，浏览中随时切换目录，不必退出重开。
+浏览器「文件」菜单里有 **打开目录（Ctrl+O）**、**已处理目录** 和 **最近目录** 子菜单，浏览中随时切换目录，不必退出重开。缩略图键位：**双击 = 直达多鸟编辑**（无检测框的照片回退全屏）、**Enter = 全屏浏览**（默认全图，F 切裁切诊断）、数字键 0-3 打星。
 
 > **已处理目录清单**：跑过 `process` 的目录会自动记入 `advanced_config.json` 的
 > `processed_directories`（`PhotoProcessor.process` 收口，CLI/GUI 都记，最近处理的排最上）。

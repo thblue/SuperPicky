@@ -930,7 +930,12 @@ class ResultsBrowserWindow(QMainWindow):
 
         self._thumb_grid = ThumbnailGrid(self.i18n, self)
         self._thumb_grid.photo_selected.connect(self._on_photo_selected)
-        self._thumb_grid.photo_double_clicked.connect(self._enter_fullscreen)
+        # 双击直达多鸟编辑（有检测框时跳过全屏中间层）；无检测数据/
+        # 连拍成员回退原行为。全屏浏览改由 Enter 进入。
+        # Double-click opens the multibird editor directly when detection
+        # data exists; otherwise falls back to the old behavior. Fullscreen
+        # browsing is now entered via Enter.
+        self._thumb_grid.photo_double_clicked.connect(self._on_thumb_double_clicked)
         self._thumb_grid.multi_selection_changed.connect(self._on_multi_selection_changed)
         self._thumb_grid.burst_badge_clicked.connect(self._toggle_burst)
         # issue #106: 网格鸟种编辑改由右键菜单进入(见 _show_context_menu_impl)
@@ -1595,27 +1600,43 @@ class ResultsBrowserWindow(QMainWindow):
                 self._detail_panel.show_photo(photo)
 
     @Slot(dict)
-    def _enter_fullscreen(self, photo: dict):
-        """双击缩略图 → 进入全屏查看器；有多鸟数据时默认带出多鸟编辑。"""
-        if photo.get("is_expanded_burst_member"):
-            self._open_burst_sequence(photo)
-            return
+    def _on_thumb_double_clicked(self, photo: dict):
+        """
+        双击缩略图：有检测框 → 直接打开多鸟编辑（不进全屏）；否则进全屏。
 
-        self._show_fullscreen_photo(photo)
-        self._detail_panel._switch_view(True)   # 进入全屏 → 切到裁切图
-        self._stack.setCurrentIndex(1)
-        self._fullscreen.setFocus()  # 确保全屏 viewer 获得键盘焦点
-        # 默认进入多鸟编辑模式：sidecar 存在且至少一个检测框时直接打开
-        # 编辑器；无检测数据的照片（无鸟/旧结果）保持纯全屏浏览。
-        # Enter multi-bird edit mode by default when the sidecar has at
-        # least one detection; photos without detection data stay in
-        # plain fullscreen.
+        此前双击先进全屏（默认裁切图视图）再叠弹多鸟编辑，编辑完 Esc
+        落在全屏里需要再 Esc 一次——逐张审鸟时是多余的绕路。现在双击
+        直达编辑器，保存/关闭后原地回到网格；无检测数据的照片（无鸟/
+        旧结果）与连拍成员保持原行为（全屏浏览 / 连拍序列）。
+        全屏浏览入口改为 Enter 键。
+
+        Double-click: open the multibird editor straight away when the
+        sidecar has detections, skipping the fullscreen hop; photos
+        without detection data and burst members keep the old behavior.
+        Fullscreen browsing is now bound to Enter.
+        """
+        if photo.get("is_expanded_burst_member"):
+            self._enter_fullscreen(photo)   # 连拍成员 → burst 序列（内部转出）
+            return
         base_dir = photo.get("_base_dir") or self._directory
         prefix = photo.get("filename") or ""
         sidecar = os.path.join(base_dir, ".superpicky", "meta",
                                f"{prefix}.json")
         if prefix and self._sidecar_has_detections(sidecar):
-            QTimer.singleShot(0, lambda: self._on_multibird_edit_requested(photo))
+            self._on_multibird_edit_requested(photo)
+        else:
+            self._enter_fullscreen(photo)
+
+    def _enter_fullscreen(self, photo: dict):
+        """Enter/无检测数据时进入全屏查看器（纯浏览，默认全图视图）。"""
+        if photo.get("is_expanded_burst_member"):
+            self._open_burst_sequence(photo)
+            return
+
+        self._show_fullscreen_photo(photo)
+        self._detail_panel._switch_view(False)  # 进全屏默认全图（F 可切裁切图）
+        self._stack.setCurrentIndex(1)
+        self._fullscreen.setFocus()  # 确保全屏 viewer 获得键盘焦点
 
     @staticmethod
     def _sidecar_has_detections(sidecar_path: str) -> bool:
@@ -2343,6 +2364,14 @@ class ResultsBrowserWindow(QMainWindow):
                         self._fullscreen.update_rating_display(photo)
                     else:
                         self._detail_panel.show_photo(photo)
+        elif key == Qt.Key_Return or key == Qt.Key_Enter:
+            # Enter：网格模式进全屏浏览（双击已让位给多鸟编辑直达）
+            # Enter: enter fullscreen browsing from the grid (double-click
+            # is now reserved for the multibird editor).
+            if not in_fullscreen and self._stack.currentIndex() == 0:
+                photo = getattr(self._detail_panel, "_current_photo", None)
+                if photo:
+                    self._enter_fullscreen(photo)
         elif key == Qt.Key_Tab:
             # Tab: 开关右侧详情面板
             self._detail_panel.setVisible(not self._detail_panel.isVisible())

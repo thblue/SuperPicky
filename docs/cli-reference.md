@@ -30,18 +30,20 @@ python superpicky_cli.py process ~/Photos/Birds --auto-identify
 python superpicky_cli.py process ~/Photos/Birds --auto-identify --birdid-country AU
 ```
 
-**参数说明：**
+**参数说明**（默认值优先级：CLI 显式参数 > `advanced_config.json`（与 GUI 同源）> 内置 skill 预设；速查见 [PROCESS_QUICKSTART.md](PROCESS_QUICKSTART.md)）：
 | 参数 | 默认值 | 说明 |
 |------|-------|------|
-| `-s, --sharpness` | 400 | 锐度阈值 (200-600) |
-| `-n, --nima-threshold` | 5.0 | 美学阈值 (4.0-7.0) |
-| `-c, --confidence` | 50 | AI置信度阈值 |
-| `--flight / --no-flight` | 开启 | 飞鸟检测 |
-| `--burst / --no-burst` | 开启 | 连拍检测 |
+| `-s, --sharpness` | 跟随 skill 预设/配置¹ | 锐度阈值 (200-600) |
+| `-n, --nima-threshold` | 跟随 skill 预设/配置¹ | 美学阈值 (4.0-7.0) |
+| `-c, --confidence` | 配置 `min_confidence`×100 | AI置信度阈值 |
+| `--flight / --no-flight` | 跟随配置 `flight_check` | 飞鸟检测 |
+| `--burst / --no-burst` | 跟随配置 `burst_check` | 连拍检测 |
 | `-i, --auto-identify` | 关闭 | 自动识别鸟种 |
 | `--birdid-country` | - | eBird 国家代码 |
 | `--birdid-region` | - | eBird 区域代码 |
-| `--birdid-threshold` | 70 | 识别置信度阈值 |
+| `--birdid-threshold` | 配置 `birdid_confidence` | 识别置信度阈值 |
+
+> ¹ skill 预设：beginner 300/4.5 · intermediate 380/4.8 · master 520/5.5 · custom 读配置文件 `custom_sharpness`/`custom_aesthetics`。
 
 #### reset - 重置目录
 
@@ -189,18 +191,20 @@ python superpicky_cli.py process ~/Photos/Birds --auto-identify
 python superpicky_cli.py process ~/Photos/Birds --auto-identify --birdid-country AU
 ```
 
-**Parameters:**
+**Parameters** (default precedence: explicit CLI flag > `advanced_config.json` (same source as GUI) > built-in skill preset; see [PROCESS_QUICKSTART.md](PROCESS_QUICKSTART.md)):
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `-s, --sharpness` | 400 | Sharpness threshold (200-600) |
-| `-n, --nima-threshold` | 5.0 | Aesthetics threshold (4.0-7.0) |
-| `-c, --confidence` | 50 | AI confidence threshold |
-| `--flight / --no-flight` | On | Flying bird detection |
-| `--burst / --no-burst` | On | Burst detection |
+| `-s, --sharpness` | skill preset/config¹ | Sharpness threshold (200-600) |
+| `-n, --nima-threshold` | skill preset/config¹ | Aesthetics threshold (4.0-7.0) |
+| `-c, --confidence` | config `min_confidence`×100 | AI confidence threshold |
+| `--flight / --no-flight` | config `flight_check` | Flying bird detection |
+| `--burst / --no-burst` | config `burst_check` | Burst detection |
 | `-i, --auto-identify` | Off | Auto bird species ID |
 | `--birdid-country` | - | eBird country code |
 | `--birdid-region` | - | eBird region code |
-| `--birdid-threshold` | 70 | ID confidence threshold |
+| `--birdid-threshold` | config `birdid_confidence` | ID confidence threshold |
+
+> ¹ Skill presets: beginner 300/4.5 · intermediate 380/4.8 · master 520/5.5 · custom reads `custom_sharpness`/`custom_aesthetics` from the config file.
 
 #### reset - Reset Directory
 

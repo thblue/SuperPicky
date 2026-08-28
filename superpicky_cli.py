@@ -168,7 +168,7 @@ def cmd_process(args):
     print(f"⚙️  清理临时: {'否' if adv_config.keep_temp_files else '是'}")
 
     if settings.auto_identify:
-        print(f"⚙️  自动识鸟: 是 (2★+ 照片)")
+        print(f"⚙️  自动识鸟: 是 (有鸟照片，软片低地板拦截)")
         if settings.birdid_country_code:
             print(f"  └─ 国家: {settings.birdid_country_code}")
         if settings.birdid_region_code:

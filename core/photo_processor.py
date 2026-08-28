@@ -2925,21 +2925,20 @@ class PhotoProcessor:
                                 'caption': caption,
                             }, original_prefix, v2_in_pool)
                     
-                        # BirdID 异步提交（2星及以上）
-                        # V4.6(rating-v2/T3): 识鸟门控从「星级≥2」改为硬门槛+锐度粗筛。
-                        # V2 定星延后到批处理末尾,循环中不再有即时星级可依赖;
-                        # 粗筛挡掉明显进不了 2★ 的样本,控制识鸟任务量(约+25%)。
-                        # V4.6 (rating-v2/T3): gate BirdID on hard gates + a coarse
-                        # sharpness screen instead of "rating >= 2" — V2 assigns
-                        # stars in the post-pass, so no instant rating exists here.
-                        if self.settings.auto_identify and (
+                        # BirdID 异步提交（有鸟即识 + 低地板）
+                        # V4.6 曾用「星级≥2 或 置信≥0.5+关键点可见+锐度≥250」粗筛
+                        # 控制识鸟量。V5.5 放宽：稀有鸟可能糊在软片/小图里，粗筛
+                        # 会让物种召回（species_recall 只扫已分类检测行）捞不到它们；
+                        # 补救扫描救回的照片此前也不入库分类。现改为「检出有鸟即识，
+                        # 仅保留锐度≥100 低地板挡纯糊片」；多鸟豁免低地板（鸟群小鸟
+                        # 本就小而糊，逐鸟分类正是为此）。低置信噪声由采纳阈值
+                        # （birdid_confidence）与召回阈值（species_threshold）过滤。
+                        # V5.5: identify every detected bird with a low sharpness
+                        # floor (100) instead of the old coarse screen, so rare
+                        # species in soft photos still reach species recall.
+                        if self.settings.auto_identify and detected and (
                             rating_value >= 2
-                            or (
-                                detected
-                                and confidence >= 0.5
-                                and not all_keypoints_hidden
-                                and normalized_sharpness >= 250
-                            )
+                            or normalized_sharpness >= 100
                             # V5.0(multibird): 多鸟照片豁免粗筛——鸟群里的
                             # 鸟通常小且主鸟未必清晰,但逐鸟分类正是为这种
                             # 场景服务,不应被主鸟粗筛挡在门外。
@@ -2989,21 +2988,20 @@ class PhotoProcessor:
                             'focus_status': focus_status,
                             'caption': caption,
                         }, original_prefix, v2_in_pool)
-                        # BirdID 异步提交（2星及以上）
-                        # V4.6(rating-v2/T3): 识鸟门控从「星级≥2」改为硬门槛+锐度粗筛。
-                        # V2 定星延后到批处理末尾,循环中不再有即时星级可依赖;
-                        # 粗筛挡掉明显进不了 2★ 的样本,控制识鸟任务量(约+25%)。
-                        # V4.6 (rating-v2/T3): gate BirdID on hard gates + a coarse
-                        # sharpness screen instead of "rating >= 2" — V2 assigns
-                        # stars in the post-pass, so no instant rating exists here.
-                        if self.settings.auto_identify and (
+                        # BirdID 异步提交（有鸟即识 + 低地板）
+                        # V4.6 曾用「星级≥2 或 置信≥0.5+关键点可见+锐度≥250」粗筛
+                        # 控制识鸟量。V5.5 放宽：稀有鸟可能糊在软片/小图里，粗筛
+                        # 会让物种召回（species_recall 只扫已分类检测行）捞不到它们；
+                        # 补救扫描救回的照片此前也不入库分类。现改为「检出有鸟即识，
+                        # 仅保留锐度≥100 低地板挡纯糊片」；多鸟豁免低地板（鸟群小鸟
+                        # 本就小而糊，逐鸟分类正是为此）。低置信噪声由采纳阈值
+                        # （birdid_confidence）与召回阈值（species_threshold）过滤。
+                        # V5.5: identify every detected bird with a low sharpness
+                        # floor (100) instead of the old coarse screen, so rare
+                        # species in soft photos still reach species recall.
+                        if self.settings.auto_identify and detected and (
                             rating_value >= 2
-                            or (
-                                detected
-                                and confidence >= 0.5
-                                and not all_keypoints_hidden
-                                and normalized_sharpness >= 250
-                            )
+                            or normalized_sharpness >= 100
                             # V5.0(multibird): 多鸟照片豁免粗筛——鸟群里的
                             # 鸟通常小且主鸟未必清晰,但逐鸟分类正是为这种
                             # 场景服务,不应被主鸟粗筛挡在门外。
@@ -3970,17 +3968,56 @@ class PhotoProcessor:
             self._log(self.i18n.t("logs.temp_files_cleaned", count=0))
     
     def _save_temp_paths_to_db(self):
-        """V4.0.5: 保留临时文件时，将路径写入数据库的 temp_jpeg_path 列"""
+        """保留临时文件时，将路径写入数据库的 temp_jpeg_path 列。
+
+        V5.5: 仅保留「有鸟」照片的 RAW 预览 JPG——无鸟照片的预览在批末删除
+        （检测阶段必须先转换出预览才能判定有无鸟，此处只决定去留）。无鸟 RAW
+        在浏览器里将没有缩略图；面向大量无鸟生活照的批次可省下主要磁盘开销。
+        DB 中查不到该照片（处理失败的边缘情形）时保守保留，不误删。
+
+        V5.5: keep RAW preview JPGs only for photos with a bird; no-bird
+        previews are deleted at batch end (conversion itself is required
+        for detection — this only decides retention). DB-missing photos
+        keep their previews conservatively.
+        """
         if not self.temp_converted_jpegs:
             return
-        
+
+        # 批末一次性取 filename -> has_bird 映射，避免逐张查询
+        # One batch-end fetch of the filename -> has_bird map.
+        has_bird_map = None
+        if hasattr(self, 'report_db') and self.report_db:
+            try:
+                has_bird_map = {
+                    row.get("filename"): bool(row.get("has_bird"))
+                    for row in self.report_db.get_all_photos()
+                    if row.get("filename")
+                }
+            except Exception as e:
+                self._log(f"⚠️ 读取 has_bird 映射失败，预览保留策略退化为全部保留: {e}", "warning")
+                has_bird_map = None
+
         saved_count = 0
+        dropped_count = 0
         for rel_path in self.temp_converted_jpegs:
-            # rel_path 格式: .superpicky/cache/XXXX.jpg
-            # 提取原始文件前缀 (去掉路径和扩展名)
+            # rel_path 格式: .superpicky/cache[/temp_preview]/XXXX.jpg
             basename = os.path.basename(rel_path)
             file_prefix = os.path.splitext(basename)[0]
-            
+
+            # 无鸟照片：删除预览，不写 temp_jpeg_path
+            # No-bird photo: delete the preview, skip temp_jpeg_path.
+            if (has_bird_map is not None
+                    and file_prefix in has_bird_map
+                    and not has_bird_map[file_prefix]):
+                try:
+                    abs_preview = os.path.join(self.dir_path, rel_path)
+                    if os.path.exists(abs_preview):
+                        os.remove(abs_preview)
+                    dropped_count += 1
+                except Exception as e:
+                    self._log(f"⚠️ 删除无鸟预览失败 {file_prefix}: {e}", "warning")
+                continue
+
             try:
                 if hasattr(self, 'report_db') and self.report_db:
                     self.report_db.update_photo(file_prefix, {
@@ -3989,9 +4026,11 @@ class PhotoProcessor:
                     saved_count += 1
             except Exception as e:
                 self._log(self.i18n.t("logs.cache_path_save_failed", prefix=file_prefix, e=e), "warning")
-        
+
         if saved_count > 0:
             self._log(self.i18n.t("logs.cache_paths_saved", count=saved_count))
+        if dropped_count > 0:
+            self._log(f"  🧹 无鸟预览已清理: {dropped_count} 个（有鸟保留 {saved_count} 个）")
 
     def _cleanup_expired_cache(self):
         """V4.3: 已移除基于天数的定期清理（auto_cleanup_days 已删除）。

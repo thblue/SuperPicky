@@ -375,10 +375,15 @@ def export_directory_sidecars(report_db, directory: str,
         保存路径——单照片秒级落盘，全目录重算在后台做）
 
     返回:
-    int: 本次实际写入（含跳过外的重写）的 JSON 数量
+        int: 本次实际写入（含跳过外的重写）的 JSON 数量
+
+    V5.5: 无鸟照片（has_bird=0）不导出 sidecar——BirdIndex 网站数据源只需
+    有鸟照片；已存在的历史 JSON 幂等删除，保证重跑即收敛。DB 行本身不受影响
+    （统计与浏览器「无鸟」筛选仍依赖 photos 表）。
 
     Export every photo (or only_filenames subset) as an incremental
-    per-photo JSON sidecar. Returns the number of files written.
+    per-photo JSON sidecar. No-bird photos (has_bird=0) are skipped and
+    their stale JSONs removed idempotently. Returns files written.
     """
     if report_db is None:
         return 0
@@ -419,6 +424,16 @@ def export_directory_sidecars(report_db, directory: str,
         if not prefix:
             continue
         if only_filenames is not None and prefix not in only_filenames:
+            continue
+        # V5.5: 无鸟照片不导出 sidecar；历史残留 JSON 幂等删除（重跑即收敛）
+        # V5.5: skip no-bird photos; remove any stale JSON idempotently.
+        if not photo_row.get("has_bird"):
+            stale_path = _sidecar_path(directory, prefix)
+            try:
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+            except OSError:
+                pass
             continue
         det_rows = detections_by_filename.get(prefix, [])
         stamp = _export_stamp(photo_row, det_rows)

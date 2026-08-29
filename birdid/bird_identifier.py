@@ -1153,6 +1153,32 @@ def identify_bird(
             except Exception:
                 pass
 
+        # 无 GPS 时地理过滤的默认国家：本应用面向中国鸟友，识别候选集对
+        # 无 GPS 照片默认从 CN 起步（分层放宽可自愈）。注意：稀有度写入
+        # 不使用这个默认——无证据时猜国家会持久化错误分数（伦敦/新加坡的
+        # 照片会被误标中国口径）。
+        # Default country for the GEO FILTER when no GPS: the app targets
+        # Chinese birders and candidate-set guessing self-corrects via tier
+        # widening. Rarity writes deliberately do NOT use this default —
+        # guessing a country would persist wrong scores (a London/Singapore
+        # photo would be mislabeled as CN-scoped).
+        DEFAULT_COUNTRY_NO_GPS = "CN"
+
+        # V4.4: 稀有度国家解析链：GPS 反解 → 手选国家 → 放弃（全球分）。
+        # 此前稀有度严格依赖 GPS 反解，无 GPS 的照片永远拿全球分，中国
+        # 口径对无 GPS 工作流完全不生效。刻意不做「默认中国」兜底：稀有度
+        # 会写入数据库，猜测的代价是持久错误数据；让用户在设置里把手选
+        # 国家设为 CN 即可让国内无 GPS 照片吃到中国分。
+        # result["gps_info"]["country_code"] 仍保留纯 GPS 反解真值（原样
+        # 展示/导出），这里的解析只影响 gbif_rarity_by_country 的查询国家。
+        # V4.4: Rarity country chain: GPS-derived → user-selected → give up
+        # (global score). No silent CN default on purpose: rarity is
+        # persisted, and a guessed country would mislabel overseas photos.
+        # Users shooting GPS-less in China should set the country to CN in
+        # settings. gps_info keeps the raw GPS-derived value; this chain
+        # only affects which country row the rarity lookup uses.
+        photo_country_code = photo_country_code or country_code
+
         # 地理过滤：分层候选集逐层放宽，替代旧的「一次性候选 + 三级断裂兜底」。
         # 无 GPS 时用用户手选的地区/国家从 L4 起步；两者都缺则默认中国（CN），
         # 兜底仍为完全无过滤。
@@ -1160,7 +1186,6 @@ def identify_bird(
         # single candidate set with three disconnected fallbacks. Without GPS we
         # start at L4 using the user's chosen region/country; lacking both, we
         # default to China (CN). The final fallback is still unfiltered.
-        DEFAULT_COUNTRY_NO_GPS = "CN"
         effective_region = (
             region_code
             or country_code

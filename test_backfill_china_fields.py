@@ -54,7 +54,8 @@ def env(tmp_path, monkeypatch):
             ('A', '金雕',   36.0,  96.0,  4.17, NULL),
             ('B', '麻雀',   39.9, 116.4,  1.2,  NULL),
             ('C', '金雕',   NULL,  NULL,  4.17, NULL),
-            ('D', '自定义鸟', 30.0, 120.0, 9.9,  NULL);
+            ('D', '自定义鸟', 30.0, 120.0, 9.9,  NULL),
+            ('E', '麻雀',   NULL,  NULL,  1.2,  NULL);
         INSERT INTO bird_detections VALUES
             ('A', 0, 1041, 4.17, NULL),
             ('A', 1, 9380, 1.2,  NULL),
@@ -113,3 +114,16 @@ def test_dry_run_writes_nothing(env):
     conn.close()
     assert n == 0
     assert r == (4.17,)  # 原值未动
+
+
+def test_country_fallback_only_without_gps(env):
+    """--country 只兜底无 GPS 照片；GPS 反解结果优先、无 CN 行保持全球分。"""
+    backfill(env, dry_run=False, do_rarity=True, default_country="CN")
+    conn = sqlite3.connect(env)
+    def row(fn):
+        return conn.execute("SELECT gbif_rarity_100, china_protection_level "
+                            "FROM photos WHERE filename=?", (fn,)).fetchone()
+    assert row("C") == (34.43, 1)   # 无 GPS 金雕：--country CN → CN 分
+    assert row("E") == (1.2, None)  # 无 GPS 麻雀：无 CN 行 → 保留全球分
+    assert row("D") == (9.9, None)  # GPS 在澳洲：--country 不覆盖 GPS
+    conn.close()

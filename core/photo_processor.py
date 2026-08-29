@@ -1504,7 +1504,7 @@ class PhotoProcessor:
             cn_name = top_result.get('cn_name', '')
             en_name = top_result.get('en_name', '')
             iucn_category = top_result.get('iucn_category')  # IUCN 等级 (LC/NT/VU/EN/CR/...)，可能为 None
-            gbif_rarity_100 = top_result.get('gbif_rarity_100')  # GBIF 罕见度 (0-100，中国 GPS 照片自动采用中国分)，可能为 None
+            gbif_rarity_100 = top_result.get('gbif_rarity_100')  # GBIF 罕见度 (0-100，中国拍摄[GPS/手选国家]自动采用中国分)，可能为 None
             aesthetic_index = top_result.get('aesthetic_index')  # iRateBird 颜值 (0-100)，可能为 None
             # 国家重点保护野生动物等级（1=一级/2=二级，物种级属性），未列入名录为 None
             # China national protection level (1 or 2); None when not on the list

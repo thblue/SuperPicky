@@ -12,18 +12,23 @@ rarity and national protection level into existing .superpicky/report.db.
         class_id 连接 china_protection（物种级属性，与拍摄地无关）。
       - 中国稀有度：photos 已存 GPS 经纬度，离线 reverse-geocode 出国家；
         仅中国照片改写为 gbif_rarity_by_country 的 CN 分（非中国照片保持
-        全球分——全球分与国家无关，无需改动）。detections 跟随所属照片
-        的国家按 class_id 回填。
+        全球分——全球分与国家无关，无需改动）。无 GPS 的照片用 --country
+        显式指定国家（如 --country CN）参与回填；不指定则跳过——无证据时
+        猜国家会把伦敦/新加坡的照片误标成中国口径。detections 跟随所属
+        照片的国家按 class_id 回填。
     After the reference-DB update, the detail panel still shows values
     frozen at identification time in each directory's report.db. This
     script backfills without re-running the model: protection by
     species/class_id joins, CN rarity by offline reverse-geocoding of the
     stored GPS (non-CN photos keep their global score, which is
-    country-independent).
+    country-independent). GPS-less photos participate only when --country
+    is given explicitly — guessing a country would mislabel London or
+    Singapore shots as CN-scoped.
 
 用法 / Usage:
     .venv/Scripts/python scripts_dev/backfill_china_fields.py <照片目录>
     .venv/Scripts/python scripts_dev/backfill_china_fields.py <目录> --dry-run
+    .venv/Scripts/python scripts_dev/backfill_china_fields.py <目录> --country CN
     多个目录逐个执行 / run once per photo directory.
 
 注意 / Notes:
@@ -74,8 +79,12 @@ def _load_country_lookup(coords: List[Tuple[str, float, float]]) -> Dict[str, st
     return out
 
 
-def backfill(db_path: str, dry_run: bool = False,
-             do_rarity: bool = True) -> None:
+def backfill(
+    db_path: str,
+    dry_run: bool = False,
+    do_rarity: bool = True,
+    default_country: Optional[str] = None,
+) -> None:
     """
     对单个 report.db 执行回填。
 
@@ -88,6 +97,10 @@ def backfill(db_path: str, dry_run: bool = False,
         dry_run (bool): True 只统计不写 / Count only, no writes.
         do_rarity (bool): False 跳过稀有度、只回填保护等级 / Skip the
             rarity pass when False.
+        default_country (Optional[str]): 无 GPS 照片的国家兜底（ISO 大写，
+            如 'CN'）。仅当用户显式传入时生效——无证据不猜国家 / Country
+            fallback for GPS-less photos (ISO uppercase). Only applied when
+            explicitly provided; never guess.
 
     异常 / Exceptions:
         FileNotFoundError: report.db 或字典库缺失时抛出 / Raised when the
@@ -142,9 +155,19 @@ def backfill(db_path: str, dry_run: bool = False,
             ).fetchall()
             country_of = _load_country_lookup(
                 [(fn, lat, lon) for fn, lat, lon in gps_rows])
+            # 无 GPS 照片：仅当用户显式给 --country 时才赋予国家；
+            # 显式传入的兜底不覆盖 GPS 反解结果（GPS 永远优先）。
+            # GPS-less photos get the explicit --country fallback only;
+            # an explicit fallback never overrides a GPS-derived code.
+            if default_country:
+                all_files = [r[0] for r in conn.execute(
+                    "SELECT filename FROM photos")]
+                for fn in all_files:
+                    country_of.setdefault(fn, default_country)
             cn_files = [fn for fn, cc in country_of.items() if cc == "CN"]
             print(f"[backfill] GPS 反解 / geocoded: {len(country_of)} 张，"
-                  f"中国 {len(cn_files)} 张")
+                  f"中国 {len(cn_files)} 张"
+                  + (f"（含 --country {default_country} 兜底）" if default_country else ""))
 
             # 中国照片：按中文名 → model_class_id → CN 分改写 photos
             # detections 跟随照片国家按 class_id 改写
@@ -205,6 +228,10 @@ def main() -> None:
                    help="跳过稀有度，只回填保护等级 / protection only")
     p.add_argument("--no-backup", action="store_true",
                    help="跳过整库备份 / skip the DB backup")
+    p.add_argument("--country", default=None, metavar="CC",
+                   help="无 GPS 照片的国家兜底（ISO 大写，如 CN）；不传则"
+                        "无 GPS 照片不改稀有度 / country fallback for "
+                        "GPS-less photos; omit to skip them entirely")
     a = p.parse_args()
 
     db_path = os.path.join(a.directory, ".superpicky", "report.db")
@@ -212,7 +239,9 @@ def main() -> None:
         bak = db_path + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S")
         shutil.copy2(db_path, bak)
         print(f"[backfill] 备份 / backup → {bak}")
-    backfill(db_path, dry_run=a.dry_run, do_rarity=not a.no_rarity)
+    country = a.country.strip().upper() if a.country else None
+    backfill(db_path, dry_run=a.dry_run, do_rarity=not a.no_rarity,
+             default_country=country)
 
 
 if __name__ == "__main__":

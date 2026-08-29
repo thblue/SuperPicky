@@ -144,16 +144,21 @@ have explicit hardcoded overrides:
 
 全球分数衡量的是**全球观察密度**——金雕全球 81 万条记录只拿 4.17 分，
 但它在中国是难得一遇的大山鸟。为此 4.3.x 新增国别稀有度表
-`gbif_rarity_by_country`（当前仅 `countrycode='CN'`）：照片 GPS 反解出
-中国时，详情面板的「罕见度」自动采用中国口径分数；无中国记录的物种
-自动回退全球分。
+`gbif_rarity_by_country`（当前仅 `countrycode='CN'`）。国家解析链：
+**照片 GPS 反解 → 设置里的手选国家（无 GPS 时）→ 两者皆无则保持全球
+分**。刻意不做「默认中国」——无证据时猜国家会把伦敦/新加坡的无 GPS
+照片误标成中国口径；常在国内拍的用户把手选国家设为 CN 即可。无中国
+记录的物种同样回退全球分。
 
 The global score measures *global* observation density — a Golden Eagle
 scores 4.17 from 810k records worldwide despite being a sought-after
 mountain bird in China. Version 4.3.x adds the country-scoped table
-`gbif_rarity_by_country` (currently `CN` only): photos geolocated in
-China automatically show the China-scoped score, and species without
-Chinese records fall back to the global score.
+`gbif_rarity_by_country` (currently `CN` only). Country chain:
+**GPS-derived → user-selected country (settings) → otherwise the global
+score**. There is deliberately no CN default — guessing would mislabel
+GPS-less London or Singapore shots; users shooting mainly in China
+should set the country to CN in settings. Species without Chinese
+records fall back to the global score either way.
 
 - **数据源 / Source**: GBIF Occurrence Search API，`country=CN`，仅
   CC0 + CC-BY-4.0（与全球表同许可口径）/ same license filter as the
@@ -201,7 +206,7 @@ selected:
 
 ```
 鸟种 / Species:   Black-capped Chickadee  ◔  (点击复制学名)
-罕见度:            Occasional (12/100)   ← 中国 GPS 照片自动显示中国口径
+罕见度:            Occasional (12/100)   ← 中国拍摄（GPS 或手选国家）自动显示中国口径
 国家保护:          国家二级 / —
 IUCN:             LC (Least Concern)
 ```

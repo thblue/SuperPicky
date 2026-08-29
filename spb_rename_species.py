@@ -205,6 +205,94 @@ def _preview_species_scope(db: ReportDB, cn: Optional[str],
             "to_no_bird": no_bird}
 
 
+def _sweep_main_species(directory: str, old_cn: Optional[str],
+                        old_en: Optional[str], old_sci: Optional[str],
+                        new_cn: Optional[str] = None,
+                        new_en: Optional[str] = None,
+                        new_sci: Optional[str] = None) -> int:
+    """
+    全库扫尾：把 sidecar main_species 数组里命中旧名的条目改写/移除。
+
+    整种操作的受影响文件列表按 report.db 检测框匹配生成，而多鸟编辑器
+    设的主鸟可能只存在于 main_species 数组、DB 里没有同名检测框（人工
+    选的主鸟种与 AI 检测框物种不一致）——这类照片不在列表里，逐文件
+    sidecar 同步碰不到它，旧鸟名会残留在 main_species（BirdIndex 取种
+    优先级最高），表现为「改种不生效」。本函数遍历 meta 下全部 JSON，
+    字符串/对象两种条目形态统一处理：rename 改写为新名（对象条目保留
+    bird_index 等辅助键），new_cn/en/sci 全空（wipe 语义）则移除条目。
+    幂等可重复执行。
+
+    参数:
+    directory (str): 照片库目录（含 .superpicky/meta/）
+    old_cn / old_en / old_sci (Optional[str]): 旧鸟种名（任一非空）
+    new_cn / new_en / new_sci (Optional[str]): 新鸟种名；全空=移除条目
+
+    返回:
+    int: 改写/移除条目涉及的照片数
+    """
+    from core.sidecar_export import (_atomic_write_json,
+                                     _main_entry_matches)
+
+    names = {v.strip() for v in (old_cn, old_en, old_sci)
+             if isinstance(v, str) and v.strip()}
+    if not names:
+        return 0
+    wiping = not any(isinstance(v, str) and v.strip()
+                     for v in (new_cn, new_en, new_sci))
+    meta_dir = os.path.join(directory, ".superpicky", "meta")
+    if not os.path.isdir(meta_dir):
+        return 0
+    import datetime
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    touched = 0
+    for json_name in sorted(os.listdir(meta_dir)):
+        if not json_name.endswith(".json"):
+            continue
+        path = os.path.join(meta_dir, json_name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            continue
+        main = payload.get("main_species") if isinstance(payload, dict) else None
+        if not isinstance(main, list) or not any(
+                _main_entry_matches(m, names) for m in main):
+            continue
+        new_main, changed = [], False
+        for entry in main:
+            if not _main_entry_matches(entry, names):
+                new_main.append(entry)
+                continue
+            changed = True
+            if wiping:
+                continue  # wipe：直接移除条目
+            if isinstance(entry, dict):
+                fresh = {k: v for k, v in entry.items()
+                         if k not in ("cn", "en", "scientific")}
+                fresh.update({"cn": new_cn, "en": new_en,
+                              "scientific": new_sci})
+                new_main.append(fresh)
+            else:
+                new_main.append(new_cn or new_en)
+        if not changed:
+            continue
+        payload["main_species"] = new_main
+        payload.setdefault("edits", []).append({
+            "timestamp": stamp, "actor": "human",
+            "action": "species_renamed" if not wiping else "main_species_removed",
+            "bird_index": None,
+            "old": {"cn": old_cn, "en": old_en, "scientific": old_sci},
+            "new": None if wiping else {"cn": new_cn, "en": new_en,
+                                        "scientific": new_sci},
+        })
+        try:
+            _atomic_write_json(path, payload)
+            touched += 1
+        except OSError as e:
+            _log(f"  ⚠️ main_species 扫尾写入失败 {json_name}: {e}")
+    return touched
+
+
 def _remove_previews(directory: str, rel_paths: List[Optional[str]]) -> int:
     """
     删除被归一无鸟照片的生成预览（仅限 .superpicky/cache/ 之下）。
@@ -413,7 +501,12 @@ def cmd_species_rename(db: ReportDB, root: str, old_cn: Optional[str],
             root, name,
             new_cn=new_cn, new_en=new_en, new_sci=new_sci,
             old_cn=old_cn, old_en=old_en, old_sci=old_sci)
-    result.update({"photos": len(files), "changed_detections": det_count})
+    # 全库扫尾：main_species 里命中旧名但 DB 无同名检测框的照片（人工
+    # 主鸟与 AI 框物种不一致）不在 files 里，逐文件同步碰不到
+    swept = _sweep_main_species(root, old_cn, old_en, old_sci,
+                                new_cn, new_en, new_sci)
+    result.update({"photos": len(files), "changed_detections": det_count,
+                   "mainspecies_swept": swept})
     return _sidecars_written(result, _finalize(db, root))
 
 
@@ -459,9 +552,13 @@ def cmd_species_wipe(db: ReportDB, root: str, old_cn: Optional[str],
         mark_species_deleted_in_sidecar(
             root, name, species_cn=old_cn, species_en=old_en,
             scientific_name=old_sci)
+    # 全库扫尾：main_species 里命中旧名但 DB 无同名检测框的照片，移除
+    # 其孤悬条目（同 rename 场景，见 _sweep_main_species）
+    swept = _sweep_main_species(root, old_cn, old_en, old_sci)
     result.update({"photos": len(files), "soft_deleted": det_count,
                    "to_no_bird": len(no_bird_rows),
-                   "previews_removed": previews})
+                   "previews_removed": previews,
+                   "mainspecies_swept": swept})
     return _sidecars_written(result, _finalize(db, root))
 
 

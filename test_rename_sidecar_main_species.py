@@ -128,5 +128,58 @@ class TestWipeMainSpecies(unittest.TestCase):
         self.assertEqual(_load(path)["main_species"], [])
 
 
+class TestSweepMainSpecies(unittest.TestCase):
+    """整种操作的全库 main_species 扫尾（DB 无同名框的孤悬条目）。"""
+
+    def _library(self):
+        """meta 下两张 JSON：一张 main 条目与检测框物种不一致（孤悬）。"""
+        from spb_fix_mainspecies import _plan_fixes  # noqa: F401 复用不变式
+        orphan = {"cn": OLD["cn"], "en": OLD["en"],
+                  "scientific": OLD["scientific"], "bird_index": 1}
+        other = {"cn": "白鹈鹕", "en": "Great White Pelican",
+                 "scientific": "Pelecanus onocrotalus", "bird_index": 0}
+        tmp = tempfile.mkdtemp()
+        meta = os.path.join(tmp, ".superpicky", "meta")
+        os.makedirs(meta, exist_ok=True)
+        for name, main, dets in (
+                ("IMG_A.json", [dict(orphan)], [dict(NEW), dict(orphan)]),
+                ("IMG_B.json", [dict(other)], [dict(other)])):
+            payload = _payload([dict(m) for m in main],
+                               det_species=[dict(d) for d in dets])
+            with open(os.path.join(meta, name), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        return tmp
+
+    def test_sweep_renames_orphan_entry(self):
+        """rename 语义：孤悬条目改写为新名，bird_index 保留，幂等。"""
+        from spb_rename_species import _sweep_main_species
+        tmp = self._library()
+        n = _sweep_main_species(tmp, OLD["cn"], OLD["en"], OLD["scientific"],
+                                NEW["cn"], NEW["en"], NEW["scientific"])
+        self.assertEqual(n, 1)  # 只动了 IMG_A
+        with open(os.path.join(tmp, ".superpicky", "meta", "IMG_A.json"),
+                  encoding="utf-8") as f:
+            payload = json.load(f)
+        entry = payload["main_species"][0]
+        self.assertEqual(entry["cn"], NEW["cn"])
+        self.assertEqual(entry["bird_index"], 1)
+        self.assertTrue(payload.get("edits"))  # 留痕
+        # 幂等：再扫无命中
+        self.assertEqual(_sweep_main_species(
+            tmp, OLD["cn"], OLD["en"], OLD["scientific"],
+            NEW["cn"], NEW["en"], NEW["scientific"]), 0)
+
+    def test_sweep_wipe_removes_entry(self):
+        """wipe 语义（不给新名）：孤悬条目移除。"""
+        from spb_rename_species import _sweep_main_species
+        tmp = self._library()
+        n = _sweep_main_species(tmp, OLD["cn"], OLD["en"], OLD["scientific"])
+        self.assertEqual(n, 1)
+        with open(os.path.join(tmp, ".superpicky", "meta", "IMG_A.json"),
+                  encoding="utf-8") as f:
+            payload = json.load(f)
+        self.assertEqual(payload["main_species"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

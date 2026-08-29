@@ -1,0 +1,95 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "placeholder.png",
+      "upload": "image"
+    }
+  },
+  "10": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "dreamshaper_8_pruned.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "upscale_method": "lanczos",
+      "width": 512,
+      "height": 512,
+      "crop": "disabled",
+      "image": ["1", 0]
+    }
+  },
+  "3": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": ["2", 0],
+      "vae": ["10", 2]
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "(cute pixel art bird:1.4), (chibi proportions:1.2), adorable, fluffy, round body, big expressive eyes, vibrant colors, crisp pixel edges, retro 8-bit style, centered composition, (solid white background:1.4), flat lighting, high contrast, masterpiece, best quality",
+      "clip": ["10", 1]
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "(complex background:1.3), scenery, landscape, gradient, shadow, blurry, realistic, 3d render, smooth edges, anti-aliasing, text, watermark, signature, extra wings, deformed",
+      "clip": ["10", 1]
+    }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 28,
+      "cfg": 8.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.85,
+      "model": ["10", 0],
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "latent_image": ["3", 0]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["10", 2]
+    }
+  },
+  "9": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "width": 64,
+      "height": 64,
+      "crop": "disabled",
+      "image": ["8", 0]
+    }
+  },
+  "11": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "upscale_method": "nearest-exact",
+      "width": 512,
+      "height": 512,
+      "crop": "disabled",
+      "image": ["9", 0]
+    }
+  },
+  "12": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "spb_pixel",
+      "images": ["11", 0]
+    }
+  }
+}

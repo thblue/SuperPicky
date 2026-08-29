@@ -569,13 +569,17 @@ def rename_species_in_sidecar(
     old_cn: Optional[str] = None,
     old_en: Optional[str] = None,
     old_sci: Optional[str] = None,
+    class_id: Optional[int] = None,
 ) -> int:
     """
     在一张照片的 sidecar JSON 里把某鸟种的检测框批量改为另一个鸟种。
 
     与 report_db.rename_species_everywhere 配套（整批改种的 sidecar 同步）：
     - 检测框：species 匹配旧名（cn/en/scientific 任一非空相等）的未删框
-      改写为新名（未提供的新名维度写 None）；
+      改写为新名；confidence/gbif_rarity_100 等辅助字段从旧框保留——
+      重导出对 edited=true 的框以 JSON 为准，写裸三名会在二次改种后把
+      这些字段挤掉；class_id 显式写 class_id 参数（改种后旧类别 ID 已
+      失效，调用方可传反查的新 ID，不传写 None）；
     - main_species：数组里的旧中文名替换为新中文名（若有提供）；
     - edits 追加 species_renamed 记录（actor=human，含旧/新名）。
     文件不存在、无匹配或全部已改（幂等重入）时返回 0。
@@ -585,12 +589,15 @@ def rename_species_in_sidecar(
     filename (str): 照片前缀（无扩展名）
     new_cn / new_en / new_sci (Optional[str]): 新鸟种名
     old_cn / old_en / old_sci (Optional[str]): 旧鸟种名（匹配条件）
+    class_id (Optional[int]): 新鸟种的模型类别 ID（可反查时传）
 
     返回:
     int: 本次改写的检测框数
 
     Batch-rename one species' detections in a photo's sidecar JSON to
     another species, paired with report_db.rename_species_everywhere.
+    Aux fields (confidence, rarity) survive the rewrite; class_id is
+    written explicitly so stale IDs never linger after a rename.
     """
     import datetime
 
@@ -620,8 +627,17 @@ def rename_species_in_sidecar(
         if not isinstance(det, dict) or det.get("deleted"):
             continue
         if _match(det.get("species")):
-            det["species"] = {"cn": new_cn, "en": new_en,
-                              "scientific": new_sci}
+            # 名字维度整体替换（旧名一个不留），confidence/rarity 等
+            # 辅助字段保留；class_id 显式写参数值（None 表示未知新类别）
+            # Replace every name dimension; keep aux fields; class_id is
+            # always written from the argument (None = unknown new class).
+            prev_species = det.get("species")
+            aux = {k: v for k, v in (prev_species or {}).items()
+                   if k not in ("cn", "en", "scientific", "class_id")} \
+                if isinstance(prev_species, dict) else {}
+            aux.update({"cn": new_cn, "en": new_en, "scientific": new_sci,
+                        "class_id": class_id})
+            det["species"] = aux
             data.setdefault("edits", []).append({
                 "timestamp": stamp,
                 "actor": "human",

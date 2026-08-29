@@ -991,6 +991,16 @@ class PhotoProcessor:
             key, raw_path = args
             try:
                 jpg_path = raw_to_jpeg(raw_path)
+                # V5.4: raw_to_jpeg 对损坏/空 RAW 可能不抛异常而返回 None
+                # （如 NAS 上全零字节或 IO 错误的 CR3）。此处必须降级为
+                # 单文件失败进入 ❌ 日志路径，绝不能让 None 流入 relpath
+                # 炸掉整个目录的批处理。
+                # V5.4: raw_to_jpeg may return None without raising for
+                # corrupt/empty RAWs (all-zero or I/O-error CR3 on NAS);
+                # treat it as a per-file failure instead of crashing the
+                # whole directory in relpath.
+                if jpg_path is None:
+                    return (key, False, "raw_to_jpeg returned None (corrupt/empty RAW)")
                 return (key, True, jpg_path)
             except Exception as e:
                 return (key, False, str(e))

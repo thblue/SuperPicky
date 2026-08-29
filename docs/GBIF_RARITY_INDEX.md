@@ -140,6 +140,54 @@ have explicit hardcoded overrides:
 | *Pyrocephalus obscurus* (Vermilion Flycatcher - Galapagos clade) | 18 | 亚种分级争议 |
 | *Pteroglossus erythropygius* (Toucanet sp.) | 20 | 局部常见 |
 
+### 3.6 中国国别稀有度 / Country-scoped rarity (CN)
+
+全球分数衡量的是**全球观察密度**——金雕全球 81 万条记录只拿 4.17 分，
+但它在中国是难得一遇的大山鸟。为此 4.3.x 新增国别稀有度表
+`gbif_rarity_by_country`（当前仅 `countrycode='CN'`）：照片 GPS 反解出
+中国时，详情面板的「罕见度」自动采用中国口径分数；无中国记录的物种
+自动回退全球分。
+
+The global score measures *global* observation density — a Golden Eagle
+scores 4.17 from 810k records worldwide despite being a sought-after
+mountain bird in China. Version 4.3.x adds the country-scoped table
+`gbif_rarity_by_country` (currently `CN` only): photos geolocated in
+China automatically show the China-scoped score, and species without
+Chinese records fall back to the global score.
+
+- **数据源 / Source**: GBIF Occurrence Search API，`country=CN`，仅
+  CC0 + CC-BY-4.0（与全球表同许可口径）/ same license filter as the
+  global table.
+- **归一化 / Normalization**: 与全球表相同的 log 归一化，但仅在「中国
+  有记录」的物种子集内取 min/max；**不做 IUCN 下限**——保护身份由独立
+  的「国家保护」标签表达（见 4.6），分数保持纯观察密度口径。
+  Same log normalization with CN-only bounds; **no IUCN floor** —
+  protection identity is carried by the separate state-protection label.
+- **为什么不用网格汇总 / Why not the grid rollup**: `geo_distribution.db`
+  的 `country_species` 是 1° 网格中心反解国家的几何近似，实测系统性偏
+  高 10-40%（海岸物种可达 10 倍），只用作候选清单，计数全部经 API 重取。
+  The grid-rollup `country_species` is a geometric approximation
+  (measured +10-40% bias, 10x for coastal species) and is used only as
+  the candidate list.
+- **构建 / Build**: `scripts_dev/build_china_rarity.py`（约 1,500 次 API
+  请求，支持 `--resume`）。
+
+### 3.7 国家保护等级 / National protection level
+
+《国家重点保护野生动物名录》（2021 年第 3 号公告，鸟纲约 390 种）作为
+**独立维度**写入 `china_protection` 表：`1`=一级、`2`=二级、未列入=
+NULL。数据经 zh.wikipedia 转录（CC BY-SA 4.0，署名记录在 `source`
+列），带五级匹配管线与旗舰种断言（`scripts_dev/build_china_protection.py`，
+审计清单见 `scripts_dev/data_sources/china_protection_audit.csv`）。
+保护等级**不并入**罕见度分数。
+
+The 2021 State Key Protected Wild Animals List (bird section, ~390
+species) is stored as an **independent dimension** in `china_protection`
+(1 = Class I, 2 = Class II, NULL = not listed). Sourced via the zh
+Wikipedia transcription (CC BY-SA 4.0, attribution in the `source`
+column) with a layered match pipeline and flagship-species assertions.
+It is never merged into the rarity score.
+
 ---
 
 ## 4. 在 SuperPicky 里怎么用 / How to use it
@@ -153,12 +201,19 @@ selected:
 
 ```
 鸟种 / Species:   Black-capped Chickadee  ◔  (点击复制学名)
-全球罕见度:        Occasional (12/100)
+罕见度:            Occasional (12/100)   ← 中国 GPS 照片自动显示中国口径
+国家保护:          国家二级 / —
 IUCN:             LC (Least Concern)
 ```
 
 **点击鸟种行可一键复制学名到剪贴板。** / Click the species row to copy the
 scientific name to clipboard.
+
+「国家保护」行来自 `china_protection` 表（见 3.7）：一级显示红色
+「国家一级」、二级显示橙色「国家二级」，未列入名录显示「—」。
+
+The "State Protection" row comes from the `china_protection` table
+(3.7): Class I in red, Class II in orange, "—" when not listed.
 
 ### 4.2 结果浏览器排序 / Results browser sort
 

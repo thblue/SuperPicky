@@ -127,6 +127,36 @@ def _format_iucn(category: str, is_zh: bool) -> tuple:
     return (f"{name} ({category})", color)
 
 
+# 国家重点保护野生动物等级 → (中文显示, 英文显示, 颜色)
+# China national protection level → (Chinese, English, color)
+# 独立于 IUCN 的第三个物种维度：1=一级（红），2=二级（橙）
+# A third species-level dimension distinct from IUCN: 1=Class I (red), 2=Class II (orange)
+_CHINA_PROTECTION_INFO = {
+    1: ("国家一级", "Class I",  "#D81E05"),
+    2: ("国家二级", "Class II", "#FC7F3F"),
+}
+
+
+def _format_china_protection(level, is_zh: bool) -> tuple:
+    """
+    根据《国家重点保护野生动物名录》等级返回 (显示文本, 颜色)。
+
+    Args:
+        level: 国家保护等级（1=一级, 2=二级），None/其他返回占位符
+        is_zh: 当前是否为中文界面
+
+    Returns:
+        (display_text, color) — 形如「国家一级」/「Class I」
+
+    Format a China national protection level into (display_text, color).
+    """
+    info = _CHINA_PROTECTION_INFO.get(level)
+    if not info:
+        return ("—", COLORS['text_primary'])
+    zh_name, en_name, color = info
+    return (zh_name if is_zh else en_name, color)
+
+
 def _make_section_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(f"""
@@ -453,6 +483,10 @@ class DetailPanel(QWidget):
         # V4.2.7: IUCN 红色名录等级，紧贴鸟种之下显示
         # V4.2.7: IUCN Red List category, pinned directly under Species
         self._val_iucn = _make_value_label()
+        # 国家重点保护野生动物等级（1=一级/2=二级，独立于 IUCN 的物种维度）
+        # China national protection level (1 or 2; species dimension
+        # independent of IUCN)
+        self._val_china_protection = _make_value_label()
         self._val_camera = _make_value_label()
         self._val_lens = _NoWrapLabel()
         self._val_lens.setStyleSheet(f"color: {COLORS['text_primary']}; font-size: 12px; font-family: {FONTS['mono']}; background: transparent;")
@@ -501,11 +535,12 @@ class DetailPanel(QWidget):
         species_row_lay.addStretch(1)
 
         rows = [
-            # 鸟类信息 4 行连续（鸟种 → 全球罕见度 → 鸟种颜值 → IUCN）
-            # Four bird-related rows kept adjacent for natural reading
-            # (species -> global rarity -> species beauty -> IUCN).
+            # 鸟类信息 5 行连续（鸟种 → 罕见度 → 国家保护 → 鸟种颜值 → IUCN）
+            # Five bird-related rows kept adjacent for natural reading
+            # (species -> rarity -> state protection -> beauty -> IUCN).
             ("browser.meta_species",    species_row),
             ("browser.meta_gbif_rarity", self._val_gbif_rarity),
+            ("browser.meta_china_protection", self._val_china_protection),
             ("browser.meta_species_beauty", self._val_species_beauty),
             ("browser.meta_iucn",       self._val_iucn),
             ("browser.meta_focus",      self._val_focus),
@@ -712,6 +747,7 @@ class DetailPanel(QWidget):
             iucn_text, _ = _format_iucn(iucn_raw, is_zh)
         else:
             iucn_text = "—"
+        prot_text, _ = _format_china_protection(p.get("china_protection_level"), is_zh)
 
         lines = [
             f"{t('browser.meta_filename')}: {p.get('filename') or '—'}",
@@ -723,6 +759,7 @@ class DetailPanel(QWidget):
             f"{t('browser.meta_focal')}: {f'{fl:.0f}mm' if fl else '—'}",
             f"{t('browser.meta_species')}: {species}",
             f"{t('browser.meta_gbif_rarity')}: {f'{tier_icon(gbif_score_to_tier(gbif_r))} {tier_name(gbif_score_to_tier(gbif_r), is_zh=is_zh)} ({gbif_r:.1f})' if gbif_r is not None else '—'}",
+            f"{t('browser.meta_china_protection')}: {prot_text}",
             f"{t('browser.meta_iucn')}: {iucn_text}",
             f"{t('browser.meta_focus')}: {focus}",
             f"{t('browser.meta_sharpness')}: {f'{sharp:.1f}' if sharp is not None else '—'}",
@@ -1050,6 +1087,16 @@ class DetailPanel(QWidget):
             self._val_iucn.setStyleSheet(
                 f"color: {COLORS['text_primary']}; font-size: 12px; background: transparent;"
             )
+
+        # 国家重点保护野生动物等级（一级红/二级橙，不在名录显示占位符）
+        # China national protection (Class I red / Class II orange,
+        # placeholder when the species is not on the list)
+        is_zh = not self.i18n.current_lang.startswith('en')
+        text, color = _format_china_protection(p.get("china_protection_level"), is_zh)
+        self._val_china_protection.setText(text)
+        self._val_china_protection.setStyleSheet(
+            f"color: {color}; font-size: 12px; font-weight: 600; background: transparent;"
+        )
 
         # 相机
         self._val_camera.setText(p.get("camera_model") or _unknown)

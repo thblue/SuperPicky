@@ -931,6 +931,14 @@ def predict_bird(
         aesthetic_index = (
             db_manager.get_aesthetic_by_class_id(class_id) if db_manager else None
         )
+        # 国家重点保护野生动物等级（1=一级/2=二级，物种级属性，与拍摄地无关）
+        # China national protection level (1 or 2; species-level attribute,
+        # independent of where the photo was taken)
+        china_protection_level = (
+            db_manager.get_china_protection_by_class_id(class_id)
+            if db_manager
+            else None
+        )
 
         results.append(
             {
@@ -940,6 +948,7 @@ def predict_bird(
                 "scientific_name": scientific_name,
                 "iucn_category": iucn_category,
                 "gbif_rarity_100": gbif_rarity_100,
+                "china_protection_level": china_protection_level,
                 "aesthetic_index": aesthetic_index,
                 "confidence": confidence,
                 "ebird_code": ebird_code,

@@ -1307,6 +1307,7 @@ class PhotoProcessor:
                                         'confidence': _top.get('confidence'),
                                         'class_id': _top.get('class_id'),
                                         'gbif_rarity_100': _top.get('gbif_rarity_100'),
+                                        'china_protection_level': _top.get('china_protection_level'),
                                     }
                             _needs_orig = any(
                                 not b.get('is_selected')
@@ -1461,6 +1462,9 @@ class PhotoProcessor:
                     }
                     if new_row.get('gbif_rarity_100') is not None:
                         updates['gbif_rarity_100'] = new_row['gbif_rarity_100']
+                    if new_row.get('china_protection_level') is not None:
+                        updates['china_protection_level'] = \
+                            new_row['china_protection_level']
                     self.report_db.update_photo(file_prefix, updates)
                     return True
                 except Exception as _e:
@@ -1500,8 +1504,11 @@ class PhotoProcessor:
             cn_name = top_result.get('cn_name', '')
             en_name = top_result.get('en_name', '')
             iucn_category = top_result.get('iucn_category')  # IUCN 等级 (LC/NT/VU/EN/CR/...)，可能为 None
-            gbif_rarity_100 = top_result.get('gbif_rarity_100')  # GBIF 全球罕见度 (0-100)，可能为 None
+            gbif_rarity_100 = top_result.get('gbif_rarity_100')  # GBIF 罕见度 (0-100，中国 GPS 照片自动采用中国分)，可能为 None
             aesthetic_index = top_result.get('aesthetic_index')  # iRateBird 颜值 (0-100)，可能为 None
+            # 国家重点保护野生动物等级（1=一级/2=二级，物种级属性），未列入名录为 None
+            # China national protection level (1 or 2); None when not on the list
+            china_protection_level = top_result.get('china_protection_level')
 
             if birdid_confidence >= self.settings.birdid_confidence_threshold:
                 if self.i18n.current_lang.startswith('en'):
@@ -1554,6 +1561,8 @@ class PhotoProcessor:
                             db_updates['gbif_rarity_100'] = gbif_rarity_100
                         if aesthetic_index is not None:
                             db_updates['aesthetic_index'] = aesthetic_index
+                        if china_protection_level is not None:
+                            db_updates['china_protection_level'] = china_protection_level
                         self.report_db.update_photo(file_prefix, db_updates)
                         # 将鸟种 + IUCN 追加到已生成的 DB caption 最前面
                         # Prepend species + IUCN lines to the DB caption.
@@ -1592,6 +1601,8 @@ class PhotoProcessor:
                             meta_item['gbif_rarity_100'] = gbif_rarity_100
                         if aesthetic_index is not None:
                             meta_item['aesthetic_index'] = aesthetic_index
+                        if china_protection_level is not None:
+                            meta_item['china_protection_level'] = china_protection_level
                         # 鸟名关键字(Paul P1-1):开关开启时随 Title 一起 merge-add
                         # 写入 XMP-dc:Subject(bird_title 已按界面语言选名)。
                         # Species keyword (Paul P1-1): when enabled, merge-add

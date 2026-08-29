@@ -214,6 +214,7 @@ def classify_secondary_birds(
         'species_confidence': (main_species or {}).get('confidence'),
         'class_id': (main_species or {}).get('class_id'),
         'gbif_rarity_100': (main_species or {}).get('gbif_rarity_100'),
+        'china_protection_level': (main_species or {}).get('china_protection_level'),
     }
 
     rows: List[dict] = []
@@ -239,6 +240,7 @@ def classify_secondary_birds(
             'species_confidence': None,
             'class_id': None,
             'gbif_rarity_100': None,
+            'china_protection_level': None,
         }
         rows.append(row)
 
@@ -302,6 +304,7 @@ def classify_secondary_birds(
         row['species_confidence'] = float(top.get('confidence') or 0.0)
         row['class_id'] = top.get('class_id')
         row['gbif_rarity_100'] = top.get('gbif_rarity_100')
+        row['china_protection_level'] = top.get('china_protection_level')
 
     return rows
 

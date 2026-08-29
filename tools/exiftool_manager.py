@@ -670,6 +670,9 @@ class ExifToolManager:
 
         # 鸟名关键字(merge-add,Paul P1-1) / species keywords (merge-add)
         args.extend(self._keywords_args(item, file_path, temp_files))
+        # 国家保护等级 → XMP-iptcCore:SubjectCode（UTF-8 临时文件）
+        # State protection level → XMP-iptcCore:SubjectCode via temp file
+        args.extend(self._protection_args(item, temp_files))
 
         title = item.get('title')
         if title is not None:
@@ -769,6 +772,36 @@ class ExifToolManager:
             print(f"⚠️ Keywords temp file failed: {e}, skip keywords write")
             return []
 
+    def _protection_args(self, item: Dict[str, any],
+                         temp_files: List[str]) -> List[str]:
+        """
+        国家重点保护野生动物等级 → XMP-iptcCore:SubjectCode。
+
+        一级 → 「国家一级保护动物」，二级 → 「国家二级保护动物」。借用 IPTC
+        Subject Code 字段（LR/C1 主面板不显示、几乎无人手动写入），与 IUCN 的
+        IntellectualGenre / 罕见度的 Event 同为冷门字段借用。中文值按 UTF-8
+        临时文件铁律走 `-XMP-iptcCore:SubjectCode<=tmp`（挂入 temp_files 由
+        调用方统一清理），临时文件失败时回退内联值。
+
+        China national protection level → XMP-iptcCore:SubjectCode, using the
+        same obscure-IPTC-field borrowing pattern as the IUCN/rarity fields.
+        The Chinese value goes through a UTF-8 temp file per the mandatory
+        encoding rule (inline CLI values corrupt on Windows), with an inline
+        fallback when temp-file creation fails.
+        """
+        level = item.get('china_protection_level')
+        if level not in (1, 2):
+            return []
+        text = "国家一级保护动物" if level == 1 else "国家二级保护动物"
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix='.txt', prefix='sp_prot_')
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(text)
+            temp_files.append(tmp_path)
+            return [f'-XMP-iptcCore:SubjectCode<={tmp_path}']
+        except Exception:
+            return [f'-XMP-iptcCore:SubjectCode={text}']
+
     def _write_metadata_xmp_sidecar(self, item: Dict[str, any]) -> bool:
         """写入 XMP 侧车文件 (V4.0.6: 使用常驻进程)"""
         file_path = item.get('file')
@@ -813,6 +846,9 @@ class ExifToolManager:
         # itself (LR gives sidecars precedence for proprietary RAW).
         kw_read_target = xmp_path if os.path.exists(xmp_path) else file_path
         args.extend(self._keywords_args(item, kw_read_target, temp_files))
+        # 国家保护等级 → XMP-iptcCore:SubjectCode（UTF-8 临时文件）
+        # State protection level → XMP-iptcCore:SubjectCode via temp file
+        args.extend(self._protection_args(item, temp_files))
 
         # UTF-8 temp file for Title/Caption
         title = item.get('title')
@@ -1282,6 +1318,9 @@ class ExifToolManager:
 
             # 鸟名关键字(merge-add,Paul P1-1) / species keywords (merge-add)
             args_list.extend(self._keywords_args(item, file_path, caption_temp_files))
+            # 国家保护等级 → XMP-iptcCore:SubjectCode（UTF-8 临时文件）
+            # State protection level → XMP-iptcCore:SubjectCode via temp file
+            args_list.extend(self._protection_args(item, caption_temp_files))
 
             # Title（使用临时 UTF-8 文件，与 Caption 保持一致，避免非 ASCII 编码风险）
             if item.get('title') is not None:

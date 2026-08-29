@@ -83,11 +83,11 @@ class TestSchemaV10Migration(unittest.TestCase):
         try:
             self._create_v9_db(db_dir)
             db = ReportDB(db_dir)
-            # 版本连续升级到当前 schema（V5.4 起为 12）
+            # 版本连续升级到当前 schema（国家保护等级列起为 13）
             ver = db._conn.execute(
                 "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
             self.assertEqual(ver, SCHEMA_VERSION)
-            self.assertEqual(SCHEMA_VERSION, "12")
+            self.assertEqual(SCHEMA_VERSION, "13")
             # 旧 photos 数据仍在
             photo = db.get_photo('OLD_0001')
             self.assertIsNotNone(photo)

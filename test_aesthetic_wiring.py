@@ -26,6 +26,7 @@ class _FakeDB:
     def get_gbif_rarity_by_class_id(self, cid, cc=None): return 50.0
     def get_iucn_by_class_id(self, cid): return None
     def get_aesthetic_by_class_id(self, cid): return 88.5
+    def get_china_protection_by_class_id(self, cid): return 2
     def get_avilist_names_by_class_id(self, cid): return None
 
 
@@ -35,3 +36,4 @@ def test_predict_bird_injects_aesthetic(monkeypatch):
     out = bi.predict_bird(Image.new("RGB", (224, 224)), top_k=1)
     assert out, "predict_bird 应返回至少一个候选"
     assert out[0]["aesthetic_index"] == 88.5
+    assert out[0]["china_protection_level"] == 2

@@ -262,6 +262,46 @@ class BirdDatabaseManager:
             # avilist_map 表可能不存在（旧版数据库），静默降级
             return None
 
+    def get_china_protection_by_class_id(self, class_id: int) -> Optional[int]:
+        """
+        根据模型类别ID获取中国国家重点保护野生动物等级。
+
+        数据来自 china_protection 表（2021 年第 3 号公告《国家重点保护野生
+        动物名录》鸟纲部分，经维基百科转录构建）。这是独立于 GBIF 罕见度
+        分数与 IUCN 等级的第三个维度，仅覆盖列入名录的物种；不在名录中的
+        物种（含中国以外的鸟）返回 None。表缺失时（旧版数据库）静默降级。
+
+        Args:
+            class_id: 鸟类类别ID（对应模型输出的索引，即 model_class_id）
+
+        Returns:
+            国家保护等级（1=一级, 2=二级）；未列入名录或表缺失时返回 None
+
+        Fetch the China national protection level (1 or 2) for a model class
+        id from the china_protection table (built from the 2021 State Key
+        Protected Wild Animals List). Returns None for species not on the
+        list or when the table is absent (older DB).
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        "SELECT level FROM china_protection "
+                        "WHERE model_class_id = ? LIMIT 1",
+                        (class_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0] in (1, 2):
+                        return int(row[0])
+                except sqlite3.OperationalError:
+                    # china_protection 表不存在（旧版数据库）→ 容错返 None
+                    # Missing table (older DB) → tolerate, return None
+                    return None
+        except sqlite3.Error:
+            return None
+        return None
+
     def get_gbif_rarity_by_scientific_name(
         self, scientific_name: str
     ) -> Optional[float]:

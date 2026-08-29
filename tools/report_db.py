@@ -21,7 +21,7 @@ from .file_utils import ensure_hidden_directory
 
 
 # Schema 版本，用于未来升级
-SCHEMA_VERSION = "12"
+SCHEMA_VERSION = "13"
 
 # 所有列定义（有序），用于 CREATE TABLE 和数据验证
 PHOTO_COLUMNS = [
@@ -104,6 +104,10 @@ PHOTO_COLUMNS = [
     # V9: iRateBird species aesthetic score (0-100, higher = prettier)
     ("aesthetic_index",  "REAL", None),
 
+    # V10: 国家重点保护野生动物等级（1=一级 2=二级，NULL=未列入 2021 名录）
+    # V10: China national protection level (1 / 2; NULL = not on the 2021 list)
+    ("china_protection_level", "INTEGER", None),
+
     ("created_at",    "TEXT", None),
     ("updated_at",    "TEXT", None),
 ]
@@ -119,6 +123,7 @@ DETECTION_COLUMNS = (
     "mask_polygon", "area_ratio", "yolo_conf", "crop_sharpness",
     "species_cn", "species_en", "scientific_name",
     "species_confidence", "class_id", "gbif_rarity_100",
+    "china_protection_level",
     "notable", "notable_reason", "edited",
     # V5.4 人工软删除标记（0=正常 1=已删框；删除只隐藏，不物理删行）
     "deleted",
@@ -265,6 +270,7 @@ class ReportDB:
                         species_confidence REAL,
                         class_id INTEGER,
                         gbif_rarity_100 REAL,
+                        china_protection_level INTEGER,
                         notable INTEGER DEFAULT 0,
                         notable_reason TEXT,
                         edited INTEGER DEFAULT 0,
@@ -569,6 +575,29 @@ class ReportDB:
                     self._update_schema_version("12")
                 current_version = "12"
                 print("✅ Database schema upgraded to v12")
+
+            # ----------------------------------------------------------------------
+            #  Upgrade: v12 -> v13 (China national protection level)
+            #  国家重点保护野生动物等级（1=一级 2=二级）：photos 与
+            #  bird_detections 各加一列，物种级属性，随识别结果写入。
+            #  Adds china_protection_level to photos and bird_detections.
+            # ----------------------------------------------------------------------
+            if current_version == "12":
+                print("🔄 Upgrading database schema from v12 to v13...")
+                with self._conn:
+                    for stmt in (
+                        "ALTER TABLE photos ADD COLUMN "
+                        "china_protection_level INTEGER",
+                        "ALTER TABLE bird_detections ADD COLUMN "
+                        "china_protection_level INTEGER",
+                    ):
+                        try:
+                            self._conn.execute(stmt)
+                        except sqlite3.OperationalError:
+                            pass  # 列已存在，跳过
+                    self._update_schema_version("13")
+                current_version = "13"
+                print("✅ Database schema upgraded to v13")
 
     def _update_schema_version(self, version):
         """更新数据库中的版本号（由调用方负责提交事务）"""
@@ -1064,6 +1093,7 @@ class ReportDB:
             "area_ratio, yolo_conf, crop_sharpness, "
             "species_cn, species_en, scientific_name, "
             "species_confidence, class_id, gbif_rarity_100, "
+            "china_protection_level, "
             "notable, notable_reason, edited, deleted, "
             "created_at, updated_at")
         with self._lock:
@@ -1446,6 +1476,7 @@ class ReportDB:
                     "picked = 0, is_flying = 0, "
                     "flight_conf = NULL, rarity_index = NULL, "
                     "iucn_category = NULL, gbif_rarity_100 = NULL, "
+                    "china_protection_level = NULL, "
                     "temp_jpeg_path = NULL, updated_at = ? "
                     "WHERE has_bird = 1", (now,))
             self._safe_commit()

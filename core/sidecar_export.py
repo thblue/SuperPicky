@@ -240,6 +240,9 @@ def _build_processing_section(photo_row: dict) -> dict:
         "burst_id": photo_row.get("burst_id"),
         "burst_position": photo_row.get("burst_position"),
         "gbif_rarity_100": photo_row.get("gbif_rarity_100"),
+        # 国家重点保护野生动物等级（1=一级/2=二级，NULL=未列入名录）
+        # China national protection level (1 or 2; NULL = not on the list)
+        "china_protection_level": photo_row.get("china_protection_level"),
         # V5.2 物种召回：含本批从未当主鸟的鸟种（与星级/精选正交）
         "notable": bool(photo_row.get("notable")),
     }
@@ -287,6 +290,7 @@ def _build_detection_sections(detection_rows: List[dict],
                 "confidence": row.get("species_confidence"),
                 "class_id": row.get("class_id"),
                 "gbif_rarity_100": row.get("gbif_rarity_100"),
+                "china_protection_level": row.get("china_protection_level"),
             } if has_species else None,
             "notable": bool(row.get("notable")),
             "notable_reason": row.get("notable_reason"),

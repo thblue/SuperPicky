@@ -1093,6 +1093,16 @@ class CropStudio(QWidget):
             pill.setStyleSheet(self._pill_qss(color, boxed=False))
             h.addWidget(pill)
 
+        # 国家保护 pill:一级红/二级橙 / State-protection pill (Class I red /
+        # Class II orange), only when the species is on the national list.
+        prot = p.get("china_protection_level")
+        if prot in (1, 2):
+            from ui.detail_panel import _format_china_protection
+            text, color = _format_china_protection(prot, is_zh)
+            prot_pill = QLabel(text)
+            prot_pill.setStyleSheet(self._pill_qss(color, boxed=False))
+            h.addWidget(prot_pill)
+
         # IUCN pill:纯彩色文字,不加描边框 / IUCN: plain colored text, no box.
         iucn = p.get("iucn_category")
         if iucn:

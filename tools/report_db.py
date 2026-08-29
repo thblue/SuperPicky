@@ -1400,6 +1400,61 @@ class ReportDB:
             filenames = sorted({row[0] for r in rows})
             return filenames, len(rows)
 
+    def wipe_all_identifications(self) -> dict:
+        """
+        整目录清除鸟识别结果（软删，原照片与 DB 行数不动）。
+
+        与 soft_delete_species_everywhere 的区别：后者按鸟种名删除，本
+        方法面向「人工审核后确认整个目录的识别全是误检，按无鸟目录
+        处理」的场景，作用域是全目录全部鸟种——
+          1. bird_detections 全部未删行软删（deleted=1, is_selected=0,
+             notable=0），行保留可追溯；
+          2. photos 有鸟行归一为无鸟态：has_bird=0, rating=-1, 主鸟种/
+             鸟id置信度/召回标记/精选旗标/飞鸟标记/稀有度字段全部清空；
+          3. temp_jpeg_path 清空并把被清照片的临时预览相对路径返回给
+             调用方（由其删除 .superpicky/cache 下的预览文件）。
+
+        返回:
+        dict: {'detections': 软删检测行数, 'photos': 归一照片数,
+               'preview_paths': 被清照片的 temp_jpeg_path 相对路径列表}
+
+        Wipe EVERY bird identification directory-wide (soft delete),
+        normalizing bird photos to the no-bird state. Originals and row
+        counts untouched; soft-deleted detections stay traceable.
+        """
+        now = _now_iso()
+        with self._lock:
+            det_count = self._conn.execute(
+                "SELECT COUNT(*) FROM bird_detections "
+                "WHERE deleted = 0").fetchone()[0]
+            photo_count = self._conn.execute(
+                "SELECT COUNT(*) FROM photos WHERE has_bird = 1"
+            ).fetchone()[0]
+            preview_rows = self._conn.execute(
+                "SELECT filename, temp_jpeg_path FROM photos "
+                "WHERE has_bird = 1 AND temp_jpeg_path IS NOT NULL"
+            ).fetchall()
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE bird_detections SET deleted = 1, "
+                    "is_selected = 0, notable = 0, notable_reason = NULL, "
+                    "updated_at = ? WHERE deleted = 0", (now,))
+                self._conn.execute(
+                    "UPDATE photos SET has_bird = 0, rating = -1, "
+                    "bird_species_cn = NULL, bird_species_en = NULL, "
+                    "birdid_confidence = NULL, notable = 0, "
+                    "picked = 0, is_flying = 0, "
+                    "flight_conf = NULL, rarity_index = NULL, "
+                    "iucn_category = NULL, gbif_rarity_100 = NULL, "
+                    "temp_jpeg_path = NULL, updated_at = ? "
+                    "WHERE has_bird = 1", (now,))
+            self._safe_commit()
+        return {
+            "detections": det_count,
+            "photos": photo_count,
+            "preview_paths": [r[1] for r in preview_rows if r[1]],
+        }
+
     def rename_species_everywhere(
         self, old_cn: Optional[str] = None, old_en: Optional[str] = None,
         old_sci: Optional[str] = None,

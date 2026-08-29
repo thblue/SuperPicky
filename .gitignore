@@ -154,3 +154,9 @@ scripts_dev/data_sources/
 .smoke_test/
 .zcode/
 img/IMG_5214.CR3
+
+# 仓库根目录一次性临时/审核产物 / one-off scratch & audit files in repo root
+# _tm_* 为临时文件命名惯例（日志/清单/测试产物），整体忽略
+_tm_*
+keep_list.txt
+有鸟目录审核清单.html

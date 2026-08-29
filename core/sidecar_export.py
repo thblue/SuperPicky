@@ -475,6 +475,31 @@ def export_directory_sidecars(report_db, directory: str,
     return written
 
 
+def _main_entry_matches(entry: object, names: set) -> bool:
+    """
+    判断 main_species 条目是否命中一组鸟种名。
+
+    main_species 有两种形态：多鸟编辑器写入的对象条目
+    {cn, en, scientific, bird_index}（V5.4 起），以及早期/机器导出的
+    字符串条目（显示名，通常为中文名）。对象条目按 cn/en/scientific
+    任一相等命中——改名/整种删除若漏掉对象条目，BirdIndex（取种优先
+    级最高）会一直显示旧名。
+
+    参数:
+    entry (object): main_species 数组元素（str 或 dict）
+    names (set): 旧鸟种名集合（已 strip）
+
+    返回:
+    bool: 是否命中
+    """
+    if isinstance(entry, str):
+        return entry.strip() in names
+    if isinstance(entry, dict):
+        return any(isinstance(entry.get(k), str) and entry[k].strip() in names
+                   for k in ("cn", "en", "scientific"))
+    return False
+
+
 def mark_species_deleted_in_sidecar(
     directory: str,
     filename: str,
@@ -487,7 +512,8 @@ def mark_species_deleted_in_sidecar(
     清理入口，与多鸟编辑器的删框同格式：det.deleted=true + edits 记录）。
 
     名字匹配：中文名/英文名/学名任一非空相等。文件不存在或无匹配返回 0；
-    全部已删（幂等重入）也返回 0。
+    全部已删（幂等重入）也返回 0。顶层 main_species 数组里的同名项一并
+    移除（字符串与对象两种条目形态）。
 
     参数:
     directory (str): 照片目录
@@ -547,8 +573,11 @@ def mark_species_deleted_in_sidecar(
         names = {v for v in (species_cn, species_en, scientific_name)
                  if isinstance(v, str) and v.strip()}
         if names:
-            new_main = [m for m in main
-                        if not (isinstance(m, str) and m.strip() in names)]
+            # 字符串与对象两种条目形态都要清（对象形态漏删会让旧
+            # 「主鸟」名残留在导出 JSON 里，BirdIndex 继续显示已删鸟种）
+            # Drop both string and object entries; a lingering object entry
+            # keeps showing the deleted species downstream.
+            new_main = [m for m in main if not _main_entry_matches(m, names)]
             if new_main != main:
                 data["main_species"] = new_main
 
@@ -580,8 +609,9 @@ def rename_species_in_sidecar(
       重导出对 edited=true 的框以 JSON 为准，写裸三名会在二次改种后把
       这些字段挤掉；class_id 显式写 class_id 参数（改种后旧类别 ID 已
       失效，调用方可传反查的新 ID，不传写 None）；
-    - main_species：数组里的旧中文名替换为新中文名（若有提供）；
-    - edits 追加 species_renamed 记录（actor=human，含旧/新名）。
+    - main_species：两种条目形态的旧名都替换——多鸟编辑器的对象条目
+      {cn, en, scientific, bird_index} 名字维度整体换新（辅助键保留），
+      早期字符串条目换成新中文名；
     文件不存在、无匹配或全部已改（幂等重入）时返回 0。
 
     参数:
@@ -648,15 +678,31 @@ def rename_species_in_sidecar(
             })
             renamed += 1
 
-    # main_species 里的旧名替换为新名（数组存显示名，通常为中文名）
-    # Replace old names in the top-level main_species array.
+    # main_species 里的旧名替换为新名。两种条目形态：多鸟编辑器的对象
+    # 条目 {cn, en, scientific, bird_index} 名字维度整体换新、bird_index
+    # 等辅助键保留；早期字符串条目（显示名）换成新中文名。
+    # Replace old names in main_species: object entries get their name
+    # dimensions rewritten (aux keys like bird_index kept), legacy string
+    # entries become the new display name.
     main = data.get("main_species")
-    if renamed and isinstance(main, list) and new_cn:
+    if renamed and isinstance(main, list) and (new_cn or new_en):
         old_set = {v for v in (old_cn, old_en, old_sci)
                    if isinstance(v, str) and v.strip()}
-        new_main = [new_cn if (isinstance(m, str) and m.strip() in old_set)
-                    else m for m in main]
-        if new_main != main:
+        new_main, changed = [], False
+        for m in main:
+            if isinstance(m, dict) and _main_entry_matches(m, old_set):
+                fresh = {k: v for k, v in m.items()
+                         if k not in ("cn", "en", "scientific")}
+                fresh.update({"cn": new_cn, "en": new_en,
+                              "scientific": new_sci})
+                new_main.append(fresh)
+                changed = True
+            elif isinstance(m, str) and m.strip() in old_set and new_cn:
+                new_main.append(new_cn)
+                changed = True
+            else:
+                new_main.append(m)
+        if changed:
             data["main_species"] = new_main
 
     if renamed:

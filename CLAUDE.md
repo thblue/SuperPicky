@@ -41,7 +41,7 @@ All user settings are managed by the unified Settings Center. Read these convent
 - **开关样式 / Checkbox style**：统一用 `ui.icon_utils.checkbox_indicator_qss`（圆圈=未选 / 带勾圆圈=选中），勿用全局默认方块。
 - **识鸟设置 / BirdID**：`birdid_*` 字段在 `advanced_config`；启动时 `migrate_birdid_dock_settings()` 从旧 `birdid_dock_settings.json` 幂等迁移（接线在 `main.py`）；区域数据加载用 `core/region_data.py`；识鸟面板 `birdid_dock` 只负责运行时 UI（选图/截图/结果）。
 - **已删除 / Removed**：`ui/about_dialog.py`、`ui/advanced_settings_dialog.py`（内容并入设置中心）。`ui/skill_level_dialog.py` 仅保留被复用的 `SkillLevelCard`/`SkillLevelSelector`/`get_skill_level_thresholds`。
-- 设计与计划文档 / Design & plan docs：`docs/specs/2026-06-24-settings-center-design.md`、`docs/plans/2026-06-24-settings-center.md`。
+- 设计与计划文档 / Design & plan docs：`dev-docs/specs/2026-06-24-settings-center-design.md`、`dev-docs/plans/2026-06-24-settings-center.md`（specs/plans 已自 docs/ 迁入 dev-docs/）。
 
 ## 第一性原理 / First Principles
 

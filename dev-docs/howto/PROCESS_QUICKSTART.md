@@ -99,7 +99,8 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 ... process "<目录>" --birdid-country AU
 ```
 
-完整参数表：`superpicky_cli.py process --help`；各参数语义详见 [cli-reference.md](cli-reference.md)（默认值同为「跟随配置」机制）。
+完整参数表：`superpicky_cli.py process --help`；各参数语义详见 [cli-reference.md](../reference/cli-reference.md)（默认值同为「跟随配置」机制）。
+全部 spb_* 运维工具（审核/改种/摊平/去重…）的速查表见 [spb-tools.md](spb-tools.md)。
 
 ## 配套命令
 

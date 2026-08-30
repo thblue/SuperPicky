@@ -100,7 +100,7 @@ class AdvancedConfig:
         "folder_layout": "species-first",
         "burst_group_folders": True,  # 连拍归入 burst_NNN 子目录(关=按星级/鸟种常规归档,Paul P1)
 
-        # V4.6: 无鸟补救扫描 (spec: docs/specs/2026-07-14-no-bird-rescue-scan-design.md)
+        # V4.6: 无鸟补救扫描 (spec: dev-docs/specs/2026-07-14-no-bird-rescue-scan-design.md)
         # V4.6: No-bird rescue scan
         "rescue_scan_enabled": True,   # 判无鸟/低置信度时触发 1024px 重扫 + 识鸟守门
         "rescue_birdid_gate": 10,      # 弱候选的识鸟确认门槛 (0-100, top1 置信度百分比)

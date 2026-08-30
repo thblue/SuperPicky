@@ -302,7 +302,7 @@ def _whiten_background(img_bgr: Any) -> Any:
     """
     用 rembg(U2Net) 抠出鸟身后贴到纯白背景。
 
-    实测（见 docs/specs/2026-08-29-spb-pixel-art-design.md 调参记录）：
+    实测（见 dev-docs/specs/2026-08-29-spb-pixel-art-design.md 调参记录）：
     直接对原始裁剪图做 img2img，白底提示词压不过照片背景（低 denoise
     漏杂色、高 denoise 丢特征）；先把源图背景变白，高 denoise 重绘时
     模型才能放开发挥 Q 版构图，杂色源头被消除。

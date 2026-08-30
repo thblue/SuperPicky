@@ -80,7 +80,7 @@ class KeypointDetector:
     # 为 0.641×136.25 ≈ 87.4 分/e倍尺寸。此处按此值扣除,只减不加:
     # ROI ≥ REF 的照片一分不动,故阈值语义对多数照片不变、无需重标。
     # K=0 即完全关闭,等价于旧公式(单参数回滚)。
-    # 详见 docs/plans/2026-07-24-sharpness-size-compensation.md
+    # 详见 dev-docs/plans/2026-07-24-sharpness-size-compensation.md
     # Tenengrad is a gradient *density*; smaller ROIs inflate it because edges
     # span fewer pixels. A controlled rescaling experiment measured
     # raw ∝ s^-0.641, i.e. 87.4 score-points per e-fold of ROI size. We subtract

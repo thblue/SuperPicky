@@ -1,10 +1,10 @@
 # SuperPicky - 慧眼选鸟 
 
-[![Version](https://img.shields.io/badge/version-4.2.0-blue.svg)](https://github.com/jamesphotography/SuperPicky)
+[![Version](https://img.shields.io/badge/version-4.5.0-blue.svg)](https://github.com/jamesphotography/SuperPicky)
 [![Platform](https://img.shields.io/badge/platform-macOS%20|%20Windows-lightgrey.svg)](https://github.com/jamesphotography/SuperPicky/releases)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
-[**English Documentation**](README.md) | [**更新日志**](RELEASE_NOTES.md)
+[**English Documentation**](README.md) | [**更新日志**](ChangeLog.md)
 
 **智能鸟类照片筛选工具 - 让AI帮你挑选最美的鸟类照片**
 
@@ -54,26 +54,28 @@
 - **Windows**: Windows 10+ · NVIDIA GPU (建议) · 2GB空间
 
 ---
+内部开发文档位于 [dev-docs/](dev-docs/README.md)：架构总览（ARCHITECTURE.md）、对外接口冻结清单（INTERFACE_CONTRACTS.md）、操作手册（howto/：新照片处理 runbook、spb 工具速查）、specs/plans 索引与历史归档（archive/）。
+English docs: see [dev-docs/README.md](dev-docs/README.md) navigation.
 
 ## 📥 下载安装
 
 ### macOS
-**Apple Silicon (M1/M2/M3/M4) (v4.2.0)**
-- [GitHub 下载](https://github.com/jamesphotography/SuperPicky/releases/download/v4.1.0/SuperPicky_v4.1.0_arm64_c869d64.dmg) | [Google Drive](https://drive.google.com/file/d/1odYNFvtYZa8pAO_bYZZCh5FZ6v0ggxFQ) | [百度网盘](https://pan.baidu.com/s/1xzex0UrSDiZeWyLuYRSqNg?pwd=t6c4) 提取码: t6c4 | [夸克网盘](https://pan.quark.cn/s/625a2dac438a)
+**Apple Silicon (M1/M2/M3/M4) (Latest)**
+- [GitHub 下载](https://github.com/jamesphotography/SuperPicky/releases/latest) | [Google Drive](https://drive.google.com/file/d/1odYNFvtYZa8pAO_bYZZCh5FZ6v0ggxFQ) | [百度网盘](https://pan.baidu.com/s/1xzex0UrSDiZeWyLuYRSqNg?pwd=t6c4) 提取码: t6c4 | [夸克网盘](https://pan.quark.cn/s/625a2dac438a)
 
-**Intel (2020年前 Mac) (v4.2.0)**
-- [GitHub 下载](https://github.com/jamesphotography/SuperPicky/releases/download/v4.1.0/SuperPicky_v4.1.0_Intel_c869d64.dmg) | [Google Drive](https://drive.google.com/file/d/1dPdCoObVLuxy9ks_sYjbfSR4bI3A-IPD) | [百度网盘](https://pan.baidu.com/s/1lNz2mBUEee8qqrd95rPJsA?pwd=3821) 提取码: 3821 | [夸克网盘](https://pan.quark.cn/s/1b5d87b74059)
+**Intel (2020年前 Mac) (Latest)**
+- [GitHub 下载](https://github.com/jamesphotography/SuperPicky/releases/latest) | [Google Drive](https://drive.google.com/file/d/1dPdCoObVLuxy9ks_sYjbfSR4bI3A-IPD) | [百度网盘](https://pan.baidu.com/s/1lNz2mBUEee8qqrd95rPJsA?pwd=3821) 提取码: 3821 | [夸克网盘](https://pan.quark.cn/s/1b5d87b74059)
 
 1. 下载对应版本的 DMG 文件
 2. 双击 DMG 文件，将应用拖入 Applications
 3. 首次打开：右键点击应用选择"打开"
 
 ### Windows
-**CUDA-GPU Version (v4.2.0 Beta)**
+**CUDA-GPU Version (Latest)**
 - [百度网盘](https://pan.baidu.com/s/1XBaGXPim_WzjpNBgG-altg?pwd=c2a6) 提取码: c2a6 | [Google Drive](https://drive.google.com/file/d/1IKSxB3KbQdDO7VhnsGnHjOb2EgqZIgSB/view?usp=sharing) | [夸克网盘](https://pan.quark.cn/s/d15276717367)
 
-**CPU Version (v4.2.0)**
-- [GitHub 下载](https://github.com/jamesphotography/SuperPicky/releases/download/v4.1.0/SuperPicky_Setup_Win64_4.1.0_242f4be.exe) | [百度网盘](https://pan.baidu.com/s/1dle-dGbKx5_On5cfdaaLXQ?pwd=872v) 提取码: 872v | [Google Drive](https://drive.google.com/file/d/1nTcgQdUqotu04kVkWUZqENnQtn573uzx) | [夸克网盘](https://pan.quark.cn/s/1b7016c16f79)
+**CPU Version (Latest)**
+- [GitHub 下载](https://github.com/jamesphotography/SuperPicky/releases/latest) | [百度网盘](https://pan.baidu.com/s/1dle-dGbKx5_On5cfdaaLXQ?pwd=872v) 提取码: 872v | [Google Drive](https://drive.google.com/file/d/1nTcgQdUqotu04kVkWUZqENnQtn573uzx) | [夸克网盘](https://pan.quark.cn/s/1b7016c16f79)
 
 
 1. 下载并解压 ZIP 文件

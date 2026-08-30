@@ -33,3 +33,18 @@ Any new failure beyond this list at any stage is a regression.
 sidecar JSON 契约、report.db schema v13 及迁移链、birdid_server HTTP API、
 `spb_rename_species.py` / `spb_pixel_art.py` 的路径与 CLI 参数面、
 bird_reference.sqlite / birdname.db schema、superpicky_cli / birdid_cli 命令行接口。
+
+## 重构结果 / Refactor Outcome（2026-08-30 收官）
+
+- 每阶段结束全量回归：`pytest tests` = **428 passed / 4 failed（=基线原失败）/ 13 skipped**，与分支起点完全一致，零新增回归。
+- 契约测试 12 项全绿（report.db schema v13 / sidecar 快照 / CLI 参数面）。
+- BirdIndex 侧：111 项测试全绿；`web/api.py` 死代码清除。
+- **端到端 sandbox 冒烟通过**（`scripts_dev/e2e_refactor_smoke.py`，只在
+  `scripts_dev/_backfill_sandbox/` 演练，不碰真实库）：
+  SuperPicky process → report.db v13 + sidecar → BirdIndex scan → Web 页面/API/缩略图
+  → `POST /api/fix` → `spb_rename_species.py --apply` 子进程 → report.db/sidecar 同步
+  → BirdIndex 定向重扫一致。
+- ⚠️ **待办提醒**：模块布局有变（ai_model/iqa_scorer/topiq_model/post_adjustment_engine
+  并入 core/），spec 无需改动（靠顶层 import 链静态分析），但**下次打包发版前必须跑一次
+  打包启动冒烟**（AGENTS.md 最低验证标准）。
+

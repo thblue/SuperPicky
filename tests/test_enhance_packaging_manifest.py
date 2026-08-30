@@ -21,7 +21,8 @@ import ast
 import importlib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# 仓库根 = tests/ 的上级 / Repo root = parent of tests/
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_download_manifest_has_enhance_weights():

@@ -20,7 +20,9 @@ import os
 import subprocess
 import sys
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 测试已迁入 tests/：仓库根是上上级目录（与生产 import 路径一致）
+# Repo root is two levels up now that tests live in tests/.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _PROBE_CODE = r"""
 import sys, json

@@ -89,7 +89,7 @@ def test_c1_migration_wired_in_main_startup():
     import pathlib
 
     # 读取 main.py 源码 / Read main.py source
-    main_path = pathlib.Path(__file__).parent / "main.py"
+    main_path = pathlib.Path(__file__).resolve().parents[1] / "main.py"
     source = main_path.read_text(encoding="utf-8")
 
     assert "migrate_birdid_dock_settings" in source, (

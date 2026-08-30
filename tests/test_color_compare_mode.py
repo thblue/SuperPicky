@@ -12,7 +12,7 @@ from tools.i18n import get_i18n  # noqa: E402
 from ui import crop_studio  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
-_SAMPLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+_SAMPLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "docs", "Promotion", "wechat", "articles",
                        "v4.3.0-rarity", "06.jpg")
 

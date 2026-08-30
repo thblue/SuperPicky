@@ -15,7 +15,7 @@ from ui import crop_studio  # noqa: E402
 _app = QApplication.instance() or QApplication([])  # QWidget 需 QApplication
 
 _SAMPLE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "docs", "Promotion", "wechat", "articles", "v4.3.0-rarity", "06.jpg")
 
 

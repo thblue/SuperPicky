@@ -27,7 +27,9 @@ import time
 
 import pytest
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+# 仓库根 = tests/ 的上级（子进程靠 cwd 导入 server_manager）
+# Repo root = parent of tests/ (child procs import server_manager via cwd).
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEST_PORT = 5199  # 独立测试端口，避开默认 5156 与 BirdIndex 8300 / dedicated test port
 
 # 子进程脚本模板：启动服务后自然退出，退出路径由 atexit 兜底

@@ -1,6 +1,16 @@
 # CLAUDE.md (Claude / Anthropic Coding Agents)
 
-Use `scripts_dev/AI_CODING_RULES.md` as the single source of truth for this repository.
+Use `AGENTS.md` as the single source of truth for repository conventions,
+and `dev-docs/INTERFACE_CONTRACTS.md` for the frozen external-interface list.
+
+## 数据安全红线 / Data Safety Red Lines
+
+- 永不在真实照片库（NAS 或本机用户目录）上调试；一律用临时目录或 `scripts_dev/_backfill_sandbox/`。
+  Never debug against real photo libraries; use temp dirs or scripts_dev/_backfill_sandbox/ only.
+- 对外契约（sidecar JSON、report.db schema、birdid_server HTTP、`spb_rename_species.py`/`spb_pixel_art.py` 路径与 CLI 面）冻结于 `dev-docs/INTERFACE_CONTRACTS.md`，改动须先评审并同步 `tests/test_*contract*`。
+  Frozen contracts live in dev-docs/INTERFACE_CONTRACTS.md; change requires review + synced contract tests.
+- 会移动/删除照片文件的模块（core/photo_processor、core/rating_mover、core/file_manager、spb_flatten、spb_dedupe_jpg、spb_rename_species、spb_wipe_ident）改动前必须显式确认 dry-run 行为与可回退性。
+  File-moving modules: always confirm dry-run behavior and reversibility before touching them.
 
 ## Always Enforce
 

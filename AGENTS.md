@@ -187,6 +187,17 @@ The following specifications must be met when using Python:
       pass
   ```
 
+## 数据安全红线 / Data Safety Red Lines
+
+- 永不在真实照片库（NAS 或本机用户目录）上调试；一律用临时目录或 `scripts_dev/_backfill_sandbox/`。
+  Never debug against real photo libraries (NAS or local user dirs); use temp dirs or `scripts_dev/_backfill_sandbox/` only.
+- 对外契约冻结于 `dev-docs/INTERFACE_CONTRACTS.md`（sidecar JSON、report.db schema v13、birdid_server HTTP API、`spb_rename_species.py`/`spb_pixel_art.py` 的路径与 CLI 面、鸟种参考库 schema）。改动前必须评审下游消费者，并同步更新 `tests/` 下契约测试。
+  Frozen external contracts live in `dev-docs/INTERFACE_CONTRACTS.md`; review downstream consumers and sync the contract tests in `tests/` before changing any of them.
+- 单一写者原则：只有 SuperPicky 写照片数据（照片文件、EXIF/XMP、report.db、sidecar）；BirdIndex 只读，写回经子进程委托。禁止引入第二个写入者。
+  Single-writer principle: only SuperPicky writes photo data; BirdIndex is read-only and delegates writes back via subprocess.
+- 会移动/删除照片文件的模块（core/photo_processor、core/rating_mover、core/file_manager、spb_flatten、spb_dedupe_jpg、spb_rename_species、spb_wipe_ident）改动前必须显式确认 dry-run 行为与可回退性。
+  For file-moving modules, always confirm dry-run behavior and reversibility before touching them.
+
 ## Always Enforce
 
 - UTF-8 safety first; do not introduce Chinese text corruption.

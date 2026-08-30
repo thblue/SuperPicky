@@ -1,7 +1,7 @@
 # 评星 V2:批内相对排序 + 配额制 —— 实施计划
 
 日期:2026-07-09 · 分支:dev · 状态:进行中
-背景与审计证据见 memory(rating-v2-relative-quota)与 tools/rating_v2_prototype.py。
+背景与审计证据见 memory(rating-v2-relative-quota)与 scripts/rating_v2_prototype.py。
 
 ## 已审定决策(James 拍板)
 
@@ -16,7 +16,7 @@
 
 ## 任务分解
 
-- [x] T0 原型验证(tools/rating_v2_prototype.py,两目录实测通过)
+- [x] T0 原型验证(scripts/rating_v2_prototype.py,两目录实测通过)
 - [x] T1 核心模块 `core/rating_quota.py`:纯函数批量定星(硬门槛+Q+配额+封顶+连拍cap),
       无 Qt/IO 依赖,含单测 test_rating_quota.py
 - [x] T2 TOPIQ 改打鸟裁剪区(bird_crop_bgr,无裁剪回退整图;

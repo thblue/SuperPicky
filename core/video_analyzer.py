@@ -3,7 +3,7 @@
 """
 SuperPicky V4.3 Phase 1 — 视频分析主引擎
 
-把 tools/video_spike.py 中验证过的策略重构为生产级 API：
+把 scripts/video_spike.py 中验证过的策略重构为生产级 API：
     - 自适应抽帧（max_frames 上限，与视频时长解耦）
     - 混合 seek/grab 抽帧策略（fps × interval 决定）
     - YOLO 鸟类检测（COCO class 14）
@@ -48,7 +48,7 @@ from core.video_segment import (
 # ============================================================================
 
 # 混合策略阈值：当 (fps × interval_sec) 超过此值时，seek 比 grab 更快
-# 经验值来自 4K 视频 A/B 测试（tools/video_spike.py）
+# 经验值来自 4K 视频 A/B 测试（scripts/video_spike.py）
 # Hybrid threshold for seek vs grab decode strategy.
 SEEK_THRESHOLD_FRAMES = 60
 

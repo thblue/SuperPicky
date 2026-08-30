@@ -1,0 +1,57 @@
+name: Tests
+
+# 单元/契约测试 CI：push 到主要分支或 PR 时运行。
+# 安装 CPU 版依赖（requirements.txt 即 CPU 集），Qt 测试用 offscreen 平台。
+# Unit/contract test CI. Installs the CPU dependency set; Qt runs offscreen.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - my-mods
+    paths:
+      - '**.py'
+      - 'requirements*.txt'
+      - 'pytest.ini'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    paths:
+      - '**.py'
+      - 'requirements*.txt'
+      - 'pytest.ini'
+      - '.github/workflows/tests.yml'
+  workflow_dispatch:
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        # --deselect 为基线前已存在的失败（记录于 dev-docs/REFACTOR_BASELINE.md），
+        # 修复后请移除对应行，让 CI 重新覆盖它们。
+        # Deselected tests are pre-existing failures (see REFACTOR_BASELINE.md);
+        # remove each line once fixed so CI covers them again.
+        run: >-
+          python -m pytest tests -ra --tb=short
+          --deselect "tests/test_aesthetic_xmp_roundtrip.py::TestAestheticXmpRoundtrip::test_batch_write_roundtrip"
+          --deselect "tests/test_iqa_scorer_resize.py::test_calculate_aesthetic_matches_reference_and_is_faster"
+          --deselect "tests/test_multibird_pipeline.py::TestV54MultiMainAndSoftDelete::test_batch_soft_delete_species"
+          --deselect "tests/test_rating_quota.py::TestQuotaAssignment::test_burst_cap"

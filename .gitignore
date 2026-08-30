@@ -91,8 +91,11 @@ exif_args.txt
 
 # 开发/实验/测试目录（本地调试用，不上传）
 experiments/
-scripts_dev/
-tests/
+
+# scripts_dev 仅沙箱副本与原始数据留本地；脚本本体已入库
+# scripts_dev: only sandbox copies & raw data stay local; the scripts themselves are tracked
+scripts_dev/_backfill_sandbox/
+scripts_dev/data_sources/
 
 # 旧的打包脚本（保留本地备份，不同步）
 package_notarize.sh
@@ -146,9 +149,9 @@ docs/Promotion/
 # Codex 本地环境配置 / local codex env
 .codex/
 
-# iRateBird 原始 figshare CSV（未随仓库分发，需开发者手动下载）
-# iRateBird raw figshare CSVs (not distributed with the repo; download manually)
-scripts_dev/data_sources/
+# iRateBird 原始 figshare CSV 与回填沙箱（未随仓库分发，需开发者手动准备）
+# iRateBird raw figshare CSVs & backfill sandbox (not distributed; prepare manually)
+# （规则已并入上方 scripts_dev 段 / merged into the scripts_dev block above）
 
 # V5.0 开发测试产物 / dev test artifacts
 .smoke_test/

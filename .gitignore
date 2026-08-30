@@ -30,8 +30,7 @@ build/
 *.swp
 *.swo
 
-# 测试和临时文件
-test_*.py
+# 测试和临时文件（正式测试已集中在 tests/，此处的 test_*.py 规则已移除）
 analyze_*.py
 add_*.py
 write_*.py

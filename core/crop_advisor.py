@@ -215,7 +215,7 @@ def _detect_birds(image_bgr: np.ndarray) -> List[Tuple[Box, float]]:
     返回 / Returns:
         List[Tuple[Box, float]]: 所有鸟类检测框和置信度 / All bird bboxes with confidence scores.
     """
-    from ai_model import load_yolo_model, preprocess_image
+    from core.ai_model import load_yolo_model, preprocess_image
     from config import get_lazy_registry, get_best_device
     registry = get_lazy_registry()
     model = registry.get_or_create("crop_advisor.yolo", load_yolo_model)
@@ -311,7 +311,7 @@ def _topiq(crop_bgr: np.ndarray) -> Optional[float]:
     # 避免再加载一份 TOPIQ 模型(否则 'mps' 默认 key 与主程序 key 不同会重复加载)。
     # Key the singleton by get_best_device().type to match ai_model's TOPIQ instance,
     # so we reuse the already-loaded model instead of loading a second copy.
-    from iqa_scorer import get_iqa_scorer
+    from core.iqa_scorer import get_iqa_scorer
     from config import get_best_device
     return get_iqa_scorer(device=get_best_device().type).calculate_from_array(crop_bgr)
 

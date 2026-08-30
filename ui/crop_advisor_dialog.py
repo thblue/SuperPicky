@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ai_model import read_image_bgr
+from core.ai_model import read_image_bgr
 from core.crop_advisor import (
     BIRD_ONLY_LABEL,
     ORIGINAL_LABEL,

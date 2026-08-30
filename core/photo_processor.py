@@ -31,7 +31,7 @@ from datetime import datetime
 
 # 现有模块
 from tools.find_bird_util import raw_to_jpeg
-from ai_model import load_yolo_model, detect_and_draw_birds, read_image_bgr, read_image_dims
+from core.ai_model import load_yolo_model, detect_and_draw_birds, read_image_bgr, read_image_dims
 from tools.report_db import ReportDB
 from tools.exiftool_manager import get_exiftool_manager
 from tools.file_utils import ensure_hidden_directory, clear_readonly_attribute
@@ -1174,7 +1174,7 @@ class PhotoProcessor:
         # 预获取 TOPIQ scorer（单例）并在循环中复用，减少重复导入/查找开销
         topiq_scorer = None
         try:
-            from iqa_scorer import get_iqa_scorer
+            from core.iqa_scorer import get_iqa_scorer
             from config import get_best_device
             topiq_scorer = get_iqa_scorer(device=get_best_device().type)
         except Exception:
@@ -1843,7 +1843,7 @@ class PhotoProcessor:
             try:
                 scorer = topiq_scorer
                 if scorer is None:
-                    from iqa_scorer import get_iqa_scorer
+                    from core.iqa_scorer import get_iqa_scorer
                     from config import get_best_device
                     scorer = get_iqa_scorer(device=get_best_device().type)
                     topiq_scorer = scorer
@@ -2469,7 +2469,7 @@ class PhotoProcessor:
                         step_start = time_module.time()
                         scorer = topiq_scorer
                         if scorer is None:
-                            from iqa_scorer import get_iqa_scorer
+                            from core.iqa_scorer import get_iqa_scorer
                             from config import get_best_device
                             scorer = get_iqa_scorer(device=get_best_device().type)
                             topiq_scorer = scorer

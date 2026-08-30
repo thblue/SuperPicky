@@ -18,7 +18,7 @@ from PIL import Image
 import torchvision.transforms as T
 
 # 使用 TOPIQ 模型
-from topiq_model import CFANet, load_topiq_weights, get_topiq_weight_path
+from core.topiq_model import CFANet, load_topiq_weights, get_topiq_weight_path
 from tools.i18n import t as _t
 
 from config import get_best_device, get_lazy_registry

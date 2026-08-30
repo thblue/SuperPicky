@@ -3615,7 +3615,7 @@ class SuperPickyMainWindow(QMainWindow):
 
             # 1. YOLO 检测模型
             try:
-                from ai_model import load_yolo_model
+                from core.ai_model import load_yolo_model
                 load_yolo_model(log_callback=lambda msg, tag="info": self.log_signal.emit(msg, tag))
                 self.log_signal.emit(self.i18n.t("preload.yolo_loaded"), "success")
                 results.append(("YOLO", True, None))
@@ -3646,7 +3646,7 @@ class SuperPickyMainWindow(QMainWindow):
             # 4. IQA/TOPIQ 美学评分模型
             try:
                 from config import get_best_device
-                from iqa_scorer import get_iqa_scorer
+                from core.iqa_scorer import get_iqa_scorer
                 device = get_best_device()
                 self.log_signal.emit(self.i18n.t("preload.iqa_loading", device=device.type), "info")
                 # 真正加载 TOPIQ 权重(而非仅创建评分器对象),使其在启动时即就绪,

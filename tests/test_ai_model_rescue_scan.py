@@ -12,7 +12,7 @@ gate-reject and no-candidate paths.
 import numpy as np
 import torch
 
-import ai_model
+from core import ai_model
 
 
 class FakeBoxes:

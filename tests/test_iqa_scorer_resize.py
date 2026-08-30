@@ -5,7 +5,7 @@ TOPIQ resize two-stage speedup: unit tests for the helper function.
 """
 import numpy as np
 
-from iqa_scorer import _preshrink_if_large, _TOPIQ_PRESHRINK_SIZE
+from core.iqa_scorer import _preshrink_if_large, _TOPIQ_PRESHRINK_SIZE
 
 
 def test_large_image_gets_preshrunk():
@@ -59,7 +59,7 @@ import pytest
 from PIL import Image
 
 from config import get_best_device
-from iqa_scorer import get_iqa_scorer
+from core.iqa_scorer import get_iqa_scorer
 
 _REAL_PHOTO = "img/_Z9W0960.jpg"
 _TOPIQ_WEIGHT = "models/cfanet_iaa_ava_res50-3cd62bb3.pth"
@@ -185,7 +185,7 @@ def test_public_methods_share_single_inference_path():
     """
     import inspect
 
-    from iqa_scorer import IQAScorer
+    from core.iqa_scorer import IQAScorer
 
     assert hasattr(IQAScorer, "_score_pil_image")
     assert "_score_pil_image" in inspect.getsource(IQAScorer.calculate_aesthetic)
@@ -204,7 +204,7 @@ def test_small_image_path_skips_numpy_roundtrip(monkeypatch, tmp_path):
     Images below the pre-shrink threshold must not pay the
     np.array/Image.fromarray round-trip; check img.size (zero-copy) first.
     """
-    import iqa_scorer as iqa_module
+    from core import iqa_scorer as iqa_module
 
     def _must_not_be_called(img_array):
         raise AssertionError("小图不应进入 _preshrink_if_large 预降路径")

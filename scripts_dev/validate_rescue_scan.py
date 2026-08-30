@@ -43,7 +43,7 @@ def main() -> None:
         sys.exit(f"样本目录不存在: {SAMPLE_DIR}")
 
     from advanced_config import get_advanced_config
-    from ai_model import load_yolo_model, detect_and_draw_birds
+    from core.ai_model import load_yolo_model, detect_and_draw_birds
 
     cfg = get_advanced_config()
     saved = cfg.rescue_scan_enabled

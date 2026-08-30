@@ -267,7 +267,7 @@ class TestBirdBoxDedup(unittest.TestCase):
 
     def _dedup(self, boxes, confs, iou_thresh=0.55):
         import numpy as np
-        from ai_model import _dedupe_bird_boxes
+        from core.ai_model import _dedupe_bird_boxes
         dets = np.array(boxes, dtype=np.float64)
         cf = np.array(confs, dtype=np.float64)
         cls = np.array([14] * len(boxes), dtype=np.float64)
@@ -305,7 +305,7 @@ class TestRescueMultibirdConfFloor(unittest.TestCase):
         """rescue 结果的 detections 数组只含 conf≥0.2 的鸟 + 救回候选。"""
         import numpy as np
         import torch
-        import ai_model
+        from core import ai_model
 
         class _FakeBoxes:
             def __init__(self, xyxy, conf, cls):
@@ -351,7 +351,7 @@ class TestMainBirdSelection(unittest.TestCase):
                 'mask_polygon': poly, 'is_selected': False}
 
     def test_single_bird(self):
-        from ai_model import _select_main_bird
+        from core.ai_model import _select_main_bird
         idx, reason = _select_main_bird(
             [self._bird(0, (0, 0, 100, 100))], None, 200, 100)
         self.assertEqual((idx, reason), (0, 'single'))
@@ -362,7 +362,7 @@ class TestMainBirdSelection(unittest.TestCase):
         旧 bbox 逻辑会误选鸟0（bbox 包含但点其实在鸟身体外的空白），
         polygon 精度避免了这种误选。
         """
-        from ai_model import _select_main_bird
+        from core.ai_model import _select_main_bird
         birds = [
             # 鸟0：bbox 覆盖右下区域，但身体多边形只占上半部
             self._bird(0, (100, 100, 200, 200), conf=0.9,
@@ -377,7 +377,7 @@ class TestMainBirdSelection(unittest.TestCase):
 
     def test_bbox_fallback_when_no_polygon(self):
         """无多边形时 bbox 命中仍有效。"""
-        from ai_model import _select_main_bird
+        from core.ai_model import _select_main_bird
         birds = [self._bird(0, (10, 10, 90, 90), conf=0.9, poly=None),
                  self._bird(1, (110, 10, 190, 90), conf=0.3, poly=None)]
         idx, reason = _select_main_bird(birds, (0.6, 0.3), 200, 100)
@@ -385,7 +385,7 @@ class TestMainBirdSelection(unittest.TestCase):
 
     def test_focus_miss_falls_back_to_conf(self):
         """对焦点不在任何鸟上 → fallback + 最高置信度。"""
-        from ai_model import _select_main_bird
+        from core.ai_model import _select_main_bird
         birds = [self._bird(0, (10, 10, 60, 60), conf=0.4,
                             poly=[[10, 10], [60, 10], [60, 60], [10, 60]]),
                  self._bird(1, (110, 10, 180, 90), conf=0.8,
@@ -395,7 +395,7 @@ class TestMainBirdSelection(unittest.TestCase):
 
     def test_no_focus_falls_back(self):
         """无对焦点 → fallback。"""
-        from ai_model import _select_main_bird
+        from core.ai_model import _select_main_bird
         birds = [self._bird(0, (0, 0, 50, 50), conf=0.9),
                  self._bird(1, (60, 0, 120, 50), conf=0.8)]
         idx, reason = _select_main_bird(birds, None, 200, 100)

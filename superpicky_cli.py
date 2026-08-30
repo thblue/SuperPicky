@@ -372,7 +372,7 @@ def cmd_reset(args):
 
 def cmd_restar(args):
     """重新评星"""
-    from post_adjustment_engine import PostAdjustmentEngine
+    from core.post_adjustment_engine import PostAdjustmentEngine
     from tools.exiftool_manager import get_exiftool_manager
     from advanced_config import get_advanced_config
     import shutil

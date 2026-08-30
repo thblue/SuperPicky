@@ -230,7 +230,7 @@ class VideoBatchEngine:
         """
         if self._yolo is None:
             try:
-                from ai_model import load_yolo_model
+                from core.ai_model import load_yolo_model
                 self._yolo = load_yolo_model()
             except Exception as e:
                 self._log(log_cb, f"YOLO 加载失败: {e}", "error")

@@ -54,7 +54,7 @@ def test_ai_model_import_keeps_cv2_thread_pool():
     """经主选片流程 ai_model 导入 YOLO 后，cv2 线程池必须仍然可用（>1）。"""
     code = (
         "import cv2, sys\n"
-        "import ai_model\n"
+        "from core import ai_model\n"
         "n = cv2.getNumThreads()\n"
         "print(f'threads={n}', file=sys.stderr)\n"
         "sys.exit(0 if n > 1 else 1)\n"

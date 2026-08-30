@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QTextCursor
 
-from post_adjustment_engine import PostAdjustmentEngine, safe_int, safe_float
+from core.post_adjustment_engine import PostAdjustmentEngine, safe_int, safe_float
 from tools.exiftool_manager import get_exiftool_manager
 from advanced_config import get_advanced_config
 from tools.i18n import get_i18n

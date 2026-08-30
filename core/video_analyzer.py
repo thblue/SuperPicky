@@ -191,7 +191,7 @@ class VideoAnalyzer:
     视频鸟类分析引擎（Phase 1：仅 YOLO 有鸟/无鸟）
 
     用法 / Usage:
-        from ai_model import load_yolo_model
+        from core.ai_model import load_yolo_model
         analyzer = VideoAnalyzer(yolo_model=load_yolo_model())
         result = analyzer.analyze(
             video_path,

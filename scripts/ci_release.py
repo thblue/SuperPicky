@@ -28,17 +28,16 @@ from typing import Iterable
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+# 注：ai_model/iqa_scorer/topiq_model/post_adjustment_engine 已并入 core/，
+# 由下方 "core" 条目覆盖，不再单列根目录文件。
+# Note: the four engine modules moved into core/, covered by the "core" entry.
 PATCH_ITEMS = (
     "constants.py",
     "advanced_config.py",
-    "ai_model.py",
     "birdid_server.py",
     "birdid_cli.py",
-    "iqa_scorer.py",
-    "post_adjustment_engine.py",
     "server_manager.py",
     "superpicky_cli.py",
-    "topiq_model.py",
     "tools",
     "core",
     "ui",

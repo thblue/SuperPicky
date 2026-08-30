@@ -18,7 +18,7 @@ from config import config, get_lazy_registry, ensure_cv2_thread_pool
 # ultralytics globally disables the cv2 thread pool at import; restore it
 ensure_cv2_thread_pool()
 # V3.2: 移除未使用的 sharpness 计算器导入
-from iqa_scorer import get_iqa_scorer
+from core.iqa_scorer import get_iqa_scorer
 from advanced_config import get_advanced_config
 # V4.2.1
 from tools.i18n import get_i18n

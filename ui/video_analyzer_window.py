@@ -251,7 +251,7 @@ class _AnalysisWorker(QThread):
         try:
             # 加载模型 / Load model
             self.model_loading.emit()
-            from ai_model import load_yolo_model
+            from core.ai_model import load_yolo_model
             from core.video_analyzer import VideoAnalyzer
 
             model = load_yolo_model()

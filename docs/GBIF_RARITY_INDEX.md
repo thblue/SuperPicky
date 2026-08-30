@@ -142,6 +142,8 @@ have explicit hardcoded overrides:
 
 ### 3.6 中国国别稀有度 / Country-scoped rarity (CN)
 
+> 速览版（含历史目录回填说明）见 [CHINA_RARITY_AND_PROTECTION.md](CHINA_RARITY_AND_PROTECTION.md)。
+
 全球分数衡量的是**全球观察密度**——金雕全球 81 万条记录只拿 4.17 分，
 但它在中国是难得一遇的大山鸟。为此 4.3.x 新增国别稀有度表
 `gbif_rarity_by_country`（当前仅 `countrycode='CN'`）。国家解析链：

@@ -15,6 +15,7 @@ and algorithm calibration/validation. Boundary vs `scripts/`: scripts_dev may to
 |---|---|---|
 | `backfill_china_fields.py` | 为历史 `.superpicky/report.db` 回填中国稀有度 + 国家保护等级两列 | 内置 v12→v13 迁移；先在 `_backfill_sandbox/` 副本验证，再上真库；配套测试 `test_backfill_china_fields.py` |
 | `run_backfill_all.py` | 批量驱动上一脚本：目录清单读自 `G:/code/BirdIndex/config.json` 的 `photo_roots`（77+ NAS 库） | 全量回填已执行完毕（2026-08）；重跑前务必确认 `--dry-run` 行为与目标清单 |
+| `rerate_v2_conf_gate.py` | V2 配额重定星：不重跑检测/识鸟，从 report.db 现成指标 + 日志鸟种标签重建定星输入（替代 V2 模式下不可用的 CLI `restar`，见 cli-reference.md） | 默认 dry-run；两道自校验（当前参数复现存库评级 + 鸟种分组校验和）不通过即拒绝写库；`--execute` 前自动备份 report.db；只写 rating/caption，零接触照片文件 |
 
 ### 🟡 写 birdid 参考库 / Writes birdid reference DBs (`birdid/data/*.sqlite`)
 

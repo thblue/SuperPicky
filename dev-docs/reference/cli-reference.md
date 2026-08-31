@@ -58,9 +58,24 @@ python superpicky_cli.py reset ~/Photos/Birds -y
 #### restar - 重新评星
 
 ```bash
-# 使用新阈值重新评星
+# 使用新阈值重新评星（⚠️ 仅 V1 阈值定星模式适用，见下）
 python superpicky_cli.py restar ~/Photos/Birds -s 700 -n 5.5
 ```
+
+> ⚠️ **`rating_algorithm=v2`（V2 配额制）下不可用**（2026-08-31 实测事故）：
+> restar 是 V1 绝对阈值逻辑，与 process 主流程的 V2 批内配额定星不是同一套算法，
+> 结果无法对齐。三个具体问题：
+> 1. **0★ 下限读配置而非参数**：0★ 判定用 advanced_config 的 `min_sharpness`/`min_nima`，
+>    `-s/-n` 只影响 2/3★ 边界。配置收紧后（如 600/7.0）传 `-s 380 -n 4.8` 重跑，
+>    会把全部有鸟照片砸成 0★。
+> 2. **无视 flat 布局移动文件**：按评级目录（`0星_放弃/` 等）重新分配文件，
+>    `folder_layout=flat` 的目录会被拆出子目录。
+> 3. **V1/V2 算法不可互换**：V2 的按种分组配额、pHash 相似簇封顶、眼睛封顶
+>    在 restar 里全部不存在，重算结果与 process 产物没有可比性。
+>
+> **V2 批次重定星的正确工具**：`scripts_dev/rerate_v2_conf_gate.py`
+> （不重跑检测/识鸟，从 report.db 现成指标重建 V2 定星输入；默认 dry-run，
+> 自校验通过才允许 `--execute` 写库，写前自动备份）。
 
 #### identify - 识别单张照片
 
@@ -219,9 +234,22 @@ python superpicky_cli.py reset ~/Photos/Birds -y
 #### restar - Re-rate Photos
 
 ```bash
-# Re-rate with new thresholds
+# Re-rate with new thresholds (⚠️ V1 absolute-threshold mode only, see below)
 python superpicky_cli.py restar ~/Photos/Birds -s 700 -n 5.5
 ```
+
+> ⚠️ **Not usable under `rating_algorithm=v2` (quota rating)** — verified via a
+> real incident on 2026-08-31. restar implements the V1 absolute-threshold
+> logic, which is a different algorithm from the V2 batch quota rating used by
+> `process`. Three concrete pitfalls: (1) the 0-star floor is read from
+> advanced_config `min_sharpness`/`min_nima`, not from `-s/-n` — re-running
+> with `-s 380 -n 4.8` after the config was tightened (600/7.0) zeroes every
+> bird photo; (2) it re-sorts files into rating subfolders (`0星_放弃/` etc.),
+> ignoring `folder_layout=flat`; (3) V2 features (per-species quota groups,
+> pHash similarity clusters, eye-visibility cap) don't exist in restar.
+> For V2 batches use `scripts_dev/rerate_v2_conf_gate.py` instead
+> (no re-detection/re-identification; dry-run by default, self-checks before
+> `--execute`, automatic DB backup).
 
 #### identify - Identify Single Photo
 

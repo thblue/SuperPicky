@@ -108,7 +108,8 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 |---|---|
 | `spb_browse.py <目录>` | 结果浏览器（缩略图 + 详情 + 多鸟编辑右键；无参数弹启动器） |
 | `build_spb_browse.bat` | 打包 SPBBrowse.exe（独立结果浏览器，`dist_SPBBrowse\SPBBrowse\`） |
-| `superpicky_cli.py restar <目录> -s 500 -n 5.5` | 只重新评星（不重跑检测） |
+| ~~`superpicky_cli.py restar`~~ | ⚠️ **V2 配额模式下勿用**（2026-08-31 事故）：V1 阈值逻辑与 process 的 V2 定星不一致、0★ 下限读配置而非 `-s/-n` 参数、且无视 flat 布局移动文件。详见 [cli-reference.md](../reference/cli-reference.md) |
+| `scripts_dev/rerate_v2_conf_gate.py <目录> --min-conf 0.5 --execute` | **V2 批次重定星的正确工具**：不重跑检测/识鸟，从 report.db 重建定星输入；默认 dry-run，自校验（复现存库评级+鸟种分组）通过才可写库，写前自动备份 |
 | `superpicky_cli.py reset <目录> -y` | 重置目录（移回文件、清评分，**破坏性，先想清楚**） |
 | `superpicky_cli.py info <目录>` | 查看目录处理状态 |
 | `spb_flatten.py <目录> --execute` | 把历史「鸟种/星级」目录结构摊平回原位（先 dry-run） |
@@ -117,6 +118,8 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 ## 已知坑
 
 - **忘加 `-i` = 静默跳过识鸟**：不报错、评分照跑，鸟种沿用库里旧数据（photos 主鸟种 / bird_detections 旧分类行原样保留，不会丢，但也不更新）。判断方法：日志里搜 `Multi-bird` / `Low confidence`，有才是真跑了识鸟。
+- **`restar` 在 V2 配额模式下会全错**（2026-08-31 实测）：0★ 下限读配置 `min_sharpness`/`min_nima`（不是 `-s/-n` 参数），配置收紧后重跑会把全部有鸟照片砸成 0★；还会无视 flat 布局把变更照片移进 `0星_放弃/` 子目录。V2 批次重定星一律用 `scripts_dev/rerate_v2_conf_gate.py`。
+- **V2 定星不消费锐度/美学阈值**：`-s/-n` 只影响跑批日志的中间 V1 文案；最终星级 = 置信门槛（`-c`）+ 批内按鸟种分组配额 + pHash 相似簇封顶。想改星级密度，动的是 `-c` 和配置里的 `custom_quota3/2`。
 - **NAS 目录偶发 WinError 5**：断点文件 `resume_state.json` 在 SMB 上每张重命名一次，NAS 索引/杀毒短暂锁文件会导致个别照片被跳过（8/24 跑丢过 42 张，概率 ≈1.5%）。跑完看日志末尾「N 张照片处理异常被跳过」汇总；被跳过的保留上次结果。2026-08-27 起 `tools/resume_state.py` 写入端已加退避重试+静默降级（重试耗尽只告警一次，不再把当张照片连坐成失败），「跑完核对 report.db 行数 vs 文件数」的习惯仍保留。
 - **重跑前备份 report.db**：重跑会按新结果覆盖库内计算字段。惯例是在 `.superpicky/` 里留 `report.db.bak_<原因>_<时间戳>`。
 - 跑之前确认没有别的进程在写同一目录（浏览器开着编辑时不要重跑）。

@@ -1,0 +1,70 @@
+---
+name: batch-identify
+description: 对指定照片文件夹执行 SuperPicky 标准批量处理（检测→评分→定星→识鸟→产出浏览库）。只要用户提到「批量识别」「批量处理」「跑批」「处理一下这批/这个文件夹」且涉及鸟片目录（如 \\NAS-server\PHOTO\观鸟\ 下的新拍文件夹），或者说「跟之前一样处理」，就用本 skill。固化了实测过的命令参数、跑前检查、跑后核对与汇报格式。
+---
+
+# SuperPicky 批量识别工作流
+
+把一个新拍的鸟片目录跑完「检测 → 评分 → 定星 → 识鸟 → 产出浏览库」，并核对结果后向用户汇报。
+完整背景文档：`dev-docs/howto/PROCESS_QUICKSTART.md`（本 skill 是它的可执行浓缩版）。
+
+## 1. 跑前检查
+
+1. **定位目录**：用户可能给完整 UNC 路径（`\\NAS-server\PHOTO\观鸟\2026 观鸟\2026.8 天坛`）
+   或只给文件夹名——按名字在 `\\NAS-server\PHOTO\观鸟\` 及其子目录下定位，找不到再问。
+2. **确认未处理过**：目录下已存在 `.superpicky/report.db` 说明跑过。首次处理直接继续；
+   重跑必须先：① 备份 `report.db` 为 `.superpicky/report.db.bak_<原因>_<时间戳>`；
+   ② 确认没有 SPBBrowse/主程序进程开着该目录（编辑中的浏览库不能重跑覆盖）。
+3. **统计文件数**：数一下 RAW（CR3/NEF/ARW…）数量，后面核对要用。
+4. **确认 venv**：一律用 `G:\code\SuperPicky\.venv\Scripts\python.exe`，命令加 `-X utf8`。
+
+## 2. 执行（参数已固化，不要自行增减）
+
+```bash
+cd G:/code/SuperPicky
+.venv/Scripts/python.exe -X utf8 superpicky_cli.py process -i "<目录>" --birdid-country CN
+```
+
+- **`-i`（= `--auto-identify`）必须显式加**：识鸟总开关只认这个 CLI 参数、不回落配置。
+  漏掉不报错——评分照跑，但鸟种沿用库里旧数据，等于白跑。日志里出现
+  `Multi-bird` / `Bird ID` / `Low confidence` 行才是真跑了识鸟。
+- **`--birdid-country CN` 是国内目录默认**；海外拍摄按实际国家传（如 `AU`、`SG`）。
+  不传时链路是「GPS 反查国 → 兜底 CN」，国内显式传 CN 最稳。
+- **其余参数一律不传**：锐度/美学/置信度/配额/布局/写入模式全部跟随
+  `advanced_config.json`（GUI 高级设置改了就跟着变），这正是「跟之前一样」的含义。
+  特别注意：V2 配额定星**不消费** `-s/-n` 阈值；星级密度由 `-c`（置信门槛）和
+  配置里的 `custom_quota3`/`custom_quota2` 控制。
+- **长任务放后台**（Bash `run_in_background`），预计 ≈1.3 秒/张（RTX 3090 + NAS 实测），
+  每隔一两分钟看一眼输出确认在推进即可。
+
+## 3. 跑后核对（必做，缺一不可）
+
+1. **行数对账**：`report.db` photos 行数 == RAW 文件数。不等 → 在输出里搜
+   「异常被跳过」（NAS 偶发 WinError 5 锁文件），被跳过的照片保留旧结果，需补跑。
+2. **日志统计**：从输出尾部提取「处理完成统计」（星级分布/飞鸟标记/总耗时）。
+3. **sidecar 对账**：`.superpicky/meta/` 的 JSON 数 == has_bird 数（无鸟照片按瘦身策略不导出）。
+
+## 4. 汇报格式
+
+向用户汇报：星级分布表（3★/2★/1★/0★/无鸟）、识出的鸟种及张数（标注罕见度
+○常见/◔能见/◑少见/●传奇）、总耗时与速度、对账结论（无丢失）、提醒复核两个点
+（低置信未定种的数量；可疑鸟种，如跨分布物种可能是误判）。
+
+## 5. 复核入口（给用户，不主动执行）
+
+```bash
+cd G:/code/SuperPicky
+.venv/Scripts/python.exe -X utf8 spb_browse.py "<目录>"
+```
+
+浏览器里：双击缩略图直达多鸟编辑，左侧鸟种下拉框右键可整批改种/删种。
+
+## 6. 事后改星（常见后续需求）
+
+- **不要用 `superpicky_cli.py restar`**：V2 配额模式下它会用配置里的 0★ 下限
+  （而非 `-s/-n` 参数）把全部照片砸成 0★，还会无视 flat 布局把照片移进
+  `0星_放弃/` 等子目录（2026-08-31 事故，详见 dev-docs/reference/cli-reference.md）。
+- **用** `scripts_dev/rerate_v2_conf_gate.py`：不重跑检测/识鸟，从 report.db 重建
+  V2 定星输入；默认 dry-run，自校验（复现存库评级 + 鸟种分组校验和）通过后
+  加 `--execute` 写库，写前自动备份。改 `-c` 置信门槛用 `--min-conf`，
+  改 2★ 名额用 `--quota2`。

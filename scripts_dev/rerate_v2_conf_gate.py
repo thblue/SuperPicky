@@ -285,8 +285,8 @@ def main() -> int:
     """
     ap = argparse.ArgumentParser(description="V2 配额定星重算（不重跑识别）")
     ap.add_argument("directory", help="照片目录")
-    ap.add_argument("--min-conf", type=float, default=0.5,
-                    help="置信度门槛（默认 0.5，即老阈值 50%%）")
+    ap.add_argument("--min-conf", type=float, default=0.4,
+                    help="置信度门槛（默认 0.4，与批量识别工作流定档一致）")
     ap.add_argument("--quota3", type=float, default=CURRENT_QUOTA3,
                     help="3★ 配额 %%（默认 20，与当前配置一致）")
     ap.add_argument("--quota2", type=float, default=CURRENT_QUOTA2,

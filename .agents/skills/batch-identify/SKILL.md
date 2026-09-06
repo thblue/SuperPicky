@@ -22,7 +22,7 @@ description: 对指定照片文件夹执行 SuperPicky 标准批量处理（检�
 
 ```bash
 cd G:/code/SuperPicky
-.venv/Scripts/python.exe -X utf8 superpicky_cli.py process -i "<目录>" --birdid-country CN
+.venv/Scripts/python.exe -X utf8 superpicky_cli.py process -i "<目录>" --birdid-country CN -c 40
 ```
 
 - **`-i`（= `--auto-identify`）必须显式加**：识鸟总开关只认这个 CLI 参数、不回落配置。
@@ -30,10 +30,13 @@ cd G:/code/SuperPicky
   `Multi-bird` / `Bird ID` / `Low confidence` 行才是真跑了识鸟。
 - **`--birdid-country CN` 是国内目录默认**；海外拍摄按实际国家传（如 `AU`、`SG`）。
   不传时链路是「GPS 反查国 → 兜底 CN」，国内显式传 CN 最稳。
-- **其余参数一律不传**：锐度/美学/置信度/配额/布局/写入模式全部跟随
+- **`-c 40`（AI 置信度门槛）是本工作流的定档参数**（2026-09-06 用户定档 40，
+  50 偏严）：显式传以覆盖配置（当前配置 min_confidence=0.7）。它同时控制
+  有鸟判定、V2 排序池入池线和补救扫描的直接救回线，影响星级密度。
+- **其余参数一律不传**：锐度/美学/配额/布局/写入模式全部跟随
   `advanced_config.json`（GUI 高级设置改了就跟着变），这正是「跟之前一样」的含义。
-  特别注意：V2 配额定星**不消费** `-s/-n` 阈值；星级密度由 `-c`（置信门槛）和
-  配置里的 `custom_quota3`/`custom_quota2` 控制。
+  特别注意：V2 配额定星**不消费** `-s/-n` 阈值；2★/3★ 名额密度由配置里的
+  `custom_quota3`/`custom_quota2` 控制。
 - **长任务放后台**（Bash `run_in_background`），预计 ≈1.3 秒/张（RTX 3090 + NAS 实测），
   每隔一两分钟看一眼输出确认在推进即可。
 

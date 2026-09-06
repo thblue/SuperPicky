@@ -150,26 +150,87 @@ def _get_rescue_birdid():
     return registry.get_or_create("ai_model.rescue_birdid_adapter", _factory)
 
 
-def _birdid_confirm(image: np.ndarray, xyxy) -> tuple:
+def _load_fullres_for_confirm(
+    image: np.ndarray, image_path: Optional[str], box,
+) -> tuple:
+    """
+    为识鸟守门准备全分辨率裁剪源。
+
+    1024 预处理图上的极小目标（占画面 0.1% 量级）候选框只有几十像素，
+    分类器无法辨认，是「检出但救不回」漏检的主因（2026-09 天坛/海淀
+    实测：同一目标 1024 图裁剪 9% vs 原图裁剪 82%）。本函数把候选框按
+    预处理图→原图的比例缩放，返回原图与其上的框。
+
+    参数:
+    image (np.ndarray): 已预处理的 BGR 图（长边 1024）
+    image_path (Optional[str]): 预览图文件路径（内嵌全分辨率 JPEG）
+    box: 候选框 (x1, y1, x2, y2)，image 坐标系
+
+    返回:
+    tuple: (full_image, scaled_box)；无更高分辨率/读取失败时返回
+           (None, None)，调用方回退旧的 1024 图裁剪路径
+
+    Prepare a full-resolution crop source for the rescue BirdID gate.
+    Returns (full_image, scaled_box), or (None, None) to fall back to
+    the legacy 1024-crop path when no higher resolution is available.
+    """
+    if not image_path:
+        return None, None
+    try:
+        full = read_image_bgr(image_path)
+        if full is None:
+            return None, None
+        fh, fw = full.shape[:2]
+        ih, iw = image.shape[:2]
+        if fw <= iw or fh <= ih:
+            return None, None
+        sx, sy = fw / iw, fh / ih
+        x1, y1, x2, y2 = box
+        scaled = (
+            max(0, min(fw - 1, int(round(x1 * sx)))),
+            max(0, min(fh - 1, int(round(y1 * sy)))),
+            max(0, min(fw, int(round(x2 * sx)))),
+            max(0, min(fh, int(round(y2 * sy)))),
+        )
+        if scaled[2] <= scaled[0] or scaled[3] <= scaled[1]:
+            return None, None
+        return full, scaled
+    except Exception:
+        return None, None
+
+
+def _birdid_confirm(image: np.ndarray, xyxy,
+                    full_image: Optional[np.ndarray] = None,
+                    xyxy_full=None) -> tuple:
     """
     把候选框裁下来交给 BirdID 分类器确认是否为鸟。
 
     参数:
     image (np.ndarray): BGR 整图（长边 1024 预处理后）
-    xyxy: 候选框 (x1, y1, x2, y2)
+    xyxy: 候选框 (x1, y1, x2, y2)，位于 image 坐标系
+    full_image (Optional[np.ndarray]): 全分辨率 BGR 图；与 xyxy_full 成对
+        提供时优先从原图裁剪（极小目标在 1024 图上只剩几十像素，分类器
+        无法辨认——2026-09 漏检根因修复）
+    xyxy_full: 候选框在 full_image 坐标系中的位置
 
     返回:
     tuple[str, float]: (top1 鸟种名, 置信度百分比 0-100)；失败返回 ("", 0.0)
 
     Crop the candidate box and ask the BirdID classifier whether it is a
-    bird. Returns (top1 species name, confidence percent 0-100); ("", 0.0)
-    on any failure (model missing, load error) so the caller degrades
-    gracefully.
+    bird. When a full-resolution source is provided (with the box scaled
+    into its coordinates) the crop comes from there — tiny targets on the
+    1024 image leave the classifier only a few dozen pixels. Returns
+    (top1 species name, confidence percent 0-100); ("", 0.0) on any
+    failure (model missing, load error) so the caller degrades gracefully.
     """
     try:
         adapter = _get_rescue_birdid()
-        res = adapter.identify(image, top_k=1,
-                               bbox=tuple(int(v) for v in xyxy))
+        if full_image is not None and xyxy_full is not None:
+            res = adapter.identify(full_image, top_k=1,
+                                   bbox=tuple(int(v) for v in xyxy_full))
+        else:
+            res = adapter.identify(image, top_k=1,
+                                   bbox=tuple(int(v) for v in xyxy))
     except Exception:
         return "", 0.0
     if not res:
@@ -179,7 +240,8 @@ def _birdid_confirm(image: np.ndarray, xyxy) -> tuple:
 
 
 def _rescue_scan(model, image: np.ndarray, accept_conf: float,
-                 birdid_gate: int, dir, i18n) -> Optional[dict]:
+                 birdid_gate: int, dir, i18n,
+                 image_path: Optional[str] = None) -> Optional[dict]:
     """
     无鸟补救扫描：1024px 低阈值重扫 + BirdID 分类器守门。
 
@@ -196,6 +258,9 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
     birdid_gate (int): 弱候选识鸟确认门槛（百分比 0-100）
     dir: 日志目录
     i18n: I18n 实例（可为 None）
+    image_path (Optional[str]): 预览图文件路径；提供时规则 2 的守门裁剪
+        优先从全分辨率原图取框（1024 图上极小目标的裁剪像素过少，
+        分类器必然低分——2026-09 漏检根因）
 
     返回:
     Optional[dict]: 救回时含 xyxy/conf/mask/source/species/species_conf，
@@ -203,6 +268,9 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
 
     No-bird rescue scan: high-res low-threshold rescan with the BirdID
     classifier as gatekeeper. Returns the rescued candidate dict or None.
+    When image_path is given, the rule-2 confirmation crop prefers the
+    full-resolution source (tiny targets leave only a few dozen pixels
+    on the 1024 image, which the classifier cannot read).
     """
     t = i18n.t if i18n else get_i18n().t
     try:
@@ -279,7 +347,13 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
     if cand_i is None:
         return None
 
-    species, species_conf = _birdid_confirm(image, xyxy[cand_i])
+    full_image, xyxy_full = _load_fullres_for_confirm(
+        image, image_path, xyxy[cand_i])
+    if full_image is not None and xyxy_full is not None:
+        species, species_conf = _birdid_confirm(image, xyxy[cand_i],
+                                                full_image, xyxy_full)
+    else:
+        species, species_conf = _birdid_confirm(image, xyxy[cand_i])
     if species_conf >= birdid_gate:
         log_message(t("logs.rescue_confirmed", source=source, species=species,
                       conf=f"{species_conf:.0f}"), dir)
@@ -624,7 +698,8 @@ def detect_and_draw_birds(
         _adv = get_advanced_config()
         if _adv.rescue_scan_enabled:
             _rescue = _rescue_scan(model, image, ai_confidence,
-                                   _adv.rescue_birdid_gate, dir, i18n)
+                                   _adv.rescue_birdid_gate, dir, i18n,
+                                   image_path=image_path)
             if _rescue is not None:
                 # V5.0(multibird): 用重扫的全部鸟框重建检测结果（不再只
                 # 覆盖单只救回候选）——数组与 all_birds 索引天然对齐，下方

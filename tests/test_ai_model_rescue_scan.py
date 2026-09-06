@@ -59,6 +59,54 @@ def test_weak_bird_gate_accept(monkeypatch):
     assert r is not None and r["species"] == "红脚鹬"
 
 
+def test_weak_bird_gate_prefers_fullres_crop(tmp_path, monkeypatch):
+    """提供 image_path 且原图更高分辨率时，守门裁剪用缩放后的原图框。
+    With image_path and a higher-res source, the gate confirm must receive
+    the box scaled into full-resolution coordinates (tiny-target fix)."""
+    import cv2
+
+    # 预览图 2048x1366（预处理图 1024 的 2 倍），白色块标记预期裁剪区
+    big = np.full((1366, 2048, 3), 200, dtype=np.uint8)
+    big[20:120, 40:120] = 255
+    jpg = str(tmp_path / "full.jpg")
+    cv2.imwrite(jpg, big)
+
+    captured = {}
+
+    def fake_confirm(image, xyxy, full_image=None, xyxy_full=None):
+        captured["image_shape"] = image.shape[:2]
+        captured["xyxy"] = xyxy
+        captured["full_shape"] = (None if full_image is None
+                                  else full_image.shape[:2])
+        captured["xyxy_full"] = xyxy_full
+        return ("红脚鹬", 81.7)
+
+    monkeypatch.setattr(ai_model, "_birdid_confirm", fake_confirm)
+
+    # 候选框 (10, 10, 30, 50) 位于 1024 图 → 原图坐标系应为 (20, 20, 60, 100)
+    model = FakeModel([[10, 10, 30, 50]], [0.12], [14])
+    r = ai_model._rescue_scan(model, IMG, 0.5, 10, ".", None, image_path=jpg)
+
+    assert r is not None and r["species"] == "红脚鹬"
+    assert captured["xyxy_full"] == (20, 20, 60, 100)
+    assert captured["full_shape"] == (1366, 2048)
+
+
+def test_weak_bird_gate_falls_back_without_fullres(monkeypatch):
+    """无 image_path（或原图不更大）时保持旧 2 参数守门调用。
+    Without image_path the legacy two-argument confirm call is kept."""
+    model = FakeModel([[10, 10, 60, 60]], [0.12], [14])
+    captured = {}
+
+    def fake_confirm(image, xyxy):
+        captured["called"] = True
+        return ("红脚鹬", 81.7)
+
+    monkeypatch.setattr(ai_model, "_birdid_confirm", fake_confirm)
+    r = ai_model._rescue_scan(model, IMG, 0.5, 10, ".", None, image_path=None)
+    assert r is not None and captured["called"]
+
+
 def test_kite_candidate_gate_reject(monkeypatch):
     model = FakeModel([[10, 10, 60, 60]], [0.85], [33])  # kite
     monkeypatch.setattr(ai_model, "_birdid_confirm",

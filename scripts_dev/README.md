@@ -37,6 +37,8 @@ and algorithm calibration/validation. Boundary vs `scripts/`: scripts_dev may to
 | `validate_geo_filter.py` | 用 433 张法罗群岛/冰岛真实素材对地理过滤做回归验证（对照 spec §8） |
 | `validate_rescue_scan.py` | 用 39 张确认有鸟的漏检 ARW 验证无鸟补救扫描的救回率（跑真实模型推理） |
 | `reexport_sidecars.py` | 存量库 sidecar 升级重导：sqlite `mode=ro` 只读打开 report.db，复用生产导出逻辑只写 `meta/*.json`，零接触照片（原 tools/ 迁入） |
+| `diag_missed_detection.py` | 漏检诊断：对单张 RAW 复现「主检 640 / 补救 1024 / 单张全分辨率」三条 YOLO 链路并输出原始分数（只读） |
+| `scan_no_bird_rescue.py` | 无鸟照片补救扫描报告：用当前守门逻辑重判目录内全部 has_bird=0 照片并列出可救回清单；不写 report.db，仅重新生成无鸟预览到应用自管缓存 |
 
 ## 本地目录（不入库）/ Local-only dirs (untracked)
 

@@ -166,6 +166,7 @@ def cmd_process(args):
     print(t("cli.organize_files", value=t("cli.enabled") if args.organize else t("cli.disabled")))
     print(f"⚙️  ARW 写入: {adv_config.config.get('arw_write_mode')}")
     print(f"⚙️  清理临时: {'否' if adv_config.keep_temp_files else '是'}")
+    print(f"⚙️  视频封面入库: {'否' if args.no_videos else '是（有鸟默认2星）'}")
 
     if settings.auto_identify:
         print(f"⚙️  自动识鸟: 是 (有鸟照片，软片低地板拦截)")
@@ -187,6 +188,30 @@ def cmd_process(args):
         organize_files=args.organize,
         cleanup_temp=not adv_config.keep_temp_files  # 保留则不清理
     )
+
+    # V-cover 视频阶段：在照片阶段之后运行（照片阶段的 report.db 已关闭，
+    # 这里新开连接）。封面帧入库 + 有鸟默认 2 星（不进 V2 配额池）+
+    # 视频作为封面伴生文件一起归类；--no-videos 可整体跳过。
+    # V-cover video stage, after the photo stage (its report.db is closed,
+    # open a fresh one here). --no-videos skips it entirely.
+    if not args.no_videos:
+        from tools.report_db import ReportDB
+        from core.video_stage import process_directory_videos
+
+        video_db = ReportDB(args.directory)
+        try:
+            process_directory_videos(
+                dir_path=args.directory,
+                settings=settings,
+                config=adv_config,
+                report_db=video_db,
+                organize_files=args.organize,
+                max_frames=adv_config.config.get("video_max_frames", 60),
+                yolo_threshold=adv_config.config.get("video_yolo_threshold", 0.5),
+                log=processor._log,
+            )
+        finally:
+            video_db.close()
 
     print("\n✅ 处理完成!")
     return 0
@@ -976,6 +1001,11 @@ Examples:
                           help='不移动文件到分类文件夹')
     p_process.add_argument('--no-cleanup', action='store_false', dest='cleanup',
                           help='不清理临时JPG文件')
+    # V-cover 视频阶段：默认开启（封面帧入库+默认2星+视频伴生归类），可退出
+    # V-cover video stage: on by default (cover JPEG into report.db, fixed
+    # 2-star rating, video moves along with its cover).
+    p_process.add_argument('--no-videos', action='store_true', dest='no_videos',
+                          help='跳过视频阶段（不生成封面帧、不入库、不移动视频）')
     p_process.add_argument('-q', '--quiet', action='store_true', help='静默模式')
     p_process.add_argument('--cleanup-days', type=int, default=30,
                           help='自动清理周期（天），0=永久 (默认: 30)')

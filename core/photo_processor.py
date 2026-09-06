@@ -43,7 +43,7 @@ from core.flight_detector import FlightDetector, get_flight_detector, FlightResu
 from core.exposure_detector import ExposureDetector, get_exposure_detector, ExposureResult
 from core.focus_point_detector import get_focus_detector, verify_focus_in_bbox, arbitrate_focus_weights
 
-from constants import RATING_FOLDER_NAMES, RAW_EXTENSIONS, JPG_EXTENSIONS, HEIF_EXTENSIONS, get_rating_folder_names
+from constants import RATING_FOLDER_NAMES, RAW_EXTENSIONS, JPG_EXTENSIONS, HEIF_EXTENSIONS, get_rating_folder_names, VIDEO_COVER_SUFFIX
 
 # 国际化
 from tools.i18n import get_i18n
@@ -713,6 +713,15 @@ class PhotoProcessor:
                 continue
             
             file_prefix, file_ext = os.path.splitext(filename)
+            # V-cover：视频封面 JPEG（<视频名>_vcover.jpg）由视频阶段
+            # （core/video_stage.py）管理，不进照片管线——否则封面会被当作
+            # 纯 JPEG 照片二次处理并混入 V2 配额定星池。
+            # V-cover: cover JPEGs are managed by the video stage and must
+            # never enter the photo pipeline (they'd be re-processed as
+            # plain JPEGs and pollute the V2 quota pool).
+            if (file_ext.lower() in JPG_EXTENSIONS
+                    and file_prefix.endswith(VIDEO_COVER_SUFFIX)):
+                continue
             if file_ext.lower() in RAW_EXTENSIONS:
                 raw_dict[file_prefix] = file_ext
             elif file_ext.lower() in HEIF_EXTENSIONS:

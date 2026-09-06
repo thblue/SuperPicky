@@ -51,7 +51,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tools.report_db import ReportDB                       # noqa: E402
 from tools.merged_report_db import find_processed_subdirs  # noqa: E402
 from core.sidecar_export import export_directory_sidecars  # noqa: E402
-from constants import RATING_FOLDER_NAMES, RATING_FOLDER_NAMES_EN  # noqa: E402
+from constants import (                                    # noqa: E402
+    RATING_FOLDER_NAMES,
+    RATING_FOLDER_NAMES_EN,
+    VIDEO_COVER_SUFFIX,
+)
 
 # 视频/伴生文件扩展名（小写比较）/ extensions matched case-insensitively
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mpg', '.mpeg', '.m4v',
@@ -195,6 +199,51 @@ def _scan_videos(directory: str) -> List[VideoPlan]:
             if os.path.exists(dst_abs):
                 vp.status = 'conflict'
                 vp.detail = f'目标已存在 {os.path.basename(dst_abs)}'
+            plans.append(vp)
+    return plans
+
+
+def _scan_companion_videos(directory: str, db: ReportDB) -> List[VideoPlan]:
+    """
+    V-cover：扫描整理子目录里的伴生视频，生成随封面上移原子根的计划。
+
+    新视频流程（core/video_stage.py）不改视频名（区别于旧整理器的
+    `鸟种_日期_原名` 模板）：封面 <stem>_vcover.jpg 由照片计划自动移回根，
+    伴生视频 <stem>.mp4 依据「DB 存在 <stem>_vcover 封面记录」识别，
+    一并移回原子目录根——否则拍平后封面回根、视频滞留鸟种目录而失散。
+    旧模板改名的视频已被 _scan_videos 接管，此处天然不会重复（改名后的
+    stem 拼不出 `_vcover` 封面主键）。
+
+    参数:
+        directory (str): 原子目录绝对路径
+        db (ReportDB): 已打开的库
+
+    返回:
+        List[VideoPlan]: 待上移的伴生视频计划（原名不变，仅上移）
+
+    Scan sub-directory videos whose V-cover record exists in the DB and
+    plan moving them up to the atomic root alongside their restored covers.
+    """
+    prefixes = {row.get('filename') or '' for row in db.get_all_photos()}
+    plans: List[VideoPlan] = []
+    for dirpath, dirnames, filenames in os.walk(directory):
+        dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+        rel = os.path.relpath(dirpath, directory)
+        if rel == '.':
+            continue  # 根下的现行视频不动 / videos at the root stay
+        for fn in filenames:
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in VIDEO_EXTENSIONS:
+                continue
+            stem = os.path.splitext(fn)[0]
+            if (stem + VIDEO_COVER_SUFFIX) not in prefixes:
+                continue
+            vp = VideoPlan(path=os.path.join(rel, fn), new_name=fn,
+                           to_root=True)
+            dst_abs = os.path.join(directory, fn)
+            if os.path.exists(dst_abs):
+                vp.status = 'conflict'
+                vp.detail = f'目标已存在 {fn}'
             plans.append(vp)
     return plans
 
@@ -425,7 +474,9 @@ def _flatten_atomic(directory: str, execute: bool, log) -> bool:
     db = ReportDB(directory)
     try:
         photo_plans = _plan_photos(directory, db, log)
-        video_plans = _scan_videos(directory)
+        # 视频还原 = 旧模板改名还原 + V-cover 伴生视频随封面上移
+        # Videos = old renamed-template restore + V-cover companion moves.
+        video_plans = _scan_videos(directory) + _scan_companion_videos(directory, db)
     finally:
         pass
 

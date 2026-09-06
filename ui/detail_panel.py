@@ -309,6 +309,9 @@ class DetailPanel(QWidget):
         self._current_photo: Optional[dict] = None
         self._use_crop_view = False     # True=裁切图, False=全图
         self._loader: Optional[_ImageLoader] = None
+        # V-cover：当前记录的伴生视频路径（封面记录才有，None=普通照片）
+        # V-cover: companion video of the current cover record (None for photos).
+        self._companion_video: Optional[str] = None
 
         self.setFixedWidth(300)
         self.setStyleSheet(f"background-color: {COLORS['bg_elevated']}; border-left: 1px solid {COLORS['border_subtle']};")
@@ -348,6 +351,15 @@ class DetailPanel(QWidget):
         self._full_btn.clicked.connect(lambda: self._switch_view(False))
         vb_layout.addWidget(self._crop_btn)
         vb_layout.addWidget(self._full_btn)
+
+        # V-cover：打开伴生视频（仅当前记录是视频封面时可见，点击调系统播放器）
+        # V-cover: open the companion video (visible only for cover records).
+        self._open_video_btn = QPushButton(f"🎬 {self.i18n.t('browser.open_video')}")
+        self._open_video_btn.setObjectName("secondary")
+        self._open_video_btn.setFixedHeight(28)
+        self._open_video_btn.setVisible(False)
+        self._open_video_btn.clicked.connect(self._on_open_video)
+        vb_layout.addWidget(self._open_video_btn)
         layout.addWidget(view_bar)
 
         # --- 导航按钮 ---
@@ -630,6 +642,7 @@ class DetailPanel(QWidget):
         self._copy_exif_btn.setEnabled(True)
         self._refresh_image()
         self._refresh_metadata()
+        self._refresh_video_button()
 
     def set_current_photo(self, photo: dict):
         """
@@ -648,6 +661,7 @@ class DetailPanel(QWidget):
         self._current_photo = photo
         self._copy_exif_btn.setEnabled(True)
         self._refresh_metadata()
+        self._refresh_video_button()
 
     def clear(self):
         """清空面板。"""
@@ -674,6 +688,39 @@ class DetailPanel(QWidget):
     # ------------------------------------------------------------------
     #  内部
     # ------------------------------------------------------------------
+
+    def _refresh_video_button(self):
+        """
+        V-cover：刷新「打开视频」按钮的可见性。
+
+        当前记录是视频封面（current_path 指向 <stem>_vcover.jpg）且同目录
+        存在伴生视频时显示按钮，否则隐藏。照片字典由浏览器加载时已解析为
+        绝对路径（_resolve_photo_paths），companion_video_for_cover 直接可用。
+
+        V-cover: show the "open video" button only when the current record is
+        a video cover whose companion video exists next to it.
+        """
+        video = None
+        current = (self._current_photo or {}).get("current_path") or ""
+        if current and os.path.isabs(current):
+            try:
+                from core.video_cover import companion_video_for_cover
+                video = companion_video_for_cover(current)
+            except Exception:
+                video = None
+        self._companion_video = video
+        self._open_video_btn.setVisible(bool(video))
+
+    def _on_open_video(self):
+        """
+        V-cover：用系统默认播放器打开伴生视频。
+
+        V-cover: open the companion video with the OS default player.
+        """
+        if not self._companion_video:
+            return
+        from PySide6.QtGui import QDesktopServices, QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self._companion_video))
 
     def _toggle_caption(self):
         self._caption_expanded = not self._caption_expanded

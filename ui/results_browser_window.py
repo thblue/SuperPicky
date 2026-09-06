@@ -699,6 +699,27 @@ def _move_to_trash(filepath: str) -> bool:
         return False
 
 
+def _trash_cover_companion_video(filepath: str) -> bool:
+    """
+    V-cover：删除视频封面时，把伴生视频一并移入回收站（尽力而为）。
+
+    封面被删而视频留在原地会变成无 DB 记录的孤儿文件（浏览库不可见、
+    无法再清理），因此随封面一起进回收站。视频回收失败不阻塞封面删除
+    （与照片伴随 JPG 不阻塞主文件删除的行为一致）。
+
+    V-cover: trash the companion video together with its cover (best
+    effort). A coverless video would become an invisible orphan.
+    """
+    try:
+        from core.video_cover import companion_video_for_cover
+        video = companion_video_for_cover(filepath)
+        if video:
+            return _move_to_trash(video)
+    except Exception:
+        pass
+    return False
+
+
 def _load_error_msg(parent, text: str) -> None:
     """
     目录加载失败的提示：有界面时弹窗，离屏/无头时打印。
@@ -2309,6 +2330,10 @@ class ResultsBrowserWindow(QMainWindow):
             )
             return
 
+        # 2.5 V-cover：封面删除成功后伴生视频随行进回收站
+        if filepath:
+            _trash_cover_companion_video(filepath)
+
         # 3. DB 删除
         if self._db:
             self._db.delete_photo(_photo_db_key(photo))
@@ -2397,6 +2422,8 @@ class ResultsBrowserWindow(QMainWindow):
             filepath = photo.get("current_path") or photo.get("original_path") or ""
             if filepath:
                 if _move_to_trash(filepath):
+                    # V-cover：封面删除成功后伴生视频随行进回收站
+                    _trash_cover_companion_video(filepath)
                     deleted_photos.append(photo)
                 else:
                     failed_paths.append(filepath)

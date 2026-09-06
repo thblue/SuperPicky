@@ -85,6 +85,9 @@ def load_photos(db_path: str) -> List[Dict]:
     """
     从 report.db 读取重建 V2 指标所需的全部字段。
 
+    V-cover 视频封面行（filename 以 _vcover 结尾）被排除：封面是固定
+    2 星、不参与 V2 配额定星，也无锐度/TOPIQ 指标可重建。
+
     参数:
         db_path (str): report.db 路径
 
@@ -92,7 +95,11 @@ def load_photos(db_path: str) -> List[Dict]:
         List[Dict]: 每张照片一行（dict）
 
     Load all fields needed to rebuild V2 metrics from the report DB.
+    V-cover rows (filename ending with _vcover) are excluded: covers carry
+    a fixed 2-star rating with no V2 metrics to rebuild.
     """
+    from constants import VIDEO_COVER_SUFFIX
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -102,7 +109,8 @@ def load_photos(db_path: str) -> List[Dict]:
             " bird_species_en, bird_species_cn, adj_sharpness, adj_topiq"
             " FROM photos ORDER BY filename"
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in rows
+                if not (r["filename"] or "").endswith(VIDEO_COVER_SUFFIX)]
     finally:
         conn.close()
 

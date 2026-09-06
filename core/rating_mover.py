@@ -14,9 +14,46 @@ import threading
 from typing import Optional
 
 from core.folder_layout import compute_target_folder, normalize_layout
+from core.video_cover import companion_video_for_cover
 
 # Manifest 并发写保护 / concurrent-write guard for manifest JSON
 _manifest_lock = threading.Lock()
+
+
+def _update_video_manifest(dir_path: str, old_abs: str, new_abs: str) -> None:
+    """
+    V-cover：封面/视频被 rating_mover 二次移动后，同步改视频归类清单。
+
+    .superpicky_video_manifest.json 的 entry 形如 {"original", "video"}，
+    reset/spb_flatten 按其还原；不清 single-writer 语义地改结构，只把
+    命中旧位置的 "video" 值改写为新位置（还原链路保持一致）。
+
+    参数 / Args:
+        dir_path:  批处理根目录（清单所在目录）
+        old_abs:   移动前绝对路径
+        new_abs:   移动后绝对路径
+    """
+    from tools.video_organizer import VIDEO_MANIFEST_NAME
+
+    manifest_path = os.path.join(dir_path, VIDEO_MANIFEST_NAME)
+    if not os.path.exists(manifest_path):
+        return
+    old_norm = os.path.normpath(old_abs)
+    new_norm = os.path.normpath(new_abs)
+    with _manifest_lock:
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            changed = False
+            for entry in manifest.get("entries", []):
+                if os.path.normpath(entry.get("video", "")) == old_norm:
+                    entry["video"] = new_norm
+                    changed = True
+            if changed:
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 
 def _cleanup_empty_dirs(dir_path: str, old_folder_abs: str) -> None:
@@ -131,6 +168,12 @@ def move_photo_on_metadata_change(
     if os.path.exists(xmp_abs):
         files_to_move.append(("xmp", xmp_abs))
 
+    # V-cover：封面 JPEG 的伴生视频随封面一起移动（视频本体无 DB 行）
+    # V-cover: the companion video follows its cover JPEG.
+    video_abs = companion_video_for_cover(current_abs)
+    if video_abs:
+        files_to_move.append(("video", video_abs))
+
     # 8. 执行移动
     new_abs_folder = os.path.join(dir_path, new_rel_folder)
     os.makedirs(new_abs_folder, exist_ok=True)
@@ -150,6 +193,9 @@ def move_photo_on_metadata_change(
                 moved_raw_rel = rel
             elif kind == "jpeg":
                 moved_jpeg_rel = rel
+            elif kind == "video":
+                # 视频归类清单同步改写（reset/flatten 的还原依据）
+                _update_video_manifest(dir_path, src, dst)
         except Exception:
             pass
 
@@ -284,6 +330,11 @@ def _change_bird_species_single(
         if os.path.exists(xmp_abs):
             files_to_move.append(("xmp", xmp_abs))
 
+        # V-cover：改鸟种时伴生视频同样随封面移动 / video follows its cover
+        video_abs = companion_video_for_cover(current_abs)
+        if video_abs:
+            files_to_move.append(("video", video_abs))
+
         new_abs_folder = os.path.join(dir_path, new_rel_folder)
         os.makedirs(new_abs_folder, exist_ok=True)
 
@@ -301,6 +352,8 @@ def _change_bird_species_single(
                 elif kind == "jpeg":
                     path_update["temp_jpeg_path"] = rel
                     photo["temp_jpeg_path"] = os.path.join(dir_path, rel)
+                elif kind == "video":
+                    _update_video_manifest(dir_path, src, dst)
             except Exception:
                 pass
 

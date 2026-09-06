@@ -94,3 +94,15 @@ VIDEO_EXTENSIONS_ALL = (
     [ext.lower() for ext in VIDEO_EXTENSIONS] +
     [ext.upper() for ext in VIDEO_EXTENSIONS]
 )
+
+# V-cover（视频封面）保留文件名后缀：
+# 每个视频的代表性帧会落成一张真实 JPEG（<视频名>_vcover.jpg），作为一条普通
+# photos 记录进入 report.db，视频文件作为它的伴生文件跟随移动。
+# 该后缀是全仓库保留名——PhotoProcessor._scan_files 必须跳过 *_vcover.jpg，
+# 防止封面被照片管线当作纯 JPEG 二次处理（flat 布局/未整理时封面留在顶层）。
+# Reserved filename suffix for V-cover (video cover) JPEGs. The representative
+# frame of each video becomes a real JPEG named <stem>_vcover.jpg, stored as a
+# regular photos row; the video file follows it as a companion. Photo scanning
+# must skip *_vcover.jpg so covers are never re-processed as plain photos.
+VIDEO_COVER_SUFFIX = '_vcover'
+VIDEO_COVER_EXT = '.jpg'

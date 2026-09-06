@@ -104,6 +104,11 @@ class PostAdjustmentEngine:
 
         Returns:
             完整文件路径，或None（如果文件不存在）
+
+        注意：返回路径中的文件名取自磁盘真实存储名。Windows/SMB 大小写
+        不敏感，按候选扩展名拼造路径虽然 exists() 能命中，但把拼造的
+        大小写当成真名去 move 会篡改磁盘存储大小写（2026-08-31 restar
+        曾借此把 44 个 .CR3 改写成 .cr3）。
         """
         # 优先级：RAW > JPG > DNG
         raw_priority = [ext.lower() for ext in RAW_EXTENSIONS if ext.lower() not in ['.dng']]
@@ -113,18 +118,35 @@ class PostAdjustmentEngine:
 
         all_extensions = raw_priority + secondary_extensions + tertiary_extensions
 
-        # 先在根目录查找
-        for ext in all_extensions:
-            file_path = os.path.join(self.directory, filename_without_ext + ext)
-            if os.path.exists(file_path):
-                return file_path
+        # 先在根目录查找：建立「小写名 → 磁盘真实名」映射，
+        # 命中后返回真实存储名而非拼造名
+        try:
+            real_names = {}
+            for name in os.listdir(self.directory):
+                real_names.setdefault(name.lower(), name)
+        except OSError:
+            real_names = None
 
-        # 如果根目录找不到，递归搜索子目录
-        for root, dirs, files in os.walk(self.directory):
+        if real_names is not None:
             for ext in all_extensions:
-                target_filename = filename_without_ext + ext
-                if target_filename in files:
-                    return os.path.join(root, target_filename)
+                target = (filename_without_ext + ext).lower()
+                if target in real_names:
+                    return os.path.join(self.directory, real_names[target])
+        else:
+            # 目录不可枚举时的降级：退回 exists() 探测（可能返回拼造大小写）
+            for ext in all_extensions:
+                file_path = os.path.join(self.directory, filename_without_ext + ext)
+                if os.path.exists(file_path):
+                    return file_path
+
+        # 如果根目录找不到，递归搜索子目录（os.walk 的 files 本身就是
+        # 磁盘真实名，只把匹配改成大小写不敏感、返回真实名）
+        for root, dirs, files in os.walk(self.directory):
+            files_lower = {f.lower(): f for f in files}
+            for ext in all_extensions:
+                target = (filename_without_ext + ext).lower()
+                if target in files_lower:
+                    return os.path.join(root, files_lower[target])
 
         return None
 

@@ -376,7 +376,7 @@ def cmd_restar(args):
     from tools.exiftool_manager import get_exiftool_manager
     from advanced_config import get_advanced_config
     import shutil
-    
+
     print_banner()
     print(f"\n🔄 重新评星: {args.directory}")
     print(f"⚙️  新锐度阈值: {args.sharpness}")
@@ -384,8 +384,21 @@ def cmd_restar(args):
     print(f"⚙️  连拍检测: {'是' if args.burst else '否'}")
     print(t("cli.xmp", value=t("cli.enabled") if args.xmp else t("cli.disabled")))
 
+    # V2 配额模式下禁止 restar：本命令是 V1 绝对阈值逻辑（0★ 下限读
+    # 配置 min_sharpness/min_nima 而非 -s/-n，且无按种配额/pHash 相似簇/
+    # 眼睛封顶），无法复现 process 的 V2 定星——2026-08-31 事故后代码级
+    # 拒绝。V2 批次重定星走 rerate-v2 子命令。
+    adv_config_check = get_advanced_config()
+    if getattr(adv_config_check, 'rating_algorithm', 'v1') == 'v2':
+        print("\n❌ restar 不支持 rating_algorithm=v2。")
+        print("   本命令是 V1 绝对阈值逻辑，无法复现 V2 配额定星")
+        print("   （0★ 下限读配置而非 -s/-n，且无按种配额/相似簇/眼睛封顶）。")
+        print("   V2 批次重定星请使用:")
+        print("     superpicky_cli.py rerate-v2 <目录> [--min-conf 0.4 --execute]")
+        return 1
+
     # 更新 ARW 写入策略
-    adv_config = get_advanced_config()
+    adv_config = adv_config_check
     adv_config.config["arw_write_mode"] = "sidecar" if args.xmp else "embedded"
     adv_config.save()
     
@@ -551,40 +564,44 @@ def cmd_restar(args):
     picked_files = set()  # CLI 模式暂不支持精选计算
     engine.update_report_csv(new_photos, picked_files)
     
-    # 文件重分配
+    # 文件重分配（flat 布局 = 永不移动；评级目录整理只在显式布局下进行）
     if args.organize:
-        from constants import get_rating_folder_name
-        
-        moved_count = 0
-        for photo in changed_photos:
-            filename = photo.get('filename', '')
-            file_path = engine.find_image_file(filename)
-            if not file_path:
-                continue
-            
-            new_rating = photo.get('新星级', 0)
-            target_folder = get_rating_folder_name(new_rating)
-            target_dir = os.path.join(args.directory, target_folder)
-            target_path = os.path.join(target_dir, os.path.basename(file_path))
-            
-            if os.path.dirname(file_path) == target_dir:
-                continue
-            
-            try:
-                if not os.path.exists(target_dir):
-                    os.makedirs(target_dir)
-                if not os.path.exists(target_path):
-                    shutil.move(file_path, target_path)
-                    moved_count += 1
-            except Exception:
-                pass
-        
-        if moved_count > 0:
-            print(f"  ✅ 已移动 {moved_count} 个文件")
-        
-        # V4.0: 重新运行连拍检测
-        if args.burst:
-            _run_burst_detection_restar(args.directory)
+        folder_layout = getattr(adv_config, 'folder_layout', 'flat')
+        if folder_layout == 'flat':
+            print("\n📁 folder_layout=flat：跳过评级目录整理（不移动任何照片文件）")
+        else:
+            from constants import get_rating_folder_name
+
+            moved_count = 0
+            for photo in changed_photos:
+                filename = photo.get('filename', '')
+                file_path = engine.find_image_file(filename)
+                if not file_path:
+                    continue
+
+                new_rating = photo.get('新星级', 0)
+                target_folder = get_rating_folder_name(new_rating)
+                target_dir = os.path.join(args.directory, target_folder)
+                target_path = os.path.join(target_dir, os.path.basename(file_path))
+
+                if os.path.dirname(file_path) == target_dir:
+                    continue
+
+                try:
+                    if not os.path.exists(target_dir):
+                        os.makedirs(target_dir)
+                    if not os.path.exists(target_path):
+                        shutil.move(file_path, target_path)
+                        moved_count += 1
+                except Exception:
+                    pass
+
+            if moved_count > 0:
+                print(f"  ✅ 已移动 {moved_count} 个文件")
+
+            # V4.0: 重新运行连拍检测
+            if args.burst:
+                _run_burst_detection_restar(args.directory)
     
     print("\n✅ 重新评星完成!")
     return 0
@@ -993,7 +1010,26 @@ Examples:
     p_restar.add_argument('-y', '--yes', action='store_true',
                          help='跳过确认提示')
     p_restar.set_defaults(organize=True, burst=True, xmp=False)
-    
+
+    # ===== rerate-v2 命令（V2 配额重定星唯一入口） =====
+    p_rerate = subparsers.add_parser('rerate-v2',
+                                     help='V2 配额定星重算（不重跑检测/识鸟）')
+    p_rerate.add_argument('directory', help='照片目录路径')
+    p_rerate.add_argument('--min-conf', type=float, default=0.4,
+                          help='目标置信度门槛 0-1 (默认: 0.4，工作流定档)')
+    p_rerate.add_argument('--quota3', type=float, default=None,
+                          help='目标 3★ 配额%% (默认: 跟随配置 custom_quota3)')
+    p_rerate.add_argument('--quota2', type=float, default=None,
+                          help='目标 2★ 配额%% (默认: 跟随配置 custom_quota2)')
+    p_rerate.add_argument('--current-conf', type=float, default=None,
+                          help='显式指定现存评级所用置信门槛（覆盖日志解析，复核用）')
+    p_rerate.add_argument('--current-quota3', type=float, default=None,
+                          help='显式指定现存评级的 3★ 配额%%')
+    p_rerate.add_argument('--current-quota2', type=float, default=None,
+                          help='显式指定现存评级的 2★ 配额%%')
+    p_rerate.add_argument('--execute', action='store_true',
+                          help='写库（默认 dry-run；写前自动备份 report.db）')
+
     # ===== info 命令 =====
     p_info = subparsers.add_parser('info', help=t("cli.cmd_info"))
     p_info.add_argument('directory', help='照片目录路径')
@@ -1068,6 +1104,18 @@ Examples:
         return cmd_reset(args)
     elif args.command == 'restar':
         return cmd_restar(args)
+    elif args.command == 'rerate-v2':
+        from core.rerate_v2 import rerate_directory
+        return rerate_directory(
+            args.directory,
+            min_conf=args.min_conf,
+            quota3=args.quota3,
+            quota2=args.quota2,
+            execute=args.execute,
+            current_min_conf=args.current_conf,
+            current_quota3=args.current_quota3,
+            current_quota2=args.current_quota2,
+            log=print)
     elif args.command == 'info':
         return cmd_info(args)
     elif args.command == 'burst':

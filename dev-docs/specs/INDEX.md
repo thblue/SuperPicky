@@ -18,5 +18,6 @@
 | 2026-07-21 | [burst-best-pick-design](2026-07-21-burst-best-pick-design.md) 连拍代表照优选 | ✅ | [plans](../plans/2026-07-21-burst-best-pick.md) |
 | 2026-07-25 | [gbif-geo-filter-design](2026-07-25-gbif-geo-filter-design.md) GBIF 地理过滤 | ✅ | [plans](../plans/2026-07-25-gbif-geo-filter.md) |
 | 2026-08-29 | [spb-pixel-art-design](2026-08-29-spb-pixel-art-design.md) 像素图生成（写实风格定稿） | ✅ | （CLI 输入驱动，无独立 plan） |
+| 2026-09-06 | [review-tooling-consolidation-design](2026-09-06-review-tooling-consolidation-design.md) 选片工具链收敛（restar 废弃/rerate 转正/编辑器边界） | 🚧（M1–M4 已落地，M5/M6 待定） | 待写 |
 
 > 状态勘误：发现某功能实际未落地/已废弃时直接改本表并注明原因。

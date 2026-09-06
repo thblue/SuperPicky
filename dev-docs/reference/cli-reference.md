@@ -57,25 +57,30 @@ python superpicky_cli.py reset ~/Photos/Birds -y
 
 #### restar - 重新评星
 
+> ⛔ **`rating_algorithm=v2`（V2 配额制）下已被代码级禁用**（2026-09-06 起，
+> 执行即拒绝并退出）。restar 是 V1 绝对阈值逻辑：0★ 下限读 advanced_config
+> 的 `min_sharpness`/`min_nima` 而非 `-s/-n`，且无 V2 的按种配额/pHash
+> 相似簇/眼睛封顶，无法复现 V2 定星（2026-08-31 事故：全批 64 张被砸 0★，
+> 并经 `find_image_file` 拼造路径把 44 个扩展名改成小写——该缺陷已修复）。
+> V1 布局的存量用户可继续使用；organize 在 `folder_layout=flat` 下不移动文件。
+
+#### rerate-v2 - V2 配额重定星（V2 批次唯一入口）
+
 ```bash
-# 使用新阈值重新评星（⚠️ 仅 V1 阈值定星模式适用，见下）
-python superpicky_cli.py restar ~/Photos/Birds -s 700 -n 5.5
+# 默认 dry-run：打印自校验结果与新旧分布对比，不写库
+python superpicky_cli.py rerate-v2 ~/Photos/Birds
+
+# 确认后写库（自动备份 report.db，同步 sidecar processing.rating）
+python superpicky_cli.py rerate-v2 ~/Photos/Birds --min-conf 0.4 --execute
+
+# 自校验参数默认从目录 superpicky.log 最近一次跑批解析（置信门槛/3★ 配额，
+# quota2 回退当前配置），必要时显式覆盖：--current-conf/--current-quota3/--current-quota2
 ```
 
-> ⚠️ **`rating_algorithm=v2`（V2 配额制）下不可用**（2026-08-31 实测事故）：
-> restar 是 V1 绝对阈值逻辑，与 process 主流程的 V2 批内配额定星不是同一套算法，
-> 结果无法对齐。三个具体问题：
-> 1. **0★ 下限读配置而非参数**：0★ 判定用 advanced_config 的 `min_sharpness`/`min_nima`，
->    `-s/-n` 只影响 2/3★ 边界。配置收紧后（如 600/7.0）传 `-s 380 -n 4.8` 重跑，
->    会把全部有鸟照片砸成 0★。
-> 2. **无视 flat 布局移动文件**：按评级目录（`0星_放弃/` 等）重新分配文件，
->    `folder_layout=flat` 的目录会被拆出子目录。
-> 3. **V1/V2 算法不可互换**：V2 的按种分组配额、pHash 相似簇封顶、眼睛封顶
->    在 restar 里全部不存在，重算结果与 process 产物没有可比性。
->
-> **V2 批次重定星的正确工具**：`scripts_dev/rerate_v2_conf_gate.py`
-> （不重跑检测/识鸟，从 report.db 现成指标重建 V2 定星输入；默认 dry-run，
-> 自校验通过才允许 `--execute` 写库，写前自动备份）。
+- 逻辑：从 report.db 现成指标 + 日志鸟种标签重建 V2 定星输入，不重跑检测/识鸟；
+- 双自校验：现存参数复现存库评级（浏览器人工改星按「人工覆盖层」豁免并保留）
+  + 池内按鸟种分组与真实跑批明细一致；任一不过即拒绝写库；
+- 变更照片同步重写 DB caption 首行与 sidecar `processing.rating`，零接触照片文件。
 
 #### identify - 识别单张照片
 
@@ -233,23 +238,33 @@ python superpicky_cli.py reset ~/Photos/Birds -y
 
 #### restar - Re-rate Photos
 
+> ⛔ **Disabled at code level under `rating_algorithm=v2`** (since 2026-09-06;
+> execution is refused). restar implements the V1 absolute-threshold logic:
+> the 0-star floor is read from advanced_config `min_sharpness`/`min_nima`,
+> not `-s/-n`, and V2 features (per-species quotas, pHash clusters,
+> eye-visibility cap) are absent (2026-08-31 incident: a whole batch of 64
+> bird photos was zeroed, and 44 extensions were lowercased via the
+> constructed-path flaw in `find_image_file` — since fixed). V1-layout users
+> may keep using it; organize never moves files under `folder_layout=flat`.
+
+#### rerate-v2 - V2 Quota Re-rating (the only entry for V2 batches)
+
 ```bash
-# Re-rate with new thresholds (⚠️ V1 absolute-threshold mode only, see below)
-python superpicky_cli.py restar ~/Photos/Birds -s 700 -n 5.5
+# Dry-run by default: prints self-check results and the old/new distribution
+python superpicky_cli.py rerate-v2 ~/Photos/Birds
+
+# Write (auto-backs up report.db, syncs sidecar processing.rating)
+python superpicky_cli.py rerate-v2 ~/Photos/Birds --min-conf 0.4 --execute
 ```
 
-> ⚠️ **Not usable under `rating_algorithm=v2` (quota rating)** — verified via a
-> real incident on 2026-08-31. restar implements the V1 absolute-threshold
-> logic, which is a different algorithm from the V2 batch quota rating used by
-> `process`. Three concrete pitfalls: (1) the 0-star floor is read from
-> advanced_config `min_sharpness`/`min_nima`, not from `-s/-n` — re-running
-> with `-s 380 -n 4.8` after the config was tightened (600/7.0) zeroes every
-> bird photo; (2) it re-sorts files into rating subfolders (`0星_放弃/` etc.),
-> ignoring `folder_layout=flat`; (3) V2 features (per-species quota groups,
-> pHash similarity clusters, eye-visibility cap) don't exist in restar.
-> For V2 batches use `scripts_dev/rerate_v2_conf_gate.py` instead
-> (no re-detection/re-identification; dry-run by default, self-checks before
-> `--execute`, automatic DB backup).
+- Rebuilds V2 metrics from report.db fields + log species labels; no
+  re-detection/re-identification.
+- Dual self-checks: last-run parameters must reproduce stored ratings
+  (manual browser ratings are exempted as an overlay and preserved) and the
+  per-species pool grouping must match the real run; otherwise writing is
+  refused.
+- Changed photos get their DB caption head line and sidecar
+  `processing.rating` synced; photo files are never touched.
 
 #### identify - Identify Single Photo
 

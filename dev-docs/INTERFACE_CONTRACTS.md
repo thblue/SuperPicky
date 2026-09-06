@@ -26,6 +26,13 @@ SuperPicky 的 `spb_rename_species.py`。任何重构不得引入第二个写入
   - 人工 `edits` 字段原样保留；内容哈希导出戳增量重写；tmp + `os.replace` 原子写
 - 隐式依赖：`<库>/.superpicky/cache/temp_preview` 路径约定被 BirdIndex
   `indexer/thumb.py` / `indexer/sprite.py` 的取图链引用。
+- **V-cover 视频封面约定（2026-09 起，schema 不变）**：视频的代表性帧落成真实
+  JPEG `<视频名>_vcover.jpg`（`constants.VIDEO_COVER_SUFFIX`，**全仓库保留后缀**），
+  作为一条普通 photos 行入库并正常导出 sidecar。下游将看到 `*_vcover` 前缀的
+  sidecar——其 `photo.filename` 形如 `X_vcover.jpg`，伴生视频是同目录同 stem 的
+  `X.mp4/.mov/.m4v`（无自己的 sidecar/DB 行）。照片管线（`PhotoProcessor._scan_files`）
+  永远跳过 `*_vcover.jpg`；`rerate_v2` 跳过 `*_vcover` 行（封面固定 2 星，
+  不参与 V2 配额定星）。无鸟视频封面同 V5.5 不导出 sidecar。
 
 ## 2. report.db schema（照片库内 `.superpicky/report.db`）
 

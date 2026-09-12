@@ -36,7 +36,7 @@ class AdvancedConfig:
         "burst_min_count": 4,         # 连拍最少张数 (3-10) - 至少此数量连续照片才算连拍组
         
         # 鸟种识别设置 V4.2
-        "birdid_confidence": 50,      # 识别置信度阈值 (30-95) - 低于此值不写入EXIF
+        "birdid_confidence": 40,      # 识别置信度阈值 (30-95) - 低于此值不写入EXIF。40=工作流定档（2026-09-12 用户定档，50 漏掉临界柳莺/山雀）
 
         # 输出设置
         "save_csv": True,           # 是否保存CSV报告
@@ -355,7 +355,7 @@ class AdvancedConfig:
     
     @property
     def birdid_confidence(self):
-        return self.config.get("birdid_confidence", 50)
+        return self.config.get("birdid_confidence", 40)
 
     @property
     def save_csv(self):

@@ -25,7 +25,7 @@ def _isolated_config() -> AdvancedConfig:
 def test_rescue_defaults():
     cfg = _isolated_config()
     assert cfg.rescue_scan_enabled is True
-    assert cfg.rescue_birdid_gate == 10
+    assert cfg.rescue_birdid_gate == 25
 
 
 def test_rescue_setters_and_clamp():

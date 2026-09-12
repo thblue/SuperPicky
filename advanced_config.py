@@ -103,7 +103,7 @@ class AdvancedConfig:
         # V4.6: 无鸟补救扫描 (spec: dev-docs/specs/2026-07-14-no-bird-rescue-scan-design.md)
         # V4.6: No-bird rescue scan
         "rescue_scan_enabled": True,   # 判无鸟/低置信度时触发 1024px 重扫 + 识鸟守门
-        "rescue_birdid_gate": 10,      # 弱候选的识鸟确认门槛 (0-100, top1 置信度百分比)
+        "rescue_birdid_gate": 25,      # 弱候选的识鸟确认门槛 (0-100, top1 置信度百分比)。25=修复全分辨率守门裁剪后重校准（10 偏松曾放进枯花误救，2026-09-12 定档）
 
         # 多鸟逐鸟识别（multi-bird per-bird classification）
         # bird_count > 1 时对每个检测框单独做鸟种分类，结果入 bird_detections 表。

@@ -3254,6 +3254,24 @@ class PhotoProcessor:
                 quota2=quota2,
                 min_confidence=self.settings.ai_confidence / 100.0,
             )
+
+            # 本次生效参数持久化进 meta 表（2026-09-12 P1 修复）：rerate-v2
+            # 自校验按 meta > 日志 > 配置 读取。日志解析存在双语义风险
+            # （评级守门行 vs 识鸟低置信行），quota2 则根本不入日志——
+            # meta 是唯一无歧义的参数记录。写入失败不影响跑批。
+            # Persist this run's effective rating params into the meta table
+            # for rerate-v2's exact self-check; failure is non-fatal.
+            if self.report_db:
+                try:
+                    from core.rerate_v2 import (
+                        META_KEY_MIN_CONF, META_KEY_QUOTA2, META_KEY_QUOTA3)
+                    self.report_db.set_meta(
+                        META_KEY_MIN_CONF,
+                        f"{self.settings.ai_confidence / 100.0:.4f}")
+                    self.report_db.set_meta(META_KEY_QUOTA3, f"{quota3:.1f}")
+                    self.report_db.set_meta(META_KEY_QUOTA2, f"{quota2:.1f}")
+                except Exception:
+                    pass
             v2_changed = 0
             for prefix, pend in v2_pending.items():
                 res = v2_results.get(prefix)

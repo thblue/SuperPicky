@@ -59,8 +59,19 @@ LOWCONF_LINE_RE = re.compile(
     r"Low confidence \[([^\]]+)\]: (\S+) \(\d+%(?:\s*<[^)]*)?\)")
 # V2 定星汇总行里的 3★ 配额：🎯 V2 定星完成: 排序池 44 张, 3星 8 张 (配额20%, ...)
 QUOTA3_LINE_RE = re.compile(r"V2 定星完成.*配额(\d+)%")
-# 置信守门拒绝原因里的门槛：... 置信度26%<50% / 置信度太低(30%<50%)
-CONF_GATE_RE = re.compile(r"(\d+)%\s*<\s*(\d+)%")
+# 置信守门拒绝原因里的门槛。只匹配**无空格**的紧凑形态「NN%<MM%」：
+# 评级守门行是紧凑的（…0★ (置信度26%<40%)，MM = -c 门槛，是想要的）；
+# 识鸟低置信行带空格（…Low confidence…(44% < 50.0%)，MM = birdid 采纳
+# 阈值，不是想要的）。若放宽为 \s*<\s* 会双语义匹配、结果取决于行序运气
+# （2026-09-12 review 发现的潜伏 bug，此前三个日志均碰巧落在正确值）。
+CONF_GATE_RE = re.compile(r"(\d+)%<(\d+)%")
+
+# process 收尾写入 report.db meta 表的「本次生效参数」键 / run-param keys
+# written by the process post-pass。rerate-v2 按 meta 表 > 日志 > 当前配置
+# 的优先级读取：meta 无解析歧义，且 quota2 不入日志、只有 meta 能精确记录。
+META_KEY_MIN_CONF = "last_run_min_confidence"
+META_KEY_QUOTA3 = "last_run_quota3"
+META_KEY_QUOTA2 = "last_run_quota2"
 
 
 def iso_factor(iso_value: Optional[int]) -> float:
@@ -145,56 +156,71 @@ def parse_species_from_log(log_path: str) -> Dict[str, str]:
     return labels
 
 
-def parse_last_run_params(log_path: str, adv_config,
-                          log) -> Tuple[float, float, float, List[str]]:
+def load_run_params_from_meta(db_path: str) -> Dict[str, float]:
     """
-    从日志最近一次跑批解析「现存评级所用参数」，供自校验复现。
+    从 report.db meta 表读取上次 process 写入的生效参数。
 
-    解析来源：V2 定星汇总行的 3★ 配额；置信守门拒绝原因行「NN%<MM%」的
-    MM（最近一次跑批的置信门槛）。quota2 未入日志，回退当前配置并告警。
-    任何解析失败同样回退当前配置并告警——此时若自校验失败，应显式传
-    current 参数复核。
+    参数:
+        db_path (str): report.db 路径
+
+    返回:
+        Dict[str, float]: {"min_conf"/"quota3"/"quota2": 值}，仅含存在的键；
+        旧批次（2026-09-12 前）无这些键，返回空 dict，调用方回退日志解析
+
+    Read the effective parameters of the last process run from the meta
+    table; empty dict for pre-2026-09-12 batches (caller falls back to
+    log parsing).
+    """
+    params: Dict[str, float] = {}
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            for key, name in ((META_KEY_MIN_CONF, "min_conf"),
+                              (META_KEY_QUOTA3, "quota3"),
+                              (META_KEY_QUOTA2, "quota2")):
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+                if row and row[0] not in (None, ""):
+                    params[name] = float(row[0])
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return params
+
+
+def parse_last_run_params(log_path: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    从日志最近一次跑批解析置信门槛与 3★ 配额（纯日志解析，不做回退）。
+
+    解析来源：V2 定星汇总行的 3★ 配额；评级守门行「NN%<MM%」的 MM
+    （紧凑形态，见 CONF_GATE_RE 注释——识鸟低置信行带空格不会误匹配）。
+    quota2 不入日志，恒为 None，由调用方回退 meta/配置。
 
     参数:
         log_path (str): superpicky.log 路径
-        adv_config: 高级配置对象（回退值来源）
-        log: 打印回调
 
     返回:
-        Tuple[float, float, float, List[str]]: (min_conf, quota3, quota2, 告警列表)
+        Tuple[Optional[float], Optional[float]]: (min_conf, quota3)；
+        日志不存在或未命中为 (None, None)
 
-    Derive the parameters that produced the stored ratings from the run log,
-    falling back to the live config with warnings when unparseable.
+    Parse (min_conf, quota3) from the most recent run in the log; None
+    when absent — fallbacks are the caller's job.
     """
-    warnings: List[str] = []
     min_conf: Optional[float] = None
     quota3: Optional[float] = None
-
-    if os.path.exists(log_path):
-        with open(log_path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                plain = ANSI_RE.sub("", line)
-                m = QUOTA3_LINE_RE.search(plain)
-                if m:
-                    quota3 = float(m.group(1))
-                for cm in CONF_GATE_RE.finditer(plain):
-                    # 文件按时间追加，最后一次命中即最近一次跑批的门槛
-                    min_conf = float(cm.group(2)) / 100.0
-
-    if min_conf is None:
-        fallback = float(getattr(adv_config, "min_confidence", 0.5))
-        warnings.append(f"日志未解析到置信门槛，回退当前配置 {fallback}")
-        min_conf = fallback
-    if quota3 is None:
-        fallback3 = get_quota3_for_skill(
-            getattr(adv_config, "skill_level", "custom"), adv_config)
-        warnings.append(f"日志未解析到 3★ 配额，回退当前配置 {fallback3:.0f}%")
-        quota3 = float(fallback3)
-    quota2 = float(get_quota2_for_skill(
-        getattr(adv_config, "skill_level", "custom"), adv_config))
-    warnings.append(f"quota2 未入日志，按当前配置 {quota2:.0f}% 自校验")
-
-    return min_conf, quota3, quota2, warnings
+    if not os.path.exists(log_path):
+        return min_conf, quota3
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            plain = ANSI_RE.sub("", line)
+            m = QUOTA3_LINE_RE.search(plain)
+            if m:
+                quota3 = float(m.group(1))
+            for cm in CONF_GATE_RE.finditer(plain):
+                # 文件按时间追加，最后一次命中即最近一次跑批的门槛
+                min_conf = float(cm.group(2)) / 100.0
+    return min_conf, quota3
 
 
 def build_metrics(rows: List[Dict],
@@ -433,18 +459,43 @@ def rerate_directory(directory: str, min_conf: float = 0.4,
 
     # ---- 分组校验和：现存门槛下的池内分组应与真实跑批明细一致 ----
     real_breakdown = _parse_real_breakdown(log_path)
-    last_conf, last_q3, last_q2, warnings = parse_last_run_params(
-        log_path, adv_config, log)
+
+    # 「现存评级所用参数」解析，逐键取最优来源：
+    # CLI 显式覆盖 > meta 表（process 收尾写入，无歧义）> 日志解析 > 当前配置。
+    # 旧批次（2026-09-12 前）无 meta，依赖日志/配置回退并告警。
+    meta_params = load_run_params_from_meta(db_path)
+    log_conf, log_q3 = parse_last_run_params(log_path)
+
+    skill_level = getattr(adv_config, "skill_level", "custom")
+    last_conf = float(getattr(adv_config, "min_confidence", 0.5))
+    last_q3 = float(get_quota3_for_skill(skill_level, adv_config))
+    last_q2 = float(get_quota2_for_skill(skill_level, adv_config))
+    src_conf = src_q3 = src_q2 = "配置回退"
+    if log_conf is not None:
+        last_conf, src_conf = log_conf, "日志"
+    if log_q3 is not None:
+        last_q3, src_q3 = log_q3, "日志"
+    if "min_conf" in meta_params:
+        last_conf, src_conf = meta_params["min_conf"], "meta表"
+    if "quota3" in meta_params:
+        last_q3, src_q3 = meta_params["quota3"], "meta表"
+    if "quota2" in meta_params:
+        last_q2, src_q2 = meta_params["quota2"], "meta表"
+    elif "quota3" not in meta_params:
+        log(f"⚠️ quota2 未入日志且无 meta（2026-09-12 前的批次），"
+            f"按当前配置 {last_q2:.0f}% 自校验；不符时用 --current-quota2 指定历史值")
+    if src_conf == "配置回退":
+        log(f"⚠️ meta/log 均无置信门槛，回退当前配置 {last_conf}")
+    if src_q3 == "配置回退":
+        log(f"⚠️ meta/log 均无 3★ 配额，回退当前配置 {last_q3:.0f}%")
     if current_min_conf is not None:
-        last_conf = current_min_conf
+        last_conf, src_conf = current_min_conf, "CLI覆盖"
     if current_quota3 is not None:
-        last_q3 = current_quota3
+        last_q3, src_q3 = current_quota3, "CLI覆盖"
     if current_quota2 is not None:
-        last_q2 = current_quota2
-    for w in warnings:
-        log(f"⚠️ {w}")
-    log(f"🔍 现存评级参数（日志解析/显式覆盖）: conf={last_conf} "
-        f"quota3={last_q3:.0f}% quota2={last_q2:.0f}%")
+        last_q2, src_q2 = current_quota2, "CLI覆盖"
+    log(f"🔍 现存评级参数（来源 conf={src_conf} q3={src_q3} q2={src_q2}）: "
+        f"conf={last_conf} quota3={last_q3:.0f}% quota2={last_q2:.0f}%")
 
     pool070 = [m for m in metrics.values()
                if gate_photo(m, min_confidence=last_conf) is None]

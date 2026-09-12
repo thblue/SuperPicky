@@ -62,6 +62,87 @@ def read_bgr(path: str) -> Optional[np.ndarray]:
         return None
 
 
+def repair_photos_rarity(root: str, db_path: str, execute: bool,
+                         log=print) -> int:
+    """
+    修复模式：为「已定种但 photos 行缺稀有度列」的照片补齐稀有度四列。
+
+    背景（2026-09-12 P2-2 修复）：正常采纳路径会连 iucn/gbif/aesthetic/
+    china_protection 四列一起写 photos 行（photo_processor），早期版本的
+    本脚本只写了鸟种+置信（detections 行倒是有 gbif/china）。本模式不重跑
+    推理、不动鸟种与置信：gbif/china 从主鸟 detections 行原样复制，
+    iucn/aesthetic 按 detections.class_id 查参考库（鸟种级常量，无漂移）。
+
+    参数:
+        root (str): 照片目录（未用，保持签名一致）
+        db_path (str): report.db 路径
+        execute (bool): 写库（默认 dry-run）
+        log: 打印回调
+
+    返回:
+        int: 0 成功；1 无待修复
+
+    Repair mode: fill the four photos-level rarity columns for species-
+    adopted photos missing them, from the detections row + reference DB.
+    Never touches species/confidence.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("""
+        SELECT p.filename, d.class_id, d.gbif_rarity_100, d.china_protection_level
+        FROM photos p
+        JOIN bird_detections d ON d.filename = p.filename AND d.is_selected = 1
+        WHERE p.has_bird = 1
+          AND p.bird_species_cn IS NOT NULL AND p.bird_species_cn != ''
+          AND p.gbif_rarity_100 IS NULL AND p.iucn_category IS NULL
+        ORDER BY p.filename""").fetchall()
+    conn.close()
+    if not rows:
+        log("无待修复照片（稀有度列齐全或无主鸟检测行）")
+        return 0
+    log(f"待修复稀有度列: {len(rows)} 张")
+
+    from birdid.bird_database_manager import BirdDatabaseManager
+    mgr = BirdDatabaseManager()
+
+    plans = []
+    for r in rows:
+        if r["class_id"] is None:
+            log(f"  ⚠️ {r['filename']}: detections 行无 class_id，跳过")
+            continue
+        iucn = mgr.get_iucn_by_class_id(int(r["class_id"]))
+        aesthetic = mgr.get_aesthetic_by_class_id(int(r["class_id"]))
+        plans.append((r["filename"], iucn, r["gbif_rarity_100"],
+                      aesthetic, r["china_protection_level"]))
+        log(f"  {r['filename']}: iucn={iucn} gbif={r['gbif_rarity_100']} "
+            f"aesthetic={aesthetic if aesthetic is not None else '-'} "
+            f"china={r['china_protection_level']}")
+
+    if not execute:
+        log("（dry-run，未写库。确认后加 --execute 执行）")
+        return 0
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    bak = db_path + f".bak_修复稀有度_{ts}"
+    shutil.copy(db_path, bak)
+    log(f"📦 已备份: {os.path.basename(bak)}")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        for fn, iucn, gbif, aesthetic, china in plans:
+            cur.execute(
+                "UPDATE photos SET iucn_category=?, gbif_rarity_100=?,"
+                " aesthetic_index=?, china_protection_level=?,"
+                " updated_at=CURRENT_TIMESTAMP WHERE filename=?",
+                (iucn, gbif, aesthetic, china, fn))
+        conn.commit()
+        log(f"✅ 已修复 {len(plans)} 张的稀有度四列")
+    finally:
+        conn.close()
+    return 0
+
+
 def main() -> int:
     """
     补种主流程：查未定种 → 逐张重识别 → dry-run 报告 / --execute 采纳写库。
@@ -74,12 +155,18 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=40.0,
                     help="采纳门槛（百分比，默认 40）")
     ap.add_argument("--country", default="CN", help="地理过滤国家码（默认 CN）")
+    ap.add_argument("--repair-rarity", action="store_true",
+                    help="修复模式：只补已定种照片缺失的稀有度四列"
+                         "（不重跑推理、不动鸟种与置信）")
     ap.add_argument("--execute", action="store_true",
                     help="写库（默认 dry-run；写前自动备份 report.db）")
     args = ap.parse_args()
 
     root = os.path.normpath(args.directory)
     db_path = os.path.join(root, ".superpicky", "report.db")
+
+    if args.repair_rarity:
+        return repair_photos_rarity(root, db_path, args.execute, log=print)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("""
@@ -174,10 +261,13 @@ def main() -> int:
             top, prefix = e["top"], e["prefix"]
             cur.execute(
                 "UPDATE photos SET bird_species_cn=?, bird_species_en=?,"
-                " birdid_confidence=?, updated_at=CURRENT_TIMESTAMP"
-                " WHERE filename=?",
+                " birdid_confidence=?, iucn_category=?, gbif_rarity_100=?,"
+                " aesthetic_index=?, china_protection_level=?,"
+                " updated_at=CURRENT_TIMESTAMP WHERE filename=?",
                 (top.get("cn_name"), top.get("en_name"),
-                 e["conf"], prefix))
+                 e["conf"], top.get("iucn_category"),
+                 top.get("gbif_rarity_100"), top.get("aesthetic_index"),
+                 top.get("china_protection_level"), prefix))
             cur.execute(
                 "UPDATE bird_detections SET species_cn=?, species_en=?,"
                 " scientific_name=?, species_confidence=?, class_id=?,"

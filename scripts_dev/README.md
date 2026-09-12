@@ -16,7 +16,7 @@ and algorithm calibration/validation. Boundary vs `scripts/`: scripts_dev may to
 | `backfill_china_fields.py` | 为历史 `.superpicky/report.db` 回填中国稀有度 + 国家保护等级两列 | 内置 v12→v13 迁移；先在 `_backfill_sandbox/` 副本验证，再上真库；配套测试 `test_backfill_china_fields.py` |
 | `run_backfill_all.py` | 批量驱动上一脚本：目录清单读自 `G:/code/BirdIndex/config.json` 的 `photo_roots`（77+ NAS 库） | 全量回填已执行完毕（2026-08）；重跑前务必确认 `--dry-run` 行为与目标清单 |
 | `rerate_v2_conf_gate.py` | V2 配额重定星：不重跑检测/识鸟，从 report.db 现成指标 + 日志鸟种标签重建定星输入（替代 V2 模式下不可用的 CLI `restar`，见 cli-reference.md） | 默认 dry-run；两道自校验（当前参数复现存库评级 + 鸟种分组校验和）不通过即拒绝写库；`--execute` 前自动备份 report.db；只写 rating/caption，零接触照片文件。**已转正为 CLI `rerate-v2` 子命令，本脚本仅剩薄壳** |
-| `backfill_species.py` | 未定种照片补种：按指定采纳门槛（如 40%）对有鸟未定种照片重识别，镜像写入 photos / bird_detections / sidecar 三处 | 默认 dry-run；`--execute` 前自动备份 report.db；零接触照片文件；低置信段（40-50%）候选错误率偏高，采纳后需人工复核 |
+| `backfill_species.py` | 未定种照片补种：按指定采纳门槛（如 40%）对有鸟未定种照片重识别，镜像写入 photos / bird_detections / sidecar 三处（含 photos 级稀有度四列）；`--repair-rarity` 模式修复已定种照片缺失的稀有度列（不重跑推理、不动鸟种） | 默认 dry-run；`--execute` 前自动备份 report.db；零接触照片文件；低置信段（40-50%）候选错误率偏高，采纳后需人工复核 |
 
 ### 🟡 写 birdid 参考库 / Writes birdid reference DBs (`birdid/data/*.sqlite`)
 

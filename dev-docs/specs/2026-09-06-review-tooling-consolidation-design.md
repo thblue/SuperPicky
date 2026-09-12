@@ -142,6 +142,17 @@ DB `current_path` 仍全为大写，与磁盘不一致（Windows 下无功能影
 
 ## 8. 实施记录与偏差 / Implementation Notes（2026-09-06）
 
+> 2026-09-12 追加（模型自查 review 修复）：
+> - **P1**：rerate-v2 日志参数解析的正则 `(\d+)%\s*<\s*(\d+)%` 同时匹配评级
+>   守门行（紧凑，MM = -c）与识鸟低置信行（带空格，MM = birdid 阈值），
+>   结果取决于行序。修正为仅匹配紧凑形态；并让 process 收尾把生效参数
+>   （min_conf/quota3/quota2）写入 report.db meta 表，rerate 按
+>   meta > 日志 > 配置 解析（同时解决 quota2 不入日志的历史盲区）。
+> - **P2-2**：backfill_species 采纳时漏写 photos 级稀有度四列
+>   （iucn/gbif_rarity_100/aesthetic_index/china_protection）——已补；
+>   存量 25 张经 `--repair-rarity` 模式修复（detections 行复制 gbif/china，
+>   class_id 查参考库补 iucn/aesthetic，不动鸟种与置信）。
+
 - **D1 简化**：flat 布局下 organize 一律不移动（未设 `--organize` 覆盖开关
   ——移动与 flat 语义本就互斥，多一个开关只增加误用面）。
 - **D2 实现形态**：核心逻辑入 `core/rerate_v2.py`（CLI 与 scripts_dev 薄壳

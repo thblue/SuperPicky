@@ -78,6 +78,10 @@ python superpicky_cli.py rerate-v2 ~/Photos/Birds --min-conf 0.4 --execute
 ```
 
 - 逻辑：从 report.db 现成指标 + 日志鸟种标签重建 V2 定星输入，不重跑检测/识鸟；
+- 「现存评级参数」按 **meta 表 > 日志解析 > 当前配置** 逐键解析（2026-09-12
+  起 process 收尾把生效参数写入 report.db meta 表；旧批次回退日志——评级行
+  紧凑格式解析，与识鸟低置信行严格区分），必要时用 `--current-conf/
+  --current-quota3/--current-quota2` 显式覆盖；
 - 双自校验：现存参数复现存库评级（浏览器人工改星按「人工覆盖层」豁免并保留）
   + 池内按鸟种分组与真实跑批明细一致；任一不过即拒绝写库；
 - 变更照片同步重写 DB caption 首行与 sidecar `processing.rating`，零接触照片文件。

@@ -22,7 +22,7 @@ description: 对指定照片文件夹执行 SuperPicky 标准批量处理（检�
 
 ```bash
 cd G:/code/SuperPicky
-.venv/Scripts/python.exe -X utf8 superpicky_cli.py process -i "<目录>" --birdid-country CN -c 40
+.venv/Scripts/python.exe -X utf8 superpicky_cli.py process -i "<目录>" --birdid-country CN -c 40 --birdid-threshold 40
 ```
 
 - **`-i`（= `--auto-identify`）必须显式加**：识鸟总开关只认这个 CLI 参数、不回落配置。
@@ -33,6 +33,10 @@ cd G:/code/SuperPicky
 - **`-c 40`（AI 置信度门槛）是本工作流的定档参数**（2026-09-06 用户定档 40，
   50 偏严）：显式传以覆盖配置（当前配置 min_confidence=0.7）。它同时控制
   有鸟判定、V2 排序池入池线和补救扫描的直接救回线，影响星级密度。
+- **`--birdid-threshold 40`（鸟种采纳/存储门槛）同为本工作流定档参数**
+  （2026-09-12 用户定档 40，GUI 配置 birdid_confidence 仍为 50）：低于 50%
+  但 ≥40% 的候选会正式定种入库。注意种名错误率随之上升，跑后对「可疑
+  鸟种」（跨分布物种、低置信 40-50% 段）的人工复核更重要。
 - **视频阶段默认开启**（不需要额外参数）：目录里的 MP4/MOV/M4V 会在照片阶段后
   自动抽「YOLO 置信度最高的有鸟帧」生成封面 `<视频名>_vcover.jpg`，作为普通
   photos 记录入库——有鸟默认 **2 星**（不进 40%/20% 配额定星）、无鸟 -1 不出
@@ -74,13 +78,16 @@ cd G:/code/SuperPicky
 视频封面与照片操作完全一致（改星/改种/多鸟编辑/删除），详情面板「打开视频」
 按钮可直接调系统播放器播放伴生视频。
 
-## 6. 事后改星（常见后续需求）
+## 6. 事后改星 / 补种（常见后续需求）
 
-- **不要用 `superpicky_cli.py restar`**：V2 配额模式下它会用配置里的 0★ 下限
-  （而非 `-s/-n` 参数）把全部照片砸成 0★，还会无视 flat 布局把照片移进
-  `0星_放弃/` 等子目录（2026-08-31 事故，详见 dev-docs/reference/cli-reference.md）。
-- **用** `scripts_dev/rerate_v2_conf_gate.py`：不重跑检测/识鸟，从 report.db 重建
-  V2 定星输入；默认 dry-run，自校验（复现存库评级 + 鸟种分组校验和）通过后
-  加 `--execute` 写库，写前自动备份。改 `-c` 置信门槛用 `--min-conf`，
-  改 2★ 名额用 `--quota2`。视频封面行（`*_vcover`）已被该工具自动跳过——
-  封面是固定 2 星，不受批量重定星影响；要改单个视频的星级在浏览库里手改即可。
+- **不要用 `superpicky_cli.py restar`**：V2 配额模式下已被代码级禁用
+  （执行即拒绝；2026-08-31 事故，详见 dev-docs/reference/cli-reference.md）。
+- **重定星用** `superpicky_cli.py rerate-v2 <目录> [--min-conf 0.4 --execute]`：
+  不重跑检测/识鸟，从 report.db 重建 V2 定星输入；默认 dry-run，双自校验
+  （复现存库评级、人工改星豁免保留 + 鸟种分组校验和）通过后写库，写前
+  自动备份并同步 sidecar。改 2★ 名额用 `--quota2`。视频封面行
+  （`*_vcover`）自动跳过——封面固定 2 星，改单个视频星级在浏览库手改。
+- **未定种补种用** `scripts_dev/backfill_species.py <目录> --threshold 40
+  --execute`：仅对有鸟未定种的照片按新采纳门槛重识别，镜像写入
+  photos / bird_detections / sidecar 三处，dry-run 默认、写前备份。
+  低置信候选（40-50% 段）错误率偏高，采纳后建议人工过目。

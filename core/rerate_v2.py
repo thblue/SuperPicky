@@ -417,6 +417,7 @@ def rerate_directory(directory: str, min_conf: float = 0.4,
                      current_min_conf: Optional[float] = None,
                      current_quota3: Optional[float] = None,
                      current_quota2: Optional[float] = None,
+                     metrics_rebuilt: bool = False,
                      log=print) -> int:
     """
     V2 重定星主入口：自校验 → 模拟目标方案 →（可选）写库。
@@ -428,12 +429,20 @@ def rerate_directory(directory: str, min_conf: float = 0.4,
         execute (bool): 写库（默认 dry-run）
         current_min_conf / current_quota3 / current_quota2:
             显式指定「现存评级所用参数」覆盖日志解析（自校验复核用）
+        metrics_rebuilt (bool): 指标已重算模式——调用方（如
+            scripts_dev/recalc_gamma_scores.py 流程）刚更新过 DB 的
+            锐度/TOPIQ 指标列。分组校验和自校验的前提是「指标未变、
+            能精确复现存库评级」，该前提下两层校验必然失败，显式跳过；
+            全部照片按新指标重算（无人工改星豁免层）。
         log: 打印回调
 
     返回:
         int: 0 成功；1 前置错误；2 自校验失败
 
     Full V2 re-rating entry: self-check, simulate, optionally write.
+    metrics_rebuilt skips both reproduction checks (group checksum +
+    self-check) whose "metrics unchanged" premise no longer holds after
+    an upstream metrics recalculation.
     """
     from advanced_config import get_advanced_config
 
@@ -503,41 +512,46 @@ def rerate_directory(directory: str, min_conf: float = 0.4,
     for m in pool070:
         sim_breakdown[m.species or "未识别"] = \
             sim_breakdown.get(m.species or "未识别", 0) + 1
-    log(f"🔍 池内分组: 模拟={dict(sorted(sim_breakdown.items(), key=lambda x: -x[1]))}")
-    log(f"           真实={dict(sorted(real_breakdown.items(), key=lambda x: -x[1]))}")
-    if real_breakdown and sim_breakdown != real_breakdown:
-        log("❌ 分组校验和不一致（鸟种标签还原有误，禁止写库）")
-        return 2
-    log("✅ 分组校验和一致")
+    if metrics_rebuilt:
+        log("ℹ️ 指标已重算模式：跳过分组校验与自校验（复现前提「指标未变」"
+            "已不成立），全部照片按新指标重算")
+    else:
+        log(f"🔍 池内分组: 模拟={dict(sorted(sim_breakdown.items(), key=lambda x: -x[1]))}")
+        log(f"           真实={dict(sorted(real_breakdown.items(), key=lambda x: -x[1]))}")
+        if real_breakdown and sim_breakdown != real_breakdown:
+            log("❌ 分组校验和不一致（鸟种标签还原有误，禁止写库）")
+            return 2
+        log("✅ 分组校验和一致")
 
     # ---- 自校验：现存参数应精确复现存库评级（人工改星作为覆盖层豁免） ----
-    check_res = simulate(metrics, root, last_conf, last_q3, last_q2)
-    check = {k: r.rating for k, r in check_res.items()}
-    mismatch = [(k, old[k], check.get(k)) for k in metrics
-                if old[k] != check.get(k)]
-    # 浏览器里的人工改星（_on_rating_changed 直写 DB）是有意覆盖管线输出
-    # 的合法操作，少量不符按「人工评级」处理：重算时保留、不重写 caption/
-    # sidecar；超过容忍度则更可能是重建缺陷，拒绝写库。
-    manual_tolerance = max(3, int(len(metrics) * 0.1))
     manual_keys: set = set()
-    if mismatch:
-        if len(mismatch) <= manual_tolerance:
-            manual_keys = {k for k, _o, _n in mismatch}
-            log(f"ℹ️ {len(mismatch)} 张与管线复算不符（≤容忍度 {manual_tolerance}），"
-                "判定为人工改星，重算将保留这些人工评级:")
-            for k, o, n in mismatch:
-                log(f"   {k}: 管线复算={n}，保留人工评级 {o}★")
+    if not metrics_rebuilt:
+        check_res = simulate(metrics, root, last_conf, last_q3, last_q2)
+        check = {k: r.rating for k, r in check_res.items()}
+        mismatch = [(k, old[k], check.get(k)) for k in metrics
+                    if old[k] != check.get(k)]
+        # 浏览器里的人工改星（_on_rating_changed 直写 DB）是有意覆盖管线输出
+        # 的合法操作，少量不符按「人工评级」处理：重算时保留、不重写 caption/
+        # sidecar；超过容忍度则更可能是重建缺陷，拒绝写库。
+        manual_tolerance = max(3, int(len(metrics) * 0.1))
+        if mismatch:
+            if len(mismatch) <= manual_tolerance:
+                manual_keys = {k for k, _o, _n in mismatch}
+                log(f"ℹ️ {len(mismatch)} 张与管线复算不符（≤容忍度 {manual_tolerance}），"
+                    "判定为人工改星，重算将保留这些人工评级:")
+                for k, o, n in mismatch:
+                    log(f"   {k}: 管线复算={n}，保留人工评级 {o}★")
+            else:
+                log(f"\n❌ 自校验失败：{len(mismatch)} 张与现存评级不符"
+                    f"（超过人工改星容忍度 {manual_tolerance}，疑似重建缺陷，禁止写库）")
+                for k, o, n in mismatch[:10]:
+                    log(f"   {k}: DB={o}  复算={n}")
+                log("   若现存评级确由其他参数产生，请用 --current-conf/--current-quota3/"
+                    "--current-quota2 显式指定后重试。")
+                return 2
         else:
-            log(f"\n❌ 自校验失败：{len(mismatch)} 张与现存评级不符"
-                f"（超过人工改星容忍度 {manual_tolerance}，疑似重建缺陷，禁止写库）")
-            for k, o, n in mismatch[:10]:
-                log(f"   {k}: DB={o}  复算={n}")
-            log("   若现存评级确由其他参数产生，请用 --current-conf/--current-quota3/"
-                "--current-quota2 显式指定后重试。")
-            return 2
-    else:
-        log(f"✅ 自校验通过：conf={last_conf} + 配额 {last_q3:.0f}/{last_q2:.0f} "
-            "精确复现存库评级")
+            log(f"✅ 自校验通过：conf={last_conf} + 配额 {last_q3:.0f}/{last_q2:.0f} "
+                "精确复现存库评级")
 
     # ---- 目标方案模拟 ----
     eff_q3 = quota3 if quota3 is not None else float(get_quota3_for_skill(

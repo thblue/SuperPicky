@@ -1,6 +1,6 @@
 ---
 name: batch-identify
-description: 对指定照片文件夹执行 SuperPicky 标准批量处理（检测→评分→定星→识鸟→视频封面入库→产出浏览库）。只要用户提到「批量识别」「批量处理」「跑批」「处理一下这批/这个文件夹」且涉及鸟片目录（如 \\NAS-server\PHOTO\观鸟\ 下的新拍文件夹），或者说「跟之前一样处理」，就用本 skill。固化了实测过的命令参数、跑前检查、跑后核对与汇报格式。
+description: 对指定照片文件夹执行 SuperPicky 标准批量处理（检测→评分→定星→识鸟→视频封面入库→产出浏览库），含 DPP 伽马编辑检测与重跑（刷亮缩略图→重算指标→补种→重定星）。只要用户提到「批量识别」「批量处理」「跑批」「处理一下这批/这个文件夹」且涉及鸟片目录（如 \\NAS-server\PHOTO\观鸟\ 下的新拍文件夹），或者说「跟之前一样处理」，就用本 skill。固化了实测过的命令参数、跑前检查、跑后核对与汇报格式。
 ---
 
 # SuperPicky 批量识别工作流
@@ -60,15 +60,52 @@ cd G:/code/SuperPicky
    「视频阶段完成」行（封面数/有鸟数/已定种数/无鸟数/已归类数）。
 3. **sidecar 对账**：`.superpicky/meta/` 的 JSON 数 == has_bird 数（无鸟照片和
    无鸟视频封面按瘦身策略不导出；有鸟视频封面正常导出）。
+4. **DPP 伽马编辑检测**：`scripts_dev/refresh_gamma_previews.py "<目录>" --dry`。
+   用户常在 Canon DPP「工具调色板 → 伽马调整」给暗片提亮，recipe 以 CanonVRD
+   二进制 trailer 写回 CR3；但 process 用的是机身内嵌 JPEG（原始暗图）——
+   缩略图黑、关键点找不到、锐度算 0、星级被压死。检测到 ≥1 张就走第 4 节全流程。
+5. **未定种回捞**：`scripts_dev/backfill_species.py "<目录>" --threshold 40`
+   （dry）→ 可采纳 >0 就 `--execute`。V5.6 起识鸟门控有替代通道（喙可见或
+   YOLO≥0.6 照常识鸟）+ 门控拒绝仍落框行，「零机会」照片已从源头消灭；
+   此步兜住残留的：分类置信 <40% 的换跑批时点重试、无检测行旧照片重检。
+   采纳清单按 40-50% 段标注复核。跑过伽马重跑（第 4 节③）的不用重复。
 
-## 4. 汇报格式
+## 4. DPP 伽马编辑重跑（检测到编辑时执行，顺序不可乱）
+
+```bash
+cd G:/code/SuperPicky
+D="<目录>"
+.venv/Scripts/python.exe -X utf8 scripts_dev/refresh_gamma_previews.py  "$D"            # ① 刷亮缩略图
+.venv/Scripts/python.exe -X utf8 scripts_dev/recalc_gamma_scores.py     "$D" --execute  # ② 重算指标（先 dry 看清单）
+.venv/Scripts/python.exe -X utf8 scripts_dev/backfill_species.py        "$D" --threshold 40 --execute  # ③ 补种
+.venv/Scripts/python.exe -X utf8 superpicky_cli.py rerate-v2 "$D" --min-conf 0.4 --metrics-rebuilt --execute  # ④ 重定星
+```
+
+- **① 刷缩略图**：解析每张 CanonVRD 伽马中点 → 幂律 LUT（`g=2^中点值`）应用到
+  `.superpicky/cache/temp_preview/`。幂等（每次从 CR3 重抽原始预览再套 LUT，
+  重复跑不叠加）；回退 = 删缓存 jpg 自动重生原始版。只动缓存，零接触照片/DB。
+- **② 重算指标**：用提亮预览按主管线口径（主鸟框+15% padding → 关键点锐度/眼/喙
+  → TOPIQ 鸟裁剪区 → ISO 归一化 + 原 caption 对焦权重 + 飞版加成）更新
+  head_sharp/eyes/beak/nima_score/adj_* 列。无库内框的照片（当时锐度 0 被识鸟
+  门控挡下、没写检测行）自动 YOLO 重检兜底。真糊片（拍摄即脱焦）提亮也救不了，
+  维持 0★ 是正确结果，不是流程失败。
+- **③ 补种**：未定种照片用亮图重识别（40% 采纳线，人工改种/删鸟自动保护）。
+  40-50% 低置信段错误率偏高，采纳清单要进汇报供人工复核。
+- **④ 重定星必须带 `--metrics-rebuilt`**：指标已变，rerate-v2 的复现校验
+  （分组校验/自校验）前提「指标未变」不成立，不带会被正确拦截。该模式全部
+  按新指标重算（无人工改星豁免层），写前自动备份。
+- 每步写库前自动备份 report.db；全部完成后再向用户汇报第 4 节结果。
+
+## 5. 汇报格式
 
 向用户汇报：星级分布表（3★/2★/1★/0★/无鸟，2★ 含视频封面数单独注明）、
 识出的鸟种及张数（标注罕见度 ○常见/◔能见/◑少见/●传奇）、视频处理情况
 （封面数/有鸟数/定种数/无鸟数）、总耗时与速度、对账结论（无丢失）、
 提醒复核两个点（低置信未定种的数量；可疑鸟种，如跨分布物种可能是误判）。
+若走了第 4 节伽马重跑，追加：编辑张数、缩略图刷新、指标重算（None→有值
+救回几张）、星级升降清单（逐张 新旧对比）、补种采纳清单（40-50% 段标注复核）。
 
-## 5. 复核入口（给用户，不主动执行）
+## 6. 复核入口（给用户，不主动执行）
 
 ```bash
 cd G:/code/SuperPicky
@@ -79,7 +116,7 @@ cd G:/code/SuperPicky
 视频封面与照片操作完全一致（改星/改种/多鸟编辑/删除），详情面板「打开视频」
 按钮可直接调系统播放器播放伴生视频。
 
-## 6. 事后改星 / 补种（常见后续需求）
+## 7. 事后改星 / 补种（常见后续需求）
 
 - **不要用 `superpicky_cli.py restar`**：V2 配额模式下已被代码级禁用
   （执行即拒绝；2026-08-31 事故，详见 dev-docs/reference/cli-reference.md）。
@@ -88,6 +125,7 @@ cd G:/code/SuperPicky
   （复现存库评级、人工改星豁免保留 + 鸟种分组校验和）通过后写库，写前
   自动备份并同步 sidecar。改 2★ 名额用 `--quota2`。视频封面行
   （`*_vcover`）自动跳过——封面固定 2 星，改单个视频星级在浏览库手改。
+  指标重算过的批次（如第 4 节伽马流程②）必须加 `--metrics-rebuilt`。
 - **未定种补种用** `scripts_dev/backfill_species.py <目录> --threshold 40
   --execute`：仅对有鸟未定种的照片按新采纳门槛重识别，镜像写入
   photos / bird_detections / sidecar 三处，dry-run 默认、写前备份。

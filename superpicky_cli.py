@@ -1057,6 +1057,9 @@ Examples:
                           help='显式指定现存评级的 3★ 配额%%')
     p_rerate.add_argument('--current-quota2', type=float, default=None,
                           help='显式指定现存评级的 2★ 配额%%')
+    p_rerate.add_argument('--metrics-rebuilt', action='store_true',
+                          help='指标已重算模式：跳过分组校验/自校验（复现前提'
+                               '「指标未变」不成立），全部按新指标重算')
     p_rerate.add_argument('--execute', action='store_true',
                           help='写库（默认 dry-run；写前自动备份 report.db）')
 
@@ -1145,6 +1148,7 @@ Examples:
             current_min_conf=args.current_conf,
             current_quota3=args.current_quota3,
             current_quota2=args.current_quota2,
+            metrics_rebuilt=args.metrics_rebuilt,
             log=print)
     elif args.command == 'info':
         return cmd_info(args)

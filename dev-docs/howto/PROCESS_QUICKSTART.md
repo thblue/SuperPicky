@@ -109,11 +109,39 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 | `spb_browse.py <目录>` | 结果浏览器（缩略图 + 详情 + 多鸟编辑右键；无参数弹启动器） |
 | `build_spb_browse.bat` | 打包 SPBBrowse.exe（独立结果浏览器，`dist_SPBBrowse\SPBBrowse\`） |
 | ~~`superpicky_cli.py restar`~~ | ⛔ **V2 配额模式下代码级禁用**（执行即拒绝）：V1 阈值逻辑无法复现 V2 定星，organize 在 flat 布局下不再移动文件。详见 [cli-reference.md](../reference/cli-reference.md) |
-| `superpicky_cli.py rerate-v2 <目录> --min-conf 0.4 --execute` | **V2 批次重定星唯一入口**：不重跑检测/识鸟，从 report.db + 日志鸟种标签重建定星输入；默认 dry-run，双自校验（复现存库评级、人工改星豁免保留 + 分组校验和）通过才写库，写前自动备份并同步 sidecar |
+| `superpicky_cli.py rerate-v2 <目录> --min-conf 0.4 --execute` | **V2 批次重定星唯一入口**：不重跑检测/识鸟，从 report.db + 日志鸟种标签重建定星输入；默认 dry-run，双自校验（复现存库评级、人工改星豁免保留 + 分组校验和）通过才写库，写前自动备份并同步 sidecar。指标重算过的批次加 `--metrics-rebuilt`（见下节） |
 | `superpicky_cli.py reset <目录> -y` | 重置目录（移回文件、清评分，**破坏性，先想清楚**） |
 | `superpicky_cli.py info <目录>` | 查看目录处理状态 |
 | `spb_flatten.py <目录> --execute` | 把历史「鸟种/星级」目录结构摊平回原位（先 dry-run） |
 | `spb_sync_edits.py <目录>` | 浏览器 sidecar 里的人工编辑（改主鸟/删框/改种）回放进 report.db，幂等 |
+
+## DPP 伽马编辑（暗片拉曲线）重跑
+
+在 Canon DPP「工具调色板 → 伽马调整」拉亮过的 CR3，recipe 以 CanonVRD 二进制
+trailer 写回文件（`exiftool -CanonVRD:Gamma*` 可读）；但 SuperPicky 跑批用的
+是机身内嵌 JPEG（原始暗图）——缩略图黑、关键点找不到、锐度算 0、星级被压死。
+跑批后检测到伽马编辑的照片按下面顺序重跑（每步写库前自动备份）：
+
+```bash
+cd G:/code/SuperPicky
+D="<目录>"
+.venv/Scripts/python.exe -X utf8 scripts_dev/refresh_gamma_previews.py "$D" --dry   # 检测：列出有编辑的照片
+.venv/Scripts/python.exe -X utf8 scripts_dev/refresh_gamma_previews.py "$D"         # ① 刷亮缩略图（幂等）
+.venv/Scripts/python.exe -X utf8 scripts_dev/recalc_gamma_scores.py    "$D" --execute  # ② 重算指标
+.venv/Scripts/python.exe -X utf8 scripts_dev/backfill_species.py       "$D" --threshold 40 --execute  # ③ 补种
+.venv/Scripts/python.exe -X utf8 superpicky_cli.py rerate-v2 "$D" --min-conf 0.4 --metrics-rebuilt --execute  # ④ 重定星
+```
+
+- ① 幂等（每次从 CR3 重抽原始预览再套幂律 LUT `g=2^中点值`，重复跑不叠加）；
+  回退 = 删 `.superpicky/cache/temp_preview/` 对应 jpg 自动重生原始版。
+- ② 用提亮预览按主管线口径重算锐度/眼喙可见度/TOPIQ 并更新 DB 指标列；
+  无检测行的照片（当时锐度 0 被识鸟门控挡下）自动 YOLO 重检兜底。真糊片
+  提亮也救不了，维持 0★ 是正确结果。
+- ③ 只动未定种照片（人工改种/删鸟受保护）；40-50% 低置信段要人工复核。
+- ④ 必须带 `--metrics-rebuilt`：指标已变，复现校验前提「指标未变」不成立，
+  不带会被正确拦截。该模式全部按新指标重算（无人工改星豁免层）。
+- 顺序不可乱：后续步骤都读提亮预览；V2 批内相对制，指标/鸟种变了必须全批重排。
+
 
 ## 已知坑
 

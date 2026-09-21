@@ -95,8 +95,14 @@ class ReadOnlySidecarSource:
         cur = self._conn.execute("SELECT * FROM photos ORDER BY filename")
         return [dict(r) for r in cur.fetchall()]
 
-    def get_all_detections(self) -> List[dict]:
-        """全量 bird_detections 行。/ All detections."""
+    def get_all_detections(self, include_polygon: bool = True) -> List[dict]:
+        """全量 bird_detections 行。/ All detections.
+
+        include_polygon 与 ReportDB 同签名（导出方按需瘦身拉取）；
+        重导出需要 polygon，True 时全列返回。
+        / Same signature as ReportDb (slim fetch support); re-export
+        always needs polygons, so True returns all columns.
+        """
         cur = self._conn.execute(
             "SELECT * FROM bird_detections ORDER BY filename, bird_index")
         return [dict(r) for r in cur.fetchall()]

@@ -1346,7 +1346,11 @@ class ReportDB:
                         "WHERE filename = ? AND notable = 1",
                         (now, filename))
             self._safe_commit()
-            filenames = sorted({row[0] for r in rows})
+            # 修复：此前误写 row[0]（外层循环泄漏的最后一行变量），多文件
+            # 时返回清单只剩最后一张——浏览器据此同步 sidecar 会漏文件。
+            # Fix: leaked loop variable row[0] collapsed the affected-file
+            # list to the last row; browser sidecar sync then missed files.
+            filenames = sorted({r[0] for r in rows})
             return filenames, len(rows)
 
     def soft_delete_species_everywhere(
@@ -1427,7 +1431,7 @@ class ReportDB:
                         "WHERE filename = ? AND notable = 1",
                         (now, filename))
             self._safe_commit()
-            filenames = sorted({row[0] for r in rows})
+            filenames = sorted({r[0] for r in rows})
             return filenames, len(rows)
 
     def wipe_all_identifications(self) -> dict:
@@ -1548,14 +1552,26 @@ class ReportDB:
                         photo_conds.append(
                             "(bird_species_cn = ? OR bird_species_en = ?)")
                         photo_args.extend([v.strip(), v.strip()])
+                photo_hits: set = set()
                 if photo_conds:
+                    # 受影响清单必须并入 photos 命中——「仅 photos 行有旧名、
+                    # 无检测行」的照片（backfill 重检路径采纳的种只写 photos）
+                    # 若不并入，浏览器按清单同步 sidecar 会漏掉它们。
+                    # The affected-file list must include photos-only hits
+                    # (species adopted via the redetect path writes photos
+                    # alone); the browser syncs sidecars off this list.
+                    photo_hits = {
+                        r[0] for r in self._conn.execute(
+                            "SELECT filename FROM photos WHERE "
+                            + " OR ".join(photo_conds),
+                            photo_args).fetchall()}
                     self._conn.execute(
                         "UPDATE photos SET bird_species_cn = ?, "
                         "bird_species_en = ?, updated_at = ? "
                         "WHERE " + " OR ".join(photo_conds),
                         [new_cn or None, new_en or None, now] + photo_args)
             self._safe_commit()
-            filenames = sorted({row[0] for r in rows})
+            filenames = sorted({r[0] for r in rows} | photo_hits)
             return filenames, len(rows)
 
     def get_notable_species_counts(self) -> List[dict]:

@@ -1481,6 +1481,40 @@ class PhotoProcessor:
                               "warning")
             return False
 
+        def _persist_boxes_only(file_prefix: str, image_path: str,
+                                birds: List[dict], proc_dims,
+                                decoded_image=None) -> None:
+            """V5.6: 识鸟门控拒绝的照片仍落库检测框行（仅几何，无物种）。
+
+            框是检测阶段已算出的数据，此前随门控一起丢弃导致这类照片
+            连 bird_detections 行都没有——backfill/浏览器/召回全部无据
+            可依（玉渊潭 027A5556 实例：YOLO 48% 检出但因锐度 79<100
+            被挡，物种与框双缺）。此处仅框落库，物种留空待回捞/人工。
+            decoded_image 提供时顺带算 crop_sharpness（无则 NULL）。
+            """
+            if not (self.report_db and birds and proc_dims):
+                return
+            source_display = os.path.basename(image_path) or file_prefix
+            try:
+                from core.multi_bird import classify_secondary_birds
+                orig_dims = read_image_dims(image_path) or proc_dims
+                rows = classify_secondary_birds(
+                    orig_image=decoded_image,
+                    all_birds=birds,
+                    proc_dims=proc_dims,
+                    orig_dims=orig_dims,
+                    main_species=None,
+                    filename=file_prefix,
+                    photo_path=image_path,
+                    min_area_ratio=self.config.multibird_min_area_ratio,
+                    classify=False,
+                )
+                if rows:
+                    self.report_db.insert_detections_batch(rows)
+            except Exception as e:
+                self._log(f"  ⚠️ Boxes-only DB write failed "
+                          f"[{source_display}]: {e}", "warning")
+
         def apply_birdid_result(
             file_prefix: str,
             title_targets: List[str],
@@ -2966,7 +3000,17 @@ class PhotoProcessor:
                         # V5.5: identify every detected bird with a low sharpness
                         # floor (100) instead of the old coarse screen, so rare
                         # species in soft photos still reach species recall.
-                        if self.settings.auto_identify and detected and (
+                        # V5.6: 锐度地板的替代通道——小而清楚的小目标头部
+                        # 锐度天然低（玉渊潭 027A5556 绣眼：双眼可见度
+                        # ~0.05、喙清晰可辨、YOLO 48%，锐度 79 被地板误
+                        # 杀后连分类机会都没有）。喙可见（≥0.3）或 YOLO
+                        # 高置信（≥0.6）说明主体可读，照常识鸟；仍被拒绝
+                        # 的照片走仅框落库兜底（_persist_boxes_only）。
+                        # V5.6: alternative channels around the sharpness
+                        # floor — small-but-sharp subjects fail it by
+                        # nature; a visible beak or a confident YOLO box
+                        # deserves an ID attempt all the same.
+                        _identify_gate = bool(
                             rating_value >= 2
                             or normalized_sharpness >= 100
                             # V5.0(multibird): 多鸟照片豁免粗筛——鸟群里的
@@ -2977,7 +3021,10 @@ class PhotoProcessor:
                             # precisely for small/crowded subjects.
                             or (self.config.multibird_enabled
                                 and bird_count > 1)
-                        ):
+                            or has_visible_beak
+                            or (confidence is not None and confidence >= 0.6)
+                        )
+                        if self.settings.auto_identify and detected and _identify_gate:
                             _birdid_crop_pil = None
                             if bird_crop_bgr is not None:
                                 try:
@@ -3002,6 +3049,16 @@ class PhotoProcessor:
                                 multibird_birds=_mb_birds,
                                 multibird_dims=img_dims,
                             )
+                        # V5.6: 门控拒绝兜底——检测框仍落库（仅几何，物种
+                        # 留空），供 backfill/浏览器/召回使用（同 JPEG 分支）
+                        if (self.settings.auto_identify and detected
+                                and not _identify_gate
+                                and all_birds and img_dims):
+                            _persist_boxes_only(
+                                original_prefix, filepath, all_birds,
+                                img_dims,
+                                (yolo_item or {}).get('decoded_image')
+                                if yolo_item else None)
                 else:
                     # V3.4: 纯 JPEG 文件（没有对应 RAW）
                     target_file_path = filepath
@@ -3029,7 +3086,17 @@ class PhotoProcessor:
                         # V5.5: identify every detected bird with a low sharpness
                         # floor (100) instead of the old coarse screen, so rare
                         # species in soft photos still reach species recall.
-                        if self.settings.auto_identify and detected and (
+                        # V5.6: 锐度地板的替代通道——小而清楚的小目标头部
+                        # 锐度天然低（玉渊潭 027A5556 绣眼：双眼可见度
+                        # ~0.05、喙清晰可辨、YOLO 48%，锐度 79 被地板误
+                        # 杀后连分类机会都没有）。喙可见（≥0.3）或 YOLO
+                        # 高置信（≥0.6）说明主体可读，照常识鸟；仍被拒绝
+                        # 的照片走仅框落库兜底（_persist_boxes_only）。
+                        # V5.6: alternative channels around the sharpness
+                        # floor — small-but-sharp subjects fail it by
+                        # nature; a visible beak or a confident YOLO box
+                        # deserves an ID attempt all the same.
+                        _identify_gate = bool(
                             rating_value >= 2
                             or normalized_sharpness >= 100
                             # V5.0(multibird): 多鸟照片豁免粗筛——鸟群里的
@@ -3040,7 +3107,10 @@ class PhotoProcessor:
                             # precisely for small/crowded subjects.
                             or (self.config.multibird_enabled
                                 and bird_count > 1)
-                        ):
+                            or has_visible_beak
+                            or (confidence is not None and confidence >= 0.6)
+                        )
+                        if self.settings.auto_identify and detected and _identify_gate:
                             _birdid_crop_pil = None
                             if bird_crop_bgr is not None:
                                 try:
@@ -3065,6 +3135,16 @@ class PhotoProcessor:
                                 multibird_birds=_mb_birds,
                                 multibird_dims=img_dims,
                             )
+                        # V5.6: 门控拒绝兜底——检测框仍落库（仅几何，物种
+                        # 留空），供 backfill/浏览器/召回使用（同 RAW 分支）
+                        if (self.settings.auto_identify and detected
+                                and not _identify_gate
+                                and all_birds and img_dims):
+                            _persist_boxes_only(
+                                original_prefix, filepath, all_birds,
+                                img_dims,
+                                (yolo_item or {}).get('decoded_image')
+                                if yolo_item else None)
 
                 # V3.4: 以下操作对 RAW 和纯 JPEG 都执行
                 if target_file_path and os.path.exists(target_file_path):

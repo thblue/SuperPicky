@@ -156,6 +156,7 @@ def classify_secondary_birds(
     region_code: Optional[str] = None,
     name_format: Optional[str] = None,
     identify_fn=None,
+    classify: bool = True,
 ) -> List[dict]:
     """
     对多鸟照片的每个检测框生成 bird_detections 行（含逐鸟分类）。
@@ -167,8 +168,12 @@ def classify_secondary_birds(
     层按阈值判断的派生概念，数据层保留完整信息供人工审阅调阈值。
     面积过小/分类失败仍只保留框与几何信息。
 
+    classify=False 为「仅框模式」（V5.6 识鸟门控拒绝时的兜底落库）：
+    只构建几何行（bbox/polygon/area/yolo_conf，物种全 None），不做任何
+    分类推理；orig_image 可传 None 跳过 crop_sharpness（省一次全图解码）。
+
     参数:
-    orig_image (np.ndarray): 原图 BGR（未缩放）
+    orig_image (np.ndarray): 原图 BGR（未缩放）；仅框模式可为 None
     all_birds (List[dict]): ai_model.detect_and_draw_birds 第 11 个返回值，
         每项含 idx/conf/bbox(x1,y1,x2,y2)/area_ratio/mask_polygon/
         is_selected（处理图坐标）
@@ -182,6 +187,7 @@ def classify_secondary_birds(
     use_geo_filter / country_code / region_code / name_format:
         与主鸟 identify_bird 相同的地理过滤与命名参数
     identify_fn: 依赖注入的 identify_bird（测试可替换；None 则现场导入）
+    classify (bool): True=逐鸟分类（默认）；False=仅落库几何行不推理
 
     返回:
     List[dict]: bird_detections 行（DETECTION_COLUMNS 键），按检测 idx 排序；
@@ -191,7 +197,9 @@ def classify_secondary_birds(
     (is_selected=True) reuses main_species without re-inference; others
     are cropped and classified individually, storing the raw top-1 result
     regardless of confidence — adoption is a derived, display-level
-    concept so users can review and tune thresholds.
+    concept so users can review and tune thresholds. classify=False is
+    the boxes-only mode used when the identification gate rejects a
+    photo, so the detection geometry is still persisted.
     """
     if not all_birds:
         return []
@@ -255,16 +263,25 @@ def classify_secondary_birds(
                                                scale_x, scale_y)
 
         # 全部行都记录 bbox 锐度（廉价），供综合重选/召回规则使用——
-        # 包括主鸟（V5.1 重选评分需要主鸟也有锐度可比）
+        # 包括主鸟（V5.1 重选评分需要主鸟也有锐度可比）。仅框模式未传
+        # 原图时跳过（省一次全图解码，锐度列留 NULL）。
         # Record bbox sharpness on every row (cheap), the main bird
         # included — the comprehensive re-selection needs comparable
-        # sharpness across all birds.
-        row['crop_sharpness'] = crop_bbox_sharpness(orig_image, bbox_orig)
+        # sharpness across all birds. Skipped in boxes-only mode when
+        # no original image was supplied (column stays NULL).
+        if orig_image is not None:
+            row['crop_sharpness'] = crop_bbox_sharpness(
+                orig_image, bbox_orig)
 
         # 主鸟：复用已采纳结果，不重复推理
         # Selected bird: reuse the adopted result, no re-inference.
         if row['is_selected']:
             row.update(main_fields)
+            continue
+
+        # 仅框模式：几何信息齐了，直接下一只（不分类）
+        # Boxes-only mode: geometry is complete, skip identification.
+        if not classify:
             continue
 
         area_ratio = bird.get('area_ratio') or 0.0

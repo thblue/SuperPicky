@@ -152,15 +152,53 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         return fake
 
     def _run(self, all_birds, main_species=None, min_area=0.001,
-             identify=None):
+             identify=None, classify=True, orig_image=None):
         from core.multi_bird import classify_secondary_birds
         return classify_secondary_birds(
-            self.orig, all_birds,
+            self.orig if orig_image is None else orig_image,
+            all_birds,
             proc_dims=(150, 100), orig_dims=(300, 200),
             main_species=main_species, filename='DSC_0001',
             photo_path='X:/DSC_0001.NEF',
             min_area_ratio=min_area,
-            identify_fn=identify or self._fake_identify())
+            identify_fn=identify or self._fake_identify(),
+            classify=classify)
+
+    def test_boxes_only_mode_skips_classification(self):
+        """V5.6 仅框模式：几何行照入、物种全空、识别器零调用。"""
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.03, 'mask_polygon': None, 'is_selected': False},
+        ]
+        rows = self._run(birds, classify=False, main_species=None)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(self.calls, [])  # 不做任何分类推理
+        for r in rows:
+            self.assertIsNotNone(r['bbox_w'])
+            self.assertIsNone(r['species_cn'])
+            self.assertIsNone(r['species_confidence'])
+        self.assertIsNotNone(rows[0]['crop_sharpness'])
+
+    def test_boxes_only_without_orig_image(self):
+        """仅框模式 orig_image=None：跳过 crop_sharpness（列留 NULL）。"""
+        from core.multi_bird import classify_secondary_birds
+        rows = classify_secondary_birds(
+            None,
+            [{'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+              'area_ratio': 0.09, 'mask_polygon': None,
+              'is_selected': True}],
+            proc_dims=(150, 100), orig_dims=(300, 200),
+            main_species=None, filename='DSC_0001',
+            photo_path='X:/DSC_0001.NEF',
+            min_area_ratio=0.001,
+            identify_fn=self._fake_identify(),
+            classify=False)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.calls, [])
+        self.assertIsNotNone(rows[0]['bbox_w'])
+        self.assertIsNone(rows[0]['crop_sharpness'])
 
     def test_small_bird_boxed_but_not_classified(self):
         """面积 < min_area_ratio：只入框不分类（识别器不被调用）。"""

@@ -40,6 +40,9 @@ def read_gamma_params(cr3_paths: List[str],
     """
     批量读 CR3 的 CanonVRD 伽马参数。
 
+    大目录（如 640 张 UNC 路径）会超出 Windows 32K 命令行上限
+    （WinError 206），因此按块分批调用 exiftool 再合并结果。
+
     参数:
         cr3_paths (List[str]): CR3 绝对路径
         exiftool (str): exiftool 可执行文件路径
@@ -48,27 +51,38 @@ def read_gamma_params(cr3_paths: List[str],
         Dict[str, Tuple[str, str]]: {文件名前缀: (中点值, 白点值)}；
         未编辑（无 CanonVRD 伽马区）的文件不在字典里
     """
-    out = subprocess.run(
-        [exiftool, '-s3', '-csv', '-FileName',
-         '-CanonVRD:GammaMidPoint', '-CanonVRD:GammaWhitePoint',
-         '-ext', 'CR3', *cr3_paths],
-        capture_output=True, timeout=600)
-    lines = out.stdout.decode('utf-8', 'replace').strip().splitlines()
-    if len(lines) < 2:
-        return {}
-    header = lines[0].split(',')
-    ix_fn = header.index('FileName')
-    ix_mid = header.index('GammaMidPoint') if 'GammaMidPoint' in header else -1
-    ix_wp = header.index('GammaWhitePoint') if 'GammaWhitePoint' in header else -1
+
+    def _read_batch(batch: List[str]) -> Dict[str, Tuple[str, str]]:
+        """读单批文件，返回 {前缀: (中点, 白点)}。Read one batch."""
+        out = subprocess.run(
+            [exiftool, '-s3', '-csv', '-FileName',
+             '-CanonVRD:GammaMidPoint', '-CanonVRD:GammaWhitePoint',
+             '-ext', 'CR3', *batch],
+            capture_output=True, timeout=600)
+        lines = out.stdout.decode('utf-8', 'replace').strip().splitlines()
+        if len(lines) < 2:
+            return {}
+        header = lines[0].split(',')
+        ix_fn = header.index('FileName')
+        ix_mid = header.index('GammaMidPoint') if 'GammaMidPoint' in header else -1
+        ix_wp = header.index('GammaWhitePoint') if 'GammaWhitePoint' in header else -1
+        batch_result: Dict[str, Tuple[str, str]] = {}
+        for ln in lines[1:]:
+            cols = ln.split(',')
+            fn = cols[ix_fn] if ix_fn < len(cols) else ''
+            mid = cols[ix_mid].strip() if 0 <= ix_mid < len(cols) else ''
+            wp = cols[ix_wp].strip() if 0 <= ix_wp < len(cols) else ''
+            if mid:
+                prefix = os.path.splitext(fn)[0]
+                batch_result[prefix] = (mid, wp)
+        return batch_result
+
+    # 每批 100 个文件：单条命令约 8-9K 字符，远低于 Windows 32K 上限
+    # 100 files per batch: ~8-9K chars per command, well under the 32K limit
     result: Dict[str, Tuple[str, str]] = {}
-    for ln in lines[1:]:
-        cols = ln.split(',')
-        fn = cols[ix_fn] if ix_fn < len(cols) else ''
-        mid = cols[ix_mid].strip() if 0 <= ix_mid < len(cols) else ''
-        wp = cols[ix_wp].strip() if 0 <= ix_wp < len(cols) else ''
-        if mid:
-            prefix = os.path.splitext(fn)[0]
-            result[prefix] = (mid, wp)
+    chunk_size = 100
+    for i in range(0, len(cr3_paths), chunk_size):
+        result.update(_read_batch(cr3_paths[i:i + chunk_size]))
     return result
 
 

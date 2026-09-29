@@ -38,6 +38,14 @@ and everything runs about 30% faster.
 14. **The Lightroom plugin works properly again.** Writing bird names and captions
     had been silently failing, Chinese text came back garbled, and the plugin often
     couldn't connect at all.
+15. **191 look-alike species were invisible to the location filter.** A GBIF
+    mapping collision made the Common Moorhen (and 190 other species the taxonomy
+    recently split) unfindable in China while their American twins looked common.
+    The location database was rebuilt accordingly.
+16. **A manual species whitelist.** Some twins the model keeps mixing up (Eurasian
+    vs Oriental Magpie) can now be pinned in `species_whitelist.json` in the app
+    config folder: the correct species is substituted automatically, exactly like
+    a manual correction.
 
 ## Before you upgrade
 

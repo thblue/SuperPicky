@@ -16,9 +16,10 @@ from PIL import Image, ImageEnhance, ImageFilter
 from PIL.ExifTags import TAGS, GPSTAGS
 import cv2
 import io
+import json
 import os
 import sys
-from typing import Any, Optional, List, Dict, Tuple, Set, cast
+from typing import Any, Callable, Optional, List, Dict, Tuple, Set, cast
 from tools.i18n import t as _t
 from birdid.geo_filter import TIER_NONE, get_geo_filter
 from config import (
@@ -1072,6 +1073,209 @@ def _identify_with_tiers(
     return [], TIER_NONE, None
 
 
+# ---------------------------------------------------------------------------
+# 人工定种白名单 / Manual species whitelist
+# ---------------------------------------------------------------------------
+
+_WHITELIST_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "map": {}}
+
+
+def _whitelist_path() -> str:
+    """
+    白名单文件路径（应用配置目录）/ Whitelist path in the app config dir.
+
+    文件与 advanced_config.json 同目录（Windows:
+    ~/AppData/Local/SuperPicky/），随应用更新保留、由用户手工维护。
+    config 不可导入时（独立 birdid 包场景）返回空串，功能关闭。
+
+    The file lives beside advanced_config.json and is user-maintained. An
+    empty string is returned when config is not importable (standalone
+    birdid package), disabling the feature.
+
+    返回 / Returns:
+        str: JSON 路径；不可用时空串 / The JSON path, or "" when unavailable.
+    """
+    try:
+        from config import get_app_config_dir
+
+        return os.path.join(str(get_app_config_dir()), "species_whitelist.json")
+    except Exception:
+        return ""
+
+
+def load_species_whitelist(
+    path: Optional[str] = None, force: bool = False
+) -> Dict[int, Dict]:
+    """
+    载入白名单对：demote class_id → keep 物种信息 / Load demote→keep pairs.
+
+    文件格式（UTF-8 JSON，可手工增删对；demote 支持单字符串或数组）::
+
+        {"pairs": [
+            {"keep_scientific": "Pica serica",
+             "demote_scientific": "Pica pica"},
+            {"keep_scientific": "Saxicola maurus",
+             "demote_scientific": ["Saxicola stejnegeri",
+                                   "Saxicola rubicola"]}
+        ]}
+
+    keep/demote 学名经 BirdCountInfo 反查 class_id；任一侧解析失败或两侧
+    相同则该 demote 跳过。国家相关的 GBIF 稀有度留空，替换时按拍摄国现查。
+    结果按 (path, mtime) 进程级缓存，文件改动自动重载。
+
+    The scientific names resolve to class ids via BirdCountInfo; a demote
+    entry is skipped when either side fails to resolve. Country-scoped GBIF
+    rarity is left empty and queried at substitution time. Results are
+    cached per (path, mtime) so manual edits reload automatically.
+
+    参数 / Parameters:
+        path (Optional[str]): 显式路径（测试用）；None 时用 _whitelist_path /
+            Explicit path (tests); defaults to _whitelist_path.
+        force (bool): 忽略缓存强读 / Ignore the cache.
+
+    返回 / Returns:
+        dict[int, dict]: {demote_class_id: keep 物种条目}，无文件/解析
+            失败时为空 dict / {demote id: keep entry}, empty on failure.
+    """
+    p = path or _whitelist_path()
+    if not p or not os.path.exists(p):
+        return {}
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        return {}
+    if (
+        not force
+        and _WHITELIST_CACHE["path"] == p
+        and _WHITELIST_CACHE["mtime"] == mtime
+    ):
+        return _WHITELIST_CACHE["map"]
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+    db = get_database_manager()
+    out: Dict[int, Dict] = {}
+    for pair in data.get("pairs") or []:
+        if not isinstance(pair, dict):
+            continue
+        keep_sci = str(pair.get("keep_scientific") or "").strip()
+        raw_demote = pair.get("demote_scientific")
+        if isinstance(raw_demote, str):
+            demote_list = [raw_demote.strip()]
+        elif isinstance(raw_demote, list):
+            demote_list = [str(x).strip() for x in raw_demote if x]
+        else:
+            demote_list = []
+        if not keep_sci or not demote_list or db is None:
+            continue
+        try:
+            keep_cid = db.get_class_id_by_scientific_name(keep_sci)
+        except Exception:
+            continue
+        if keep_cid is None:
+            continue
+        info = db.get_bird_by_class_id(int(keep_cid)) or {}
+        keep_entry = {
+            "class_id": int(keep_cid),
+            "cn_name": info.get("chinese_simplified"),
+            "en_name": info.get("english_name"),
+            "scientific_name": info.get("scientific_name") or keep_sci,
+            "ebird_code": info.get("ebird_code"),
+            "description": info.get("short_description_zh") or "",
+            "iucn_category": db.get_iucn_by_class_id(int(keep_cid)),
+            "china_protection_level": db.get_china_protection_by_class_id(
+                int(keep_cid)
+            ),
+            "aesthetic_index": db.get_aesthetic_by_class_id(int(keep_cid)),
+            # 国家相关，替换时按拍摄国现查 / Country-scoped, queried at
+            # substitution time.
+            "gbif_rarity_100": None,
+        }
+        for demote_sci in demote_list:
+            try:
+                demote_cid = db.get_class_id_by_scientific_name(demote_sci)
+            except Exception:
+                continue
+            if demote_cid is None or demote_cid == keep_cid:
+                continue
+            out[int(demote_cid)] = keep_entry
+    _WHITELIST_CACHE.update(path=p, mtime=mtime, map=out)
+    return out
+
+
+def _apply_species_whitelist(
+    results: List[Dict],
+    whitelist: Dict[int, Dict],
+    photo_country_code: Optional[str] = None,
+    rarity_fn: Optional[Callable[[int, Optional[str]], Optional[float]]] = None,
+) -> List[Dict]:
+    """
+    把结果中的 demote 物种就地替换为 keep 物种 / Substitute demote→keep.
+
+    场景：模型图像先验偏爱训练图更多的姊妹种（欧洲欧亚喜鹊 vs 东亚喜鹊），
+    地理过滤无法拆开（两者都是中国合法分布种）。用户核定的白名单对在
+    identify_bird 出口统一替换，等于把人工改种自动化——主鸟采纳、多鸟行、
+    视频封面、补种脚本全部一致生效。
+
+    规则：demote 条目在原位置换成 keep 条目（保留该位置的置信度与
+    region_match——置信度此时代表模型对这对姊妹复合体的把握）；keep 物种
+    若原本也上榜则删除其低置信旧条目避免重复；keep 已自然排在前面的场合
+    只删除后面的 demote 条目。
+
+    Substitution happens at the identify_bird exit so every consumer (main
+    adoption, per-bird rows, video covers, backfills) stays consistent. The
+    demoted entry is replaced in place by the keep entry, carrying over its
+    confidence and region_match; a naturally-ranked keep entry keeps its own
+    original position, with later demote entries simply dropped.
+
+    参数 / Parameters:
+        results (list): predict_bird 的输出 / predict_bird output.
+        whitelist (dict): load_species_whitelist() 的映射 / The loaded map.
+        photo_country_code (Optional[str]): 拍摄国，供稀有度现查 /
+            Shooting country for the rarity lookup.
+        rarity_fn (Optional[Callable]): (class_id, country) → gbif_rarity_100，
+            缺省不查 / Rarity lookup callback, omitted when None.
+
+    返回 / Returns:
+        list[dict]: 替换后的结果（原列表不被修改）/ The new list.
+    """
+    if not results or not whitelist:
+        return results
+    keep_cids = {info["class_id"] for info in whitelist.values()}
+    out: List[Dict] = []
+    for r in results:
+        cid = r.get("class_id")
+        info = whitelist.get(cid) if cid is not None else None
+        if info is not None:
+            if any(e.get("class_id") == info["class_id"] for e in out):
+                continue  # keep 已上榜/已替换 → 丢弃重复 demote
+            entry = dict(info)
+            entry["confidence"] = r.get("confidence")
+            entry["region_match"] = r.get("region_match", True)
+            entry["whitelist_substituted"] = True
+            if rarity_fn is not None:
+                try:
+                    entry["gbif_rarity_100"] = rarity_fn(
+                        info["class_id"], photo_country_code
+                    )
+                except Exception:
+                    pass
+            print(
+                f"  🔄 白名单定种 / manual whitelist: "
+                f"{r.get('cn_name') or r.get('en_name')} → "
+                f"{entry.get('cn_name') or entry.get('en_name')}"
+            )
+            out.append(entry)
+        elif cid in keep_cids and any(e.get("class_id") == cid for e in out):
+            continue  # keep 已由替换占据，去掉其低置信重复条目
+        else:
+            out.append(r)
+    return out
+
+
 def identify_bird(
     image_path: str,
     use_yolo: bool = True,
@@ -1224,6 +1428,29 @@ def identify_bird(
                 "species_count": None,
                 "country_code": None,
             }
+
+        # 人工定种白名单：用户核定的易混种对（欧亚喜鹊→喜鹊等）在此出口
+        # 统一替换。放最后一层是为了让主鸟采纳、多鸟行、视频封面、补种
+        # 等所有消费方一致生效；替换失败只跳过，不影响识别结果本身。
+        # Manual species whitelist: user-curated confusable pairs are
+        # substituted at this single exit so every consumer stays consistent.
+        # A substitution failure is skipped, never fatal to the result.
+        try:
+            _wl = load_species_whitelist()
+            if _wl:
+                _db = get_database_manager()
+                results = _apply_species_whitelist(
+                    results,
+                    _wl,
+                    photo_country_code=photo_country_code,
+                    rarity_fn=(
+                        lambda cid, cc: _db.get_gbif_rarity_by_class_id(cid, cc)
+                        if _db
+                        else None
+                    ),
+                )
+        except Exception:
+            pass
 
         result["success"] = True
         result["results"] = results

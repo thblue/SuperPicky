@@ -109,25 +109,96 @@ def fetch_cell(lat_bin: int, lon_bin: int) -> Optional[Dict[int, int]]:
     return None
 
 
-def load_key_to_class() -> Dict[int, int]:
-    """
-    GBIF specieskey → model_class_id 映射（覆盖 10963/10964）。
+OVERRIDES_PATH = os.path.join(
+    PROJ, "scripts_dev", "data_sources", "specieskey_overrides.json"
+)
 
-    Mapping from GBIF specieskey to model class id (covers 10963/10964).
+
+def apply_key_overrides(cls_to_key: Dict[int, int]) -> Dict[int, int]:
+    """
+    应用人工核定的 specieskey 覆盖表 / Apply the audited specieskey overrides.
+
+    gbif_rarity_100 的学名匹配对部分近年拆分种落到了非种级/存疑用法上
+    （如 Tachyspiza 属级 DOUBTFUL key、鸟纲 key），speciesKey facet 永远
+    不返回这类 key，对应类别在全球候选集中整组清零。覆盖表由
+    fix_geo_key_collisions.py 经 GBIF match API 逐类核定生成（含学名、
+    解析状态与时间戳，便于人工复核）。
+
+    The gbif_rarity_100 name matcher resolved some recent splits to
+    non-species / doubtful usages (e.g. the DOUBTFUL genus key for
+    Tachyspiza, or the class key for Aves). The speciesKey facet never
+    returns such keys, starving those classes of all occurrence data. The
+    override file is produced by fix_geo_key_collisions.py via the GBIF
+    match API, with names / status / timestamps for auditing.
+
+    参数 / Parameters:
+        cls_to_key (dict): {model_class_id: specieskey}，待修正的映射 /
+            The class-to-key mapping to correct.
 
     返回 / Returns:
-        dict[int, int]: {specieskey: model_class_id}
+        dict[int, int]: 应用覆盖后的映射 / The mapping after overrides.
+    """
+    if not os.path.exists(OVERRIDES_PATH):
+        return cls_to_key
+    with open(OVERRIDES_PATH, "r", encoding="utf-8") as f:
+        rows = json.load(f)
+    changed = 0
+    for row in rows:
+        try:
+            cid = int(row["model_class_id"])
+            new_key = int(row["specieskey"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if cls_to_key.get(cid) != new_key:
+            cls_to_key[cid] = new_key
+            changed += 1
+    if changed:
+        print(f"[build] 应用 specieskey 覆盖 / overrides applied: {changed}")
+    return cls_to_key
+
+
+def load_key_to_class() -> Dict[int, Set[int]]:
+    """
+    GBIF specieskey → model_class_id 集合（一对多，覆盖 10963/10964）。
+
+    GBIF 骨干未跟上的分类学拆分会让多个模型类共用同一个 speciesKey
+    （如黑水鸡/普通水鸡共用 5228199）。旧实现用 {key: class} 字典装载，
+    同 key 后写覆盖先写，导致 191 个类在全球候选集中被静默清零
+    （黑水鸡在中国候选集里完全消失，美洲普通水鸡反成「中国常见种」）。
+    现改为一对多：同一 key 的观察计数全量累加到组内每个类，由下游
+    （模型排序 + 国家级姊妹拆分表 merged_group_country_split）自行甄别。
+
+    One-to-many mapping from GBIF speciesKey to model class ids. Taxonomic
+    splits the GBIF backbone has not adopted make several model classes share
+    one speciesKey (e.g. Common Moorhen/Common Gallinule both map to 5228199).
+    The old {key: class} dict silently starved 191 classes of all occurrence
+    data; counts now accumulate in full onto every class of a shared group,
+    leaving disambiguation to the downstream country-level sibling split.
+
+    返回 / Returns:
+        dict[int, set[int]]: {specieskey: {model_class_id, ...}}
     """
     db = sqlite3.connect(os.path.join(PROJ, "birdid", "data", "bird_reference.sqlite"))
-    m: Dict[int, int] = {}
+    cls_to_key: Dict[int, int] = {}
     for cid, skey in db.execute(
         "SELECT model_class_id, specieskey FROM gbif_rarity_100 WHERE specieskey IS NOT NULL"
     ):
         try:
-            m[int(skey)] = int(cid)
+            cls_to_key[int(cid)] = int(skey)
         except (TypeError, ValueError):
             continue
     db.close()
+    cls_to_key = apply_key_overrides(cls_to_key)
+
+    m: Dict[int, Set[int]] = {}
+    for cid, skey in cls_to_key.items():
+        m.setdefault(skey, set()).add(cid)
+    shared = sum(1 for v in m.values() if len(v) > 1)
+    if shared:
+        print(
+            f"[build] 共用 specieskey 的姊妹组 / shared-key groups: {shared}"
+            "（计数将全量累加到组内每类 / counts accrue to every sibling in full）"
+        )
     return m
 
 
@@ -210,7 +281,11 @@ def init_db(path: str, resume: bool) -> sqlite3.Connection:
     return db
 
 
-def harvest(db: sqlite3.Connection, key2cls: Dict[int, int], cells: List[Tuple[int, int]]) -> int:
+def harvest(
+    db: sqlite3.Connection,
+    key2cls: Dict[int, Set[int]],
+    cells: List[Tuple[int, int]],
+) -> int:
     """
     并发拉取所有网格并分批写入，跳过已完成的网格。
 
@@ -218,7 +293,8 @@ def harvest(db: sqlite3.Connection, key2cls: Dict[int, int], cells: List[Tuple[i
 
     参数 / Parameters:
         db (sqlite3.Connection): 目标库连接 / Target database connection.
-        key2cls (dict): specieskey → class_id 映射 / mapping.
+        key2cls (dict): specieskey → class_id 集合（一对多，见 load_key_to_class）
+            / speciesKey to class-id sets (one-to-many, see load_key_to_class).
         cells (list): 待扫描网格 / Cells to scan.
 
     返回 / Returns:
@@ -243,8 +319,11 @@ def harvest(db: sqlite3.Connection, key2cls: Dict[int, int], cells: List[Tuple[i
             cid = cell_id_of(lat_bin, lon_bin)
             acc: Dict[int, int] = {}
             for skey, n in counts.items():
-                cls = key2cls.get(skey)
-                if cls is not None:
+                # 一对多：合并 key 的计数全量累加到组内每个类（GBIF 在种级
+                # 无法区分姊妹种，候选集应全保留，甄别交给下游）
+                # One-to-many: the merged key's count accrues in full to every
+                # sibling class; disambiguation is left to downstream stages.
+                for cls in key2cls.get(skey, ()):
                     acc[cls] = acc.get(cls, 0) + n
             rows.extend((cid, cls, n) for cls, n in acc.items())
             progress.append((cid,))

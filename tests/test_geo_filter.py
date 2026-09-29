@@ -144,6 +144,100 @@ def test_no_gps_no_country_is_unfiltered(db_path):
     f.close()
 
 
+@pytest.fixture
+def split_db_path(tmp_path):
+    """
+    构造带姊妹拆分表的测试库 / Build a test DB with the sibling-split tables.
+
+    组 100 = {1, 2}（黑水鸡/普通水鸡的玩具版）：CN 只允许 1（2 的标签在
+    CN 为 0），AU 两者都允许；JP 无拆分行（数据缺口，整组放行）；类 3/4/5
+    不属于任何组，任何国家都不受影响。
+    """
+    p = tmp_path / "geo_split.db"
+    db = sqlite3.connect(str(p))
+    db.executescript(
+        """
+        CREATE TABLE cell_species (cell_id INTEGER, class_id INTEGER, n INTEGER);
+        CREATE TABLE country_species (country TEXT, class_id INTEGER, n INTEGER);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE merged_key_classes (
+            specieskey INTEGER, class_id INTEGER,
+            PRIMARY KEY (specieskey, class_id));
+        CREATE TABLE merged_group_country_split (
+            specieskey INTEGER, country TEXT, class_id INTEGER, n_usage INTEGER,
+            PRIMARY KEY (specieskey, country, class_id));
+        """
+    )
+    db.executemany(
+        "INSERT INTO cell_species VALUES (?,?,?)",
+        [(90 * 360 + 180, 1, 100)],   # 任意一格，仅为通过 is_available() 检查
+    )
+    db.executemany(
+        "INSERT INTO country_species VALUES (?,?,?)",
+        [
+            ("CN", 1, 900), ("CN", 2, 900), ("CN", 3, 50),
+            ("AU", 1, 10), ("AU", 2, 20), ("AU", 4, 5),
+            ("JP", 1, 7), ("JP", 2, 7), ("JP", 5, 3),
+        ],
+    )
+    db.executemany(
+        "INSERT INTO merged_key_classes VALUES (?,?)",
+        [(100, 1), (100, 2)],
+    )
+    db.executemany(
+        "INSERT INTO merged_group_country_split VALUES (?,?,?,?)",
+        [(100, "CN", 1, 41356), (100, "AU", 1, 30), (100, "AU", 2, 70)],
+    )
+    db.execute("INSERT INTO meta VALUES ('tier1_threshold','cumulative:0.999')")
+    db.commit()
+    db.close()
+    return str(p)
+
+
+def test_sibling_demoted_in_country_without_label_records(split_db_path):
+    """CN：组内标签为 0 的姊妹（类 2）从国家级候选中剔除"""
+    f = GeoFilter(split_db_path)
+    tiers = dict((label, cand) for cand, label in f.iter_candidates(None, None, "CN"))
+    assert 2 not in tiers[TIER_COUNTRY]
+    assert {1, 3} <= tiers[TIER_COUNTRY]
+    f.close()
+
+
+def test_sibling_kept_when_both_have_label_records(split_db_path):
+    """AU：两个姊妹都有标签记录 → 都保留"""
+    f = GeoFilter(split_db_path)
+    tiers = dict((label, cand) for cand, label in f.iter_candidates(None, None, "AU"))
+    assert {1, 2, 4} <= tiers[TIER_COUNTRY]
+    f.close()
+
+
+def test_sibling_untouched_on_data_gap_country(split_db_path):
+    """JP：拆分表无行（数据缺口）→ 整组放行，不误伤"""
+    f = GeoFilter(split_db_path)
+    tiers = dict((label, cand) for cand, label in f.iter_candidates(None, None, "JP"))
+    assert {1, 2, 5} <= tiers[TIER_COUNTRY]
+    f.close()
+
+
+def test_no_country_no_demotion(split_db_path):
+    """未提供国家 → 不做姊妹降级（与旧库行为一致）"""
+    f = GeoFilter(split_db_path)
+    tiers = dict((label, cand) for cand, label in f.iter_candidates(None, None, None))
+    assert tiers[TIER_NONE] is None
+    f.close()
+
+
+def test_old_db_without_split_tables_unchanged(db_path):
+    """旧库无拆分表：功能静默关闭，候选集与之前一致"""
+    f = GeoFilter(db_path)
+    assert f._merged_groups is None
+    labels = [t for _, t in f.iter_candidates(None, None, "AU")]
+    assert labels == [TIER_COUNTRY, TIER_NONE]
+    tiers = dict((label, cand) for cand, label in f.iter_candidates(None, None, "AU"))
+    assert tiers[TIER_COUNTRY] == {1, 2, 3, 4, 5}
+    f.close()
+
+
 def test_empty_cell_falls_through_to_neighbourhood(db_path):
     """空网格不产出空候选集，直接降到有内容的层"""
     f = GeoFilter(db_path)

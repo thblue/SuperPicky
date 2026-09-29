@@ -504,3 +504,42 @@ per-photo comparison requires `--report-db <path to the new report.db>`.
 | 偏远地区网格稀疏 | L3 邻域 + L4 国家级两层回退；已用黑龙江空网格验证该路径必要性 |
 | GBIF 快照重跑需数十 GB 扫描 | 沿用现有 DuckDB+S3 管线，列存只读 4 列；小样本验证可用 REST API（单格 0.5 s） |
 | 观察密度偏差（欧美记录远多于其他地区） | 影响的是 `n` 的绝对值而非物种是否存在；相对阈值方案对此免疫 |
+
+
+---
+
+## 10. 补丁：specieskey 碰撞修复与姊妹种降级（2026-09-13）
+
+### 根因 / Root cause
+
+`bird_reference.sqlite` 的 `gbif_rarity_100` 里 172 个 GBIF speciesKey 被
+453 个模型类共享（GBIF 骨干未跟上的分类学拆分，如黑水鸡/美洲普通水鸡共用
+5228199）。旧版 `build_geo_distribution.py` 的 `load_key_to_class()` 用
+`{key: class}` 字典装载，同 key 后写覆盖先写，造成两类伤损：
+
+1. **154 组「有胜者」**：191 个姊妹类全球零格（黑水鸡在中国候选集消失）；
+2. **18 组「全灭」**：学名匹配落到属级/纲级 key（Tachyspiza 属 DOUBTFUL、
+   Anarhynchus 属），speciesKey facet 永不返回该 key，108 类无任何数据。
+
+### 修复 / Fix
+
+| 步骤 | 产物 | 说明 |
+|---|---|---|
+| 装载器一对多 | `build_geo_distribution.py` | `{key: set(class)}`，合并 key 计数全量累加到组内每类；应用 `scripts_dev/data_sources/specieskey_overrides.json` 覆盖表 |
+| 数据补丁 | `scripts_dev/fix_geo_key_collisions.py` | 胜者行复制给 191 个被清零类（+78,153 cell 行）；全灭组经 match/骨干全名/科内加词（拉丁词尾词干归一化）三级解析，96 类拿到种级 key 并入库国家级记录，12 类保守搁置 |
+| 拆分表 | `scripts_dev/build_sibling_country_split.py` | GBIF 记录的原始标签（usageKey）在国家粒度可拆开（普通水鸡标签 CN=0、黑水鸡 CN=41,356）→ 写入 `merged_key_classes`（345 行）与 `merged_group_country_split`（4,163 行） |
+| 运行时降级 | `birdid/geo_filter.py` | 国家已知时，各层候选集先剔除「该组在该国无标签记录」的成员；组在某国无行（数据缺口）则整组放行；缺表旧库静默关闭该功能 |
+
+守卫链（防止同加词异种错配，如褐鹰→靴隼雕、非洲乌鹟→红尾水鸲）：
+变体查询失败即中止（防假唯一）→ 全变体聚合判唯一 → key 占用守卫 →
+俗名交叉验证。实测黑水鸡照片 CN 过滤 top-1 由「普通水鸡 35.6%」修正为
+「黑水鸡 20.5%」；白尾鹞/山鹛/黄苇鳽/褐耳鹰等回归候选集。
+
+### 已知边界 / Known limits
+
+- 喜鹊（Pica serica/pica 为两个正确 key，国内数据集仍用旧名提交 CN 记录）
+  不在合并组内，本补丁不涉及——用户手动改种。
+- 合并组的稀有度分数仍是合并口径（GBIF 种级数据上限）；
+  `gbif_rarity_by_country`（CN）可择期用 usage 计数重跑修正。
+- 12 个未解析类（黑鹰、苏拉雀鹰等）维持无数据现状，待骨干库收录后重跑
+  fix 脚本即可。

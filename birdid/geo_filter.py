@@ -6,10 +6,21 @@
 候选物种集合：本格强候选 → 本格全部 → 邻域 3x3 → 国家级 → 不过滤。
 调用方逐层放宽直到识别有结果，避免旧实现中候选集过窄时直接崩到无过滤。
 
+国家已知时叠加「合并 key 姊妹种降级」：GBIF 骨干未跟上的分类学拆分让多个
+姊妹种共享一份计数（黑水鸡/美洲普通水鸡），候选集无法区分；但记录的原始
+标签（usageKey）在国家粒度可以拆开（普通水鸡标签在中国 0 条）——该国无
+标签记录的姊妹成员会先从各层候选集中剔除。
+
 Yields candidate species sets in widening tiers from geo_distribution.db
 (derived from GBIF CC0/CC-BY occurrence data): strong in-cell, all in-cell, 3x3
 neighbourhood, country, unfiltered. Callers widen until recognition returns a
 result, avoiding the old implementation's collapse straight to no filtering.
+
+When the country is known, a shared-key sibling demotion applies on top:
+taxonomic splits the GBIF backbone has not adopted leave sibling species
+sharing one set of counts, but the dataset-original usage labels separate
+them per country (the American gallinule label has zero records in China),
+so zero-label siblings are dropped from every tier for that country.
 """
 from __future__ import annotations
 
@@ -129,6 +140,14 @@ class GeoFilter:
         self.db_path = db_path or default_db_path()
         self._conn: Optional[sqlite3.Connection] = None
         self._tier1_strategy = _DEFAULT_TIER1
+        # 合并 key 姊妹种国家级拆分（V4.5.0）：None 表示库中无该表（旧库），
+        # 姊妹降级功能整体关闭。
+        # Country-level sibling split for shared-key groups (V4.5.0): None
+        # means the tables are absent (older databases) and the sibling
+        # demotion is disabled wholesale.
+        self._merged_groups: Optional[Dict[int, Set[int]]] = None
+        self._split_allow: Dict[Tuple[str, int], Set[int]] = {}
+        self._demoted_cache: Dict[str, Set[int]] = {}
         if os.path.exists(self.db_path):
             try:
                 self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -140,6 +159,79 @@ class GeoFilter:
             except sqlite3.Error as e:
                 print(_t("logs.geo_db_failed", e=e))
                 self._conn = None
+        self._load_sibling_split()
+
+    def _load_sibling_split(self) -> None:
+        """
+        载入姊妹种国家级拆分表 / Load the country-level sibling-split tables.
+
+        geo_distribution.db 的 `merged_key_classes`（组员名册）与
+        `merged_group_country_split`（每组每国 n>0 的成员）把 GBIF 合并
+        speciesKey 分不开的姊妹种在国家粒度拆开（美洲普通水鸡在美国
+        1.4M 条记录全带 galeata 标签、在中国 0 条；黑水鸡在中国 4.1 万条
+        全带 chloropus 标签）。旧库/缺表时保持 None，降级功能静默关闭。
+
+        `merged_key_classes` (group rosters) and `merged_group_country_split`
+        (per-group per-country members with n>0) split shared-speciesKey
+        siblings at country granularity. Older databases lack the tables and
+        simply leave the feature off.
+
+        异常 / Exceptions:
+            不抛出；任何 SQLite 错误都按缺表处理 / Never raised; any
+            SQLite error is treated as missing tables.
+        """
+        if self._conn is None:
+            return
+        try:
+            roster = self._conn.execute(
+                "SELECT specieskey, class_id FROM merged_key_classes"
+            ).fetchall()
+            groups: Dict[int, Set[int]] = {}
+            for skey, cid in roster:
+                groups.setdefault(int(skey), set()).add(int(cid))
+            allow: Dict[Tuple[str, int], Set[int]] = {}
+            for skey, cc, cid in self._conn.execute(
+                "SELECT specieskey, country, class_id "
+                "FROM merged_group_country_split"
+            ):
+                allow.setdefault((str(cc).upper(), int(skey)), set()).add(int(cid))
+        except sqlite3.Error:
+            return
+        if groups:
+            self._merged_groups = groups
+            self._split_allow = allow
+
+    def _demoted_siblings(self, country_code: str) -> Set[int]:
+        """
+        该国应降级的合并组姊妹 / Shared-key siblings to demote in a country.
+
+        规则：组在该国存在 n>0 的成员时，n=0 的成员降级（美洲种在中国
+        无标签记录即被剔除）；组在该国一行都没有（数据缺口）则整组放行，
+        不误伤。结果按国家缓存。
+
+        Rule: when a group has any n>0 member in the country, its zero-count
+        siblings are demoted; a group with no rows at all for the country is
+        left untouched (data gap). Results are cached per country.
+
+        参数 / Parameters:
+            country_code (str): ISO 3166-1 alpha-2 / ISO country code.
+
+        返回 / Returns:
+            set[int]: 应从候选集中剔除的 class_id / Class ids to drop.
+        """
+        if self._merged_groups is None:
+            return set()
+        cc = country_code.upper()
+        if cc not in self._demoted_cache:
+            demoted: Set[int] = set()
+            for (country, skey), allowed in self._split_allow.items():
+                if country != cc or not allowed:
+                    continue
+                members = self._merged_groups.get(skey)
+                if members:
+                    demoted |= members - allowed
+            self._demoted_cache[cc] = demoted
+        return self._demoted_cache[cc]
 
     def is_available(self) -> bool:
         """
@@ -259,15 +351,23 @@ class GeoFilter:
         按层产出候选集，调用方逐层放宽直到有结果。
 
         空层会被跳过，稀疏网格因此不会产出空候选集（那会屏蔽掉所有类别）。
+        国家已知时，各层候选集会先剔除「合并 key 姊妹种在该国无标签记录」
+        的成员（如中国场景下的美洲普通水鸡/北鹞），被剔空的层同样跳过，
+        由更宽的层或最终的无过滤层兜底。
 
         Yield candidate sets tier by tier; the caller widens until recognition
         succeeds. Empty tiers are skipped so a sparse cell never produces an
-        empty candidate set, which would mask every class.
+        empty candidate set, which would mask every class. When the country is
+        known, every tier is first stripped of shared-key siblings with no
+        label records in that country (e.g. the American moorhen or hen
+        harrier in China); a tier emptied this way is skipped and the wider
+        tiers or the final unfiltered tier take over.
 
         参数 / Parameters:
             lat (Optional[float]): 纬度，无 GPS 时为 None / Latitude or None.
             lon (Optional[float]): 经度，无 GPS 时为 None / Longitude or None.
-            country_code (Optional[str]): 国家代码，用于 L4 / Country code for L4.
+            country_code (Optional[str]): 国家代码，用于 L4 与姊妹降级 /
+                Country code for L4 and the sibling demotion.
 
         返回 / Returns:
             Iterator[tuple]: (候选集或 None, 层标签)；最后一项恒为
@@ -278,21 +378,25 @@ class GeoFilter:
             yield None, TIER_NONE
             return
 
+        demote: Set[int] = set()
+        if country_code and self._merged_groups is not None:
+            demote = self._demoted_siblings(country_code)
+
         has_gps = lat is not None and lon is not None
         if has_gps:
             counts = self._cell_counts([cell_id_for(float(lat), float(lon))])
-            l1 = self._tier1_filter(counts)
+            l1 = self._tier1_filter(counts) - demote
             if l1:
                 yield l1, TIER_CELL_STRONG
-            l2 = set(counts)
+            l2 = set(counts) - demote
             if l2 and l2 != l1:
                 yield l2, TIER_CELL_ALL
-            l3 = set(self._cell_counts(_neighbour_cells(float(lat), float(lon))))
+            l3 = set(self._cell_counts(_neighbour_cells(float(lat), float(lon)))) - demote
             if l3 and l3 != l2:
                 yield l3, TIER_NEIGHBORHOOD
 
         if country_code:
-            l4 = self._country_species(country_code)
+            l4 = self._country_species(country_code) - demote
             if l4:
                 yield l4, TIER_COUNTRY
 

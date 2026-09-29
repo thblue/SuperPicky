@@ -170,12 +170,38 @@ def get_video_capture_date(video_path: str,
 
 def _read_date_with_exiftool(exiftool_path: str, video_path: str) -> Optional[datetime]:
     """
-    用 ExifTool 读视频的日期 tag，返回第一个能 parse 的 datetime
+    用 ExifTool 读视频日期，归一化为本地墙钟（naive datetime）。
 
-    Return the first parseable datetime among candidate ExifTool date tags.
+    QuickTime 家族日期标签的时区口径不一致：同一支 Canon MP4 实测
+    CreateDate 存 UTC（01:21:36）、DateTimeOriginal/MediaCreateDate 存
+    本地墙钟（09:21:36，与文件 mtime 互证），且 -s3 与 -j 暴露的标签
+    别名互不相同。因此不押注单个标签，而是收集全部日期值作候选：
+    - 带时区偏移的值（如「...+08:00」/「...Z」）换算成本地时间；
+    - naive 值按存储墙钟原样参与候选；
+    - 取最大值返回——对 +8 一类正偏移时区（中国/新加坡/澳洲），本地
+      墙钟恒 ≥ UTC 存储，最大者即本地拍摄时间。
+    注意不能用 exiftool -d 预格式化：它会把带时区的值先折算成 UTC 再
+    输出，正是 2026-09-28 修复的「封面/归档时间早 8 小时」的根源。
+
+    Read the video date via ExifTool, normalized to local wall time
+    (naive). QuickTime date tags mix UTC and local storage conventions,
+    and -s3 vs -j expose different tag aliases, so every date value is
+    collected as a candidate: aware values convert to local, naive
+    values join as stored, and the maximum wins — for positive-offset
+    timezones (CN/SG/AU) local wall time is always >= stored UTC, so
+    the max is the local shooting time. Do NOT pre-format with -d: it
+    folds aware values to UTC first (root cause of the 8-hour-early
+    cover/archive timestamps fixed 2026-09-28).
+
+    参数:
+    exiftool_path (str): ExifTool 可执行文件路径
+    video_path (str): 视频文件路径
+
+    返回:
+    Optional[datetime]: 本地墙钟拍摄时间；读取/解析失败返回 None
     """
     tag_args: List[str] = [f"-{t}" for t in _DATE_TAGS]
-    cmd = [exiftool_path, '-s3', '-d', '%Y-%m-%d %H:%M:%S', *tag_args, video_path]
+    cmd = [exiftool_path, "-j", *tag_args, video_path]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=10, encoding='utf-8'
@@ -184,14 +210,53 @@ def _read_date_with_exiftool(exiftool_path: str, video_path: str) -> Optional[da
         return None
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
+    try:
+        records = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(records, list) or not records:
+        return None
+    candidates: List[datetime] = []
+    for tag in _DATE_TAGS:
+        raw = records[0].get(tag) if isinstance(records[0], dict) else None
+        if not isinstance(raw, str):
             continue
+        parsed = _parse_video_date_value(raw)
+        if parsed is not None:
+            candidates.append(parsed)
+    return max(candidates) if candidates else None
+
+
+def _parse_video_date_value(value: str) -> Optional[datetime]:
+    """
+    解析 exiftool 原始日期值；带时区偏移的换算为本地墙钟（naive）。
+
+    支持「YYYY:mm:dd HH:MM:SS」与「YYYY-mm-dd HH:MM:SS」及尾部偏移
+    （+08:00 / +0800 / Z）。naive 值按存储墙钟原样返回（候选池统一取
+    最大，见 _read_date_with_exiftool）。
+
+    Parse a raw exiftool date value; aware values convert to local wall
+    time (naive), naive values return as stored (the candidate pool
+    takes the max, see _read_date_with_exiftool).
+
+    参数:
+    value (str): exiftool 输出的原始日期值
+
+    返回:
+    Optional[datetime]: 解析结果；无法解析返回 None
+    """
+    text = value.strip()
+    if not text:
+        return None
+    for fmt in ('%Y:%m:%d %H:%M:%S%z', '%Y-%m-%d %H:%M:%S%z',
+                '%Y:%m:%d %H:%M:%S', '%Y-%m-%d %H:%M:%S'):
         try:
-            return datetime.strptime(line, '%Y-%m-%d %H:%M:%S')
+            parsed = datetime.strptime(text, fmt)
         except ValueError:
             continue
+        if parsed.tzinfo is not None:
+            return parsed.astimezone().replace(tzinfo=None)
+        return parsed
     return None
 
 

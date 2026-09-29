@@ -523,6 +523,20 @@ def process_directory_videos(
 
         # 4. photos 行入库 / Insert the photos row
         caption_lines = [f"视频封面 Video cover: {os.path.basename(video_path)}"]
+        # 封面行写入拍摄日期（与封面帧 EXIF 同源的 get_video_capture_date
+        # 链，已归一化本地墙钟），否则浏览库 sidebar 无日期——与照片救回
+        # 路径曾有的 EXIF 缺口同类（2026-09-28 修复）。
+        # Cover rows carry the capture date (same get_video_capture_date
+        # chain embedded in the frame JPEG, normalized to local wall
+        # time), otherwise the browse sidebar shows no date — same class
+        # of gap the photo rescue path had (fixed 2026-09-28).
+        capture_date = None
+        try:
+            from tools.video_organizer import get_video_capture_date
+            capture_date = get_video_capture_date(video_path)
+        except Exception as date_exc:
+            log(f"  ⚠️ 封面日期读取失败 / capture date read failed "
+                f"[{stem}]: {date_exc}", "warning")
         photo_row = {
             'filename': stem,
             'has_bird': 1 if found_bird else 0,
@@ -532,6 +546,11 @@ def process_directory_videos(
             'original_path': os.path.basename(cover_path),
             'temp_jpeg_path': os.path.basename(cover_path),
         }
+        if capture_date is not None:
+            # 与照片管线一致的 exiftool 口径（YYYY:MM:DD HH:MM:SS）
+            # Same exiftool convention as photo rows (YYYY:MM:DD HH:MM:SS).
+            photo_row['date_time_original'] = \
+                capture_date.strftime('%Y:%m:%d %H:%M:%S')
         if adopted:
             photo_row['bird_species_cn'] = adopted.get('cn') or ''
             photo_row['bird_species_en'] = adopted.get('en') or ''

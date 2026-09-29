@@ -243,13 +243,17 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
                  birdid_gate: int, dir, i18n,
                  image_path: Optional[str] = None) -> Optional[dict]:
     """
-    无鸟补救扫描：1024px 低阈值重扫 + BirdID 分类器守门。
+    无鸟补救扫描：1024px 低阈值重扫 + BirdID 分类器守门（V4.6）。
 
     第一遍 640 检测低于 UI 阈值时调用。规则：
     1. 重扫最佳 bird 置信度 >= accept_conf → 直接救回；
     2. 否则取最佳候选框（弱 bird，或 airplane/kite 混淆类）交 BirdID 确认，
        top1 置信度 >= birdid_gate(%) → 救回；
     3. 都不满足 → None，维持原拒绝结果。
+
+    原图瓦片检测已独立为每张照片必跑的常规通道 `_tile_detect_pass`
+    （V5.8，含三重门槛），不再挂在补救路径下——补救只管 1024 整图上
+    的低置信候选，瓦片管 1024 分辨率看不见的原生小目标。
 
     参数:
     model: 共享的 YOLO 模型实例（调用方已持有 yolo_infer_lock）
@@ -258,21 +262,108 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
     birdid_gate (int): 弱候选识鸟确认门槛（百分比 0-100）
     dir: 日志目录
     i18n: I18n 实例（可为 None）
-    image_path (Optional[str]): 预览图文件路径；提供时规则 2 的守门裁剪
-        优先从全分辨率原图取框（1024 图上极小目标的裁剪像素过少，
-        分类器必然低分——2026-09 漏检根因）
+    image_path (Optional[str]): 预览图文件路径（内嵌全分辨率 JPEG）；
+        提供时规则 2 的守门裁剪优先从原图取框（1024 图上极小目标的
+        裁剪像素过少，分类器必然低分——2026-09 漏检根因修复）
 
     返回:
-    Optional[dict]: 救回时含 xyxy/conf/mask/source/species/species_conf，
-                    否则 None
+    Optional[dict]: 救回时含 xyxy/conf/mask/source/species/species_conf
+                    （坐标均为预处理图坐标系），否则 None
 
-    No-bird rescue scan: high-res low-threshold rescan with the BirdID
-    classifier as gatekeeper. Returns the rescued candidate dict or None.
-    When image_path is given, the rule-2 confirmation crop prefers the
-    full-resolution source (tiny targets leave only a few dozen pixels
-    on the 1024 image, which the classifier cannot read).
+    No-bird rescue scan (V4.6): low-threshold 1024 rescan with the BirdID
+    classifier as gatekeeper. The tiled full-res detection now lives in
+    the universal `_tile_detect_pass` (V5.8) and runs for every photo.
+    Returns the rescued candidate dict (coordinates in the preprocessed
+    frame) or None.
     """
     t = i18n.t if i18n else get_i18n().t
+
+    def _evaluate(xyxy, confs, clss, masks_np,
+                  log_prefix: str) -> Optional[dict]:
+        """
+        对一轮候选数组执行规则 1/2（直接采纳 / 识鸟守门），返回救回字典。
+
+        阶段 1（1024 整图）与阶段 2（瓦片重扫）共用同一套裁决逻辑，
+        log_prefix 区分日志键（rescue / rescue_tile）。
+
+        Evaluate one round of candidate arrays with rescue rules 1/2;
+        shared by both stages, log_prefix selects the i18n log keys.
+        """
+
+        def _mask_of(i: int):
+            if masks_np is not None and i < len(masks_np):
+                return masks_np[i]
+            return None
+
+        def _result(i: int, source: str, species: str = "",
+                    species_conf: float = 0.0) -> dict:
+            # V5.0(multibird): 救回时带回重扫的全部鸟框（含救回候选），让
+            # 调用方重建完整的 all_birds——鸟群照第一遍 640 分辨率常整体
+            # 漏检，补救扫描是它们唯一的检测来源，只带回最佳一只会让逐鸟
+            # 分类拿到 bird_count=1 永远不触发。带回列表按
+            # RESCUE_MULTIBIRD_MIN_CONF (0.2) 过滤碎小误检框；混淆类候选
+            # （airplane/kite）不在鸟类索引中，追加在末尾，由调用方统一按
+            # 鸟类处理（已过识鸟守门）。
+            # V5.0: carry every rescanned bird box back (conf >= 0.2 floor
+            # against junk fragments) so the caller can rebuild the full
+            # all_birds list; distant flocks are often only detected by
+            # this rescan. A confusable-class rescue candidate is appended
+            # (it already passed the BirdID gate).
+            keep = [int(j) for j in bird_ix
+                    if confs[j] >= config.ai.RESCUE_MULTIBIRD_MIN_CONF]
+            if i not in keep:
+                keep.append(i)
+            return {
+                "xyxy": xyxy[i], "conf": float(confs[i]),
+                "mask": _mask_of(i),
+                "source": source, "species": species,
+                "species_conf": species_conf,
+                "detections": xyxy[keep],
+                "detection_confs": confs[keep],
+                "detection_masks": (masks_np[keep]
+                                    if masks_np is not None else None),
+            }
+
+        # 规则 1：重扫 bird 直接过 UI 阈值
+        # Rule 1: rescanned bird clears the UI threshold
+        cand_i, source = None, ""
+        bird_ix = np.flatnonzero(clss == config.ai.BIRD_CLASS_ID)
+        if bird_ix.size:
+            j = int(bird_ix[confs[bird_ix].argmax()])
+            if confs[j] >= accept_conf:
+                log_message(t(f"logs.{log_prefix}_direct",
+                              conf=f"{confs[j]:.2f}"), dir)
+                return _result(j, "bird")
+            cand_i, source = j, "bird"
+
+        # 规则 2：弱 bird 或 airplane/kite 混淆候选，识鸟守门
+        # Rule 2: weak bird or airplane/kite confusable candidate,
+        # gated by the BirdID classifier
+        if cand_i is None:
+            conf_ix = np.flatnonzero(
+                np.isin(clss, list(config.ai.RESCUE_CONFUSABLE_CLASS_IDS)))
+            if conf_ix.size:
+                j = int(conf_ix[confs[conf_ix].argmax()])
+                cand_i = j
+                source = config.ai.RESCUE_CONFUSABLE_CLASS_IDS[int(clss[j])]
+        if cand_i is None:
+            return None
+
+        full_image, xyxy_full = _load_fullres_for_confirm(
+            image, image_path, xyxy[cand_i])
+        if full_image is not None and xyxy_full is not None:
+            species, species_conf = _birdid_confirm(image, xyxy[cand_i],
+                                                    full_image, xyxy_full)
+        else:
+            species, species_conf = _birdid_confirm(image, xyxy[cand_i])
+        if species_conf >= birdid_gate:
+            log_message(t(f"logs.{log_prefix}_confirmed", source=source,
+                          species=species, conf=f"{species_conf:.0f}"), dir)
+            return _result(cand_i, source, species, species_conf)
+        return None
+
+    # 阶段 1：1024 整图低阈值重扫（V4.6 原逻辑）
+    # Stage 1: low-threshold rescan of the whole 1024 image (V4.6)
     try:
         from config import get_best_device
         device = get_best_device()
@@ -283,82 +374,224 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
         return None
 
     boxes = results[0].boxes
-    if boxes is None or len(boxes) == 0:
+    if boxes is not None and len(boxes) > 0:
+        confs = boxes.conf.cpu().numpy()
+        clss = boxes.cls.cpu().numpy().astype(int)
+        xyxy = boxes.xyxy.cpu().numpy()
+        masks_np = None
+        if getattr(results[0], "masks", None) is not None:
+            masks_np = results[0].masks.data.cpu().numpy()
         del results
-        return None
-    confs = boxes.conf.cpu().numpy()
-    clss = boxes.cls.cpu().numpy().astype(int)
-    xyxy = boxes.xyxy.cpu().numpy()
-    masks_np = None
-    if getattr(results[0], "masks", None) is not None:
-        masks_np = results[0].masks.data.cpu().numpy()
-    del results
-
-    def _mask_of(i: int):
-        if masks_np is not None and i < len(masks_np):
-            return masks_np[i]
-        return None
-
-    def _result(i: int, source: str, species: str = "",
-                species_conf: float = 0.0) -> dict:
-        # V5.0(multibird): 救回时带回重扫的全部鸟框（含救回候选），让
-        # 调用方重建完整的 all_birds——鸟群照第一遍 640 分辨率常整体漏检，
-        # 补救扫描是它们唯一的检测来源，只带回最佳一只会让逐鸟分类
-        # 拿到 bird_count=1 永远不触发。带回列表按 RESCUE_MULTIBIRD_MIN_CONF
-        # (0.2) 过滤碎小误检框；混淆类候选（airplane/kite）不在鸟类索引中，
-        # 追加在末尾，由调用方统一按鸟类处理（已过识鸟守门）。
-        # V5.0: carry every rescanned bird box back (conf >= 0.2 floor
-        # against junk fragments) so the caller can rebuild the full
-        # all_birds list; distant flocks are often only detected by this
-        # rescan. A confusable-class rescue candidate is appended (it
-        # already passed the BirdID gate).
-        keep = [int(j) for j in bird_ix
-                if confs[j] >= config.ai.RESCUE_MULTIBIRD_MIN_CONF]
-        if i not in keep:
-            keep.append(i)
-        return {
-            "xyxy": xyxy[i], "conf": float(confs[i]), "mask": _mask_of(i),
-            "source": source, "species": species, "species_conf": species_conf,
-            "detections": xyxy[keep],
-            "detection_confs": confs[keep],
-            "detection_masks": (masks_np[keep]
-                                if masks_np is not None else None),
-        }
-
-    # 规则 1：重扫 bird 直接过 UI 阈值 / Rule 1: rescanned bird clears UI threshold
-    cand_i, source = None, ""
-    bird_ix = np.flatnonzero(clss == config.ai.BIRD_CLASS_ID)
-    if bird_ix.size:
-        j = int(bird_ix[confs[bird_ix].argmax()])
-        if confs[j] >= accept_conf:
-            log_message(t("logs.rescue_direct", conf=f"{confs[j]:.2f}"), dir)
-            return _result(j, "bird")
-        cand_i, source = j, "bird"
-
-    # 规则 2：弱 bird 或 airplane/kite 混淆候选，识鸟守门
-    # Rule 2: weak bird or airplane/kite confusable candidate, BirdID-gated
-    if cand_i is None:
-        conf_ix = np.flatnonzero(
-            np.isin(clss, list(config.ai.RESCUE_CONFUSABLE_CLASS_IDS)))
-        if conf_ix.size:
-            j = int(conf_ix[confs[conf_ix].argmax()])
-            cand_i = j
-            source = config.ai.RESCUE_CONFUSABLE_CLASS_IDS[int(clss[j])]
-    if cand_i is None:
-        return None
-
-    full_image, xyxy_full = _load_fullres_for_confirm(
-        image, image_path, xyxy[cand_i])
-    if full_image is not None and xyxy_full is not None:
-        species, species_conf = _birdid_confirm(image, xyxy[cand_i],
-                                                full_image, xyxy_full)
+        rescued = _evaluate(xyxy, confs, clss, masks_np, "rescue")
+        if rescued is not None:
+            return rescued
     else:
-        species, species_conf = _birdid_confirm(image, xyxy[cand_i])
-    if species_conf >= birdid_gate:
-        log_message(t("logs.rescue_confirmed", source=source, species=species,
-                      conf=f"{species_conf:.0f}"), dir)
-        return _result(cand_i, source, species, species_conf)
+        del results
     return None
+
+
+def _rescue_tile_scan(model, image_path: str,
+                      proc_hw: Tuple[int, int]) -> Optional[tuple]:
+    """
+    瓦片检测原语（V5.7 引入，V5.8 起由 _tile_detect_pass 调用）。
+
+    把原图按 RESCUE_TILE_SIZE 边长、RESCUE_TILE_OVERLAP 重叠的瓦片网格
+    逐块推理（imgsz=RESCUE_TILE_IMGSZ，与瓦片边长一致 → 长边 1:1 不缩放，
+    小目标保持原生像素量级），框坐标偏移回全图后做跨瓦贪心 IoU 去重
+    （重叠区里同一只鸟只留一框），最后按预处理图/原图比例映射回预处理图
+    坐标系。只做检测与坐标归一，不过滤、不识别——门槛在 _tile_detect_pass。
+
+    资源约束：瓦片数超 RESCUE_TILE_MAX_TILES 时自动放大步长（减小重叠）
+    压缩到上限内；掩码不跨瓦合并（各瓦掩码网格彼此独立），统一返回
+    None——救回框多边形可由调用方确定性重算，不影响入库。
+
+    参数:
+    model: YOLO 模型实例（调用方已持有 yolo_infer_lock）
+    image_path (str): 预览图文件路径（内嵌全分辨率 JPEG）
+    proc_hw (Tuple[int, int]): 预处理图 (height, width)，返回坐标目标系
+
+    返回:
+    Optional[tuple]: (xyxy(N,4), confs(N,), clss(N,), None)；无候选或
+                     小图（长边 <= 瓦片边长，阶段 1 已覆盖）返回 None
+
+    Stage 2: tiled full-resolution scan. Runs YOLO per overlapping tile
+    at native resolution, dedupes boxes across tiles with greedy IoU NMS,
+    then maps coordinates back into the preprocessed frame. Mask data is
+    not merged across tiles (None).
+    """
+    full = read_image_bgr(image_path)
+    if full is None:
+        return None
+    fh, fw = full.shape[:2]
+    tile = max(256, int(config.ai.RESCUE_TILE_SIZE))
+    if max(fh, fw) <= tile:
+        return None
+    overlap = min(0.5, max(0.0, float(config.ai.RESCUE_TILE_OVERLAP)))
+    step = max(32, int(tile * (1.0 - overlap)))
+
+    def _starts(total: int, cur_step: int) -> list:
+        # 覆盖整轴的瓦片起点：0, step, 2*step...，末尾对齐右/下边界
+        # Tile start offsets covering the axis, end-aligned to the border.
+        if total <= tile:
+            return [0]
+        starts = list(range(0, total - tile + 1, cur_step))
+        if starts[-1] != total - tile:
+            starts.append(total - tile)
+        return starts
+
+    xs, ys = _starts(fw, step), _starts(fh, step)
+    max_tiles = max(1, int(config.ai.RESCUE_TILE_MAX_TILES))
+    while len(xs) * len(ys) > max_tiles and step < max(fh, fw):
+        step = int(step * 1.5) + 1
+        xs, ys = _starts(fw, step), _starts(fh, step)
+
+    from config import get_best_device
+    device = get_best_device()
+    xyxy_parts, conf_parts, cls_parts = [], [], []
+    for y0 in ys:
+        for x0 in xs:
+            th, tw = min(tile, fh - y0), min(tile, fw - x0)
+            tile_img = full[y0:y0 + th, x0:x0 + tw]
+            try:
+                results = model(tile_img,
+                                imgsz=config.ai.RESCUE_TILE_IMGSZ,
+                                conf=config.ai.RESCUE_CONF,
+                                device=device.type, verbose=False)
+            except Exception:
+                continue
+            boxes = results[0].boxes
+            if boxes is None or len(boxes) == 0:
+                del results
+                continue
+            xyxy_parts.append(
+                boxes.xyxy.cpu().numpy()
+                + np.array([x0, y0, x0, y0], dtype=np.float32))
+            conf_parts.append(boxes.conf.cpu().numpy())
+            cls_parts.append(boxes.cls.cpu().numpy().astype(int))
+            del results
+    if not xyxy_parts:
+        return None
+    detections = np.concatenate(xyxy_parts).astype(np.float64)
+    confidences = np.concatenate(conf_parts)
+    class_ids = np.concatenate(cls_parts)
+    # 跨瓦贪心 IoU 去重：重叠瓦片里同一只鸟只保留置信度最高的一框
+    # Greedy IoU dedupe so a bird straddling two tiles keeps one box.
+    detections, confidences, class_ids, _ = _dedupe_bird_boxes(
+        detections, confidences, class_ids, None)
+    if len(detections) == 0:
+        return None
+    ih, iw = int(proc_hw[0]), int(proc_hw[1])
+    detections[:, [0, 2]] *= (iw / fw)
+    detections[:, [1, 3]] *= (ih / fh)
+    return detections, confidences, class_ids, None
+
+
+def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
+                      existing_xyxy, birdid_gate: int, dir, i18n) -> list:
+    """
+    常规瓦片检测（V5.8）：每张照片都在原图瓦片上补找 1024 整图看不见的
+    隐蔽小鸟，三重门槛过滤后返回新框。
+
+    背景（2026-09-27 乐活中堤）：栗耳鹀/褐柳莺/红喉歌鸲等深度伪装小目标
+    在 1024 整图上仅剩 ~30px，低于可检下限，整组漏检；瓦片把有效分辨率
+    拉回原生量级后全部可检出。与主检测互补——大鸟由整图层检出（瓦片会
+    把大鸟切碎、且跨瓦掩码不连续），瓦片专管小目标。
+
+    三重门槛（枯叶/杂物防线）：
+    a. 与已有框（主检测/补救结果）IoU > 0.55、或被已有框包含
+       （inter/area(新框) > 0.55）→ 视为同一只鸟丢弃。被包含规则同时
+       拦下大鸟被瓦片切出的"半鸟框"；
+    b. YOLO conf < RESCUE_TILE_MIN_CONF → 直接丢弃，不送识别
+       （实测该区间无真鸟）；
+    c. 从原图裁剪过 BirdID，top1 < birdid_gate → 丢弃。gate=10 时代
+       曾放进枯花误救，2026-09-12 定档 25。
+
+    参数:
+    model: YOLO 模型实例（与主检测同一线程上下文）
+    image_path (str): 预览图文件路径（内嵌全分辨率 JPEG）
+    proc_image (np.ndarray): 已预处理 BGR 图（长边 1024，坐标目标系 +
+        守门裁剪的 1024 回退源）
+    existing_xyxy: 已有框数组 (N,4)（proc 坐标，含全部类别），可为空
+    birdid_gate (int): BirdID 守门门槛（百分比 0-100）
+    dir: 日志目录
+    i18n: I18n 实例（可为 None）
+
+    返回:
+    list: 通过门槛的新框字典列表（按置信度降序），每项含
+          xyxy/conf/species/species_conf（species 为守门分类结果，仅供
+          日志与工具脚本参考；批量链路的逐鸟分类会以更优裁剪重新识别）
+
+    Universal tiled detection pass (V5.8): runs on every photo to find
+    tiny camouflaged birds invisible at 1024, filtered by three gates
+    (existing-box dedupe / conf floor / BirdID gate). Returns the kept
+    boxes as dicts sorted by confidence.
+    """
+    if not image_path or not config.ai.RESCUE_TILE_ENABLED:
+        return []
+    arrays = _rescue_tile_scan(model, image_path, proc_image.shape[:2])
+    if arrays is None:
+        return []
+    cand_xyxy, cand_confs, cand_clss, _ = arrays
+    bird_ix = np.flatnonzero(cand_clss == config.ai.BIRD_CLASS_ID)
+    if bird_ix.size == 0:
+        return []
+    t = i18n.t if i18n else get_i18n().t
+    has_existing = existing_xyxy is not None and len(existing_xyxy) > 0
+    full_image = None
+    xyxy_full = None
+    kept = []
+    rejected = 0
+    # 置信度降序逐个过门槛 / evaluate candidates, highest conf first
+    for j in bird_ix[np.argsort(-cand_confs[bird_ix])]:
+        conf = float(cand_confs[j])
+        box = cand_xyxy[j]
+        # 门槛 a：与已有框高度重叠或被包含 → 同一只鸟/半鸟框，丢弃
+        # Gate a: duplicate or fragment of an existing detection
+        if has_existing:
+            dup = False
+            bx1, by1, bx2, by2 = box
+            b_area = max(0.0, float(bx2 - bx1)) * max(0.0, float(by2 - by1))
+            for e in existing_xyxy:
+                if _iou_xyxy(box, e) > 0.55:
+                    dup = True
+                    break
+                ix1 = max(bx1, e[0])
+                iy1 = max(by1, e[1])
+                ix2 = min(bx2, e[2])
+                iy2 = min(by2, e[3])
+                iw_ = max(0.0, float(ix2 - ix1))
+                ih_ = max(0.0, float(iy2 - iy1))
+                if b_area > 0 and (iw_ * ih_) / b_area > 0.55:
+                    dup = True
+                    break
+            if dup:
+                continue
+        # 门槛 b：置信度地板，低于此值不送识别
+        # Gate b: conf floor — no classifier call for junk
+        if conf < config.ai.RESCUE_TILE_MIN_CONF:
+            rejected += 1
+            continue
+        # 门槛 c：全分辨率裁剪过 BirdID 守门
+        # Gate c: BirdID confirmation on the full-res crop
+        if full_image is None:
+            full_image, xyxy_full = _load_fullres_for_confirm(
+                proc_image, image_path, box)
+        if full_image is not None and xyxy_full is not None:
+            species, species_conf = _birdid_confirm(proc_image, box,
+                                                    full_image, xyxy_full)
+        else:
+            species, species_conf = _birdid_confirm(proc_image, box)
+        if species_conf < birdid_gate:
+            rejected += 1
+            continue
+        kept.append({"xyxy": box, "conf": conf,
+                     "species": species, "species_conf": species_conf})
+    if kept or rejected:
+        detail = " · ".join(f"{b['species']} {b['species_conf']:.0f}%"
+                            for b in kept) or "—"
+        log_message(t("logs.tile_pass", added=len(kept), rejected=rejected,
+                      detail=detail), dir)
+    return kept
 
 
 def _mask_to_polygon(masks, idx: int, width: int, height: int,
@@ -756,6 +989,54 @@ def detect_and_draw_birds(
                         'mask_polygon': _mask_to_polygon(masks, 0, width, height),
                     }]
                     bird_count = 1
+                rescued = True
+
+    # V5.8: 原图瓦片检测——每张照片必跑（不止补救场景）。补找 1024 整图
+    # 分辨率下不可见的隐蔽小鸟（2026-09-27 乐活中堤实测：栗耳鹀/褐柳莺/
+    # 红喉歌鸲深度伪装目标整组漏检）；三重门槛（已有框去重/置信地板/
+    # BirdID 守门）保证枯叶杂物不混入。新框同步追加进 detections 数组，
+    # idx 与 all_birds 严格对齐，主鸟选择与逐鸟分类照常运行。
+    # V5.8: universal tiled detection pass on EVERY photo (not just
+    # rescues) — finds tiny camouflaged birds invisible at 1024; three
+    # gates keep leaves/junk out. New boxes are appended to the
+    # detection arrays with idx aligned to all_birds.
+    if config.ai.RESCUE_TILE_ENABLED:
+        _had_bird_before_tile = bird_count > 0
+        _adv_tile = get_advanced_config()
+        _tile_new = _tile_detect_pass(
+            model, image_path, image, detections,
+            _adv_tile.rescue_birdid_gate, dir, i18n)
+        if _tile_new:
+            _n_new = len(_tile_new)
+            _new_det = np.array([b["xyxy"] for b in _tile_new],
+                                dtype=np.float64)
+            _new_conf = np.array([b["conf"] for b in _tile_new],
+                                 dtype=np.float64)
+            _base_idx = len(detections)
+            detections = (np.vstack([detections, _new_det])
+                          if len(detections) else _new_det)
+            confidences = (np.concatenate([confidences, _new_conf])
+                           if len(confidences) else _new_conf)
+            class_ids = np.concatenate(
+                [class_ids, np.full(_n_new, float(config.ai.BIRD_CLASS_ID))])
+            # masks 不补行（瓦片掩码不跨瓦合并）；_mask_to_polygon 对越界
+            # idx 返回 None，多边形缺失走对焦 bbox 回退，链路已兼容
+            for _k, _b in enumerate(_tile_new):
+                _x1, _y1, _x2, _y2 = [int(v) for v in _b["xyxy"]]
+                _bw = max(0, _x2 - _x1)
+                _bh = max(0, _y2 - _y1)
+                all_birds.append({
+                    'idx': _base_idx + _k,
+                    'conf': _b["conf"],
+                    'bbox': (_x1, _y1, _x2, _y2),
+                    'area_ratio': (_bw * _bh) / float(width * height)
+                                  if width > 0 and height > 0 else 0.0,
+                    'mask_polygon': None,
+                })
+            bird_count = len(all_birds)
+            # 救回语义：原本判无鸟、靠瓦片检出的照片视同补救
+            # Mark as rescued when the pass turned a no-bird photo around.
+            if not _had_bird_before_tile:
                 rescued = True
 
     # V4.2/V5.1: 鸟选择策略（单鸟 → 对焦点命中[多边形优先,bbox回退] →

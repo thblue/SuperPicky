@@ -374,6 +374,26 @@ class AIConfig:
     # V5.0: min YOLO conf for the rescued multi-bird bring-back list.
     # The rescued candidate itself is always included regardless.
     RESCUE_MULTIBIRD_MIN_CONF: float = 0.2
+    # V5.7(tile): 瓦片化全分辨率重扫。1024 整图上 ~30px 的深度伪装小鸟
+    # 低于 YOLO 可检下限，降 conf 地板也救不回（2026-09-27 乐活中堤
+    # 027A6083/027A6223/IMG_6225 实测）。阶段 1（1024 整图）无果时，
+    # 把全分辨率原图按重叠瓦片逐块推理，有效分辨率回到原生量级；
+    # 跨瓦框经贪心 IoU 去重后映射回预处理图坐标系，规则 1/2 与识鸟守门
+    # 与阶段 1 完全一致。仅对无鸟候选图触发，批量耗时约 +0.5~2s/张。
+    # V5.7: tiled full-resolution rescan as rescue stage 2 — the 1024
+    # whole-image pass cannot see deeply camouflaged tiny birds no matter
+    # how low the conf floor is; tiles restore native effective resolution.
+    RESCUE_TILE_ENABLED: bool = True    # 瓦片重扫开关 / tiled rescan enabled
+    RESCUE_TILE_SIZE: int = 2048        # 瓦片边长（原图像素）/ tile edge (px)
+    RESCUE_TILE_IMGSZ: int = 2048       # 瓦片推理分辨率（长边 1:1）/ inference imgsz
+    RESCUE_TILE_OVERLAP: float = 0.2    # 瓦片重叠比例 / tile overlap ratio
+    RESCUE_TILE_MAX_TILES: int = 24     # 单图瓦片数上限 / max tiles per image
+    # V5.8: 瓦片候选送 BirdID 守门的最低 YOLO 置信度。2026-09-27 乐活
+    # 中堤实测：真鸟最低 0.15（树鹨）、0.05~0.1 区间未出过真鸟，地板
+    # 定 0.1 兼顾识别成本——低于它的框直接丢弃不送分类。
+    # V5.8: min YOLO conf for a tile candidate to earn a BirdID gate call.
+    # Field data: real hidden birds start at 0.15; nothing real below 0.1.
+    RESCUE_TILE_MIN_CONF: float = 0.1
     # COCO 中飞鸟常被误认的类别 / COCO classes birds in flight are mistaken for
     RESCUE_CONFUSABLE_CLASS_IDS: dict = field(
         default_factory=lambda: {4: "airplane", 33: "kite"})

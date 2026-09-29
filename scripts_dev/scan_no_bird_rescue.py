@@ -63,8 +63,12 @@ def main() -> int:
     conn.close()
     print(f"📁 {root}  无鸟 {len(rows)} 张")
 
-    from core.ai_model import preprocess_image, load_yolo_model, _rescue_scan
+    from core.ai_model import (preprocess_image, load_yolo_model,
+                               _rescue_scan, _tile_detect_pass)
+    from advanced_config import get_advanced_config
     model = load_yolo_model()
+    # 守门门槛对齐批量口径（advanced_config，当前定档 25）
+    gate = get_advanced_config().rescue_birdid_gate
 
     rescued: List[tuple] = []
     for i, (prefix,) in enumerate(rows, 1):
@@ -77,13 +81,26 @@ def main() -> int:
             print(f"  [{i}/{len(rows)}] {prefix}: 预览生成失败，跳过")
             continue
         img = preprocess_image(preview)
-        r = _rescue_scan(model, img, args.accept_conf, 10, None, None,
+        # V5.8: 1024 整图补救 + 常规瓦片检测两条通道都报告。
+        # Report both the 1024-rescan rescue and the universal tile pass.
+        r = _rescue_scan(model, img, args.accept_conf, gate, None, None,
                          image_path=preview)
         if r is not None:
             species = r.get("species") or "?"
             rescued.append((prefix, r["conf"], species, r.get("species_conf", 0.0)))
             print(f"  [{i}/{len(rows)}] {prefix}: 🐦 救回 {r['conf']:.2f} "
                   f"→ {species} {r.get('species_conf', 0.0):.0f}%")
+            continue
+        tiles = _tile_detect_pass(model, preview, img, None, gate,
+                                  None, None)
+        if tiles:
+            best = tiles[0]
+            rescued.append((prefix, best["conf"],
+                            best["species"] or "?", best["species_conf"]))
+            extra = f"（共 {len(tiles)} 框）" if len(tiles) > 1 else ""
+            print(f"  [{i}/{len(rows)}] {prefix}: 🐦 瓦片救回 "
+                  f"{best['conf']:.2f} → {best['species']} "
+                  f"{best['species_conf']:.0f}%{extra}")
         else:
             print(f"  [{i}/{len(rows)}] {prefix}: 仍无鸟")
 

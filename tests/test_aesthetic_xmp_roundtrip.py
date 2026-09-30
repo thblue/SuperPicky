@@ -85,6 +85,18 @@ class TestAestheticXmpRoundtrip(unittest.TestCase):
         fd, self.jpg_path = tempfile.mkstemp(suffix=".jpg", prefix="sp_aesthetic_")
         os.close(fd)
         _make_minimal_jpeg(self.jpg_path)
+        # 批量入口按全局配置分流（none=合法跳过、sidecar=写侧车），测试
+        # 必须钉扎 embedded 模式——否则结果随开发机 advanced_config 的
+        # metadata_write_mode 漂移（实测：本机 =none 时批量路径静默跳过）。
+        # The batch entry dispatches on the global write mode (none legally
+        # skips, sidecar writes .xmp files); pin "embedded" so the result
+        # cannot drift with the dev machine's advanced_config.
+        import unittest.mock as _mock
+        patcher = _mock.patch.object(
+            ExifToolManager, "_get_metadata_write_mode",
+            return_value="embedded")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         if os.path.exists(self.jpg_path):

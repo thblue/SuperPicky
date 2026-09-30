@@ -200,6 +200,56 @@ class TestClassifySecondaryBirds(unittest.TestCase):
         self.assertIsNotNone(rows[0]['bbox_w'])
         self.assertIsNone(rows[0]['crop_sharpness'])
 
+    def test_secondary_gets_dark_retry_crop(self):
+        """V5.9.5: 次要鸟接入暗版双渲染——identify_fn 收到非 None 的
+        retry_crop（由 _dark.jpg 同位换算裁出），与主鸟救援语义对齐。
+
+        Secondary birds receive a co-registered dark-rendition crop as
+        retry_crop, matching the main bird's dual-rendition rescue."""
+        import cv2
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="sp_mb_dark_")
+        prev = os.path.join(tmpdir, "DSC_0001.jpg")
+        dark = os.path.join(tmpdir, "DSC_0001_dark.jpg")
+        cv2.imwrite(prev, np.full((200, 300, 3), 80, dtype=np.uint8))
+        cv2.imwrite(dark, np.full((200, 300, 3), 30, dtype=np.uint8))
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+
+        seen = {}
+
+        def fake(path, use_yolo, use_gps, use_geo, cc, rc, top_k, nf, crop,
+                 dark_retry_conf=None, retry_crop=None, **kw):
+            seen['dark_retry_conf'] = dark_retry_conf
+            seen['retry_crop'] = retry_crop
+            return {'success': True, 'results': [{
+                'cn_name': '虎皮鹦鹉', 'en_name': 'Budgerigar',
+                'scientific_name': 'Melopsittacus undulatus',
+                'confidence': 88.0, 'class_id': 7,
+                'gbif_rarity_100': 5.0}]}
+
+        from core.multi_bird import classify_secondary_birds
+        birds = [
+            {'idx': 0, 'conf': 0.9, 'bbox': (10, 10, 60, 60),
+             'area_ratio': 0.09, 'mask_polygon': None, 'is_selected': True},
+            {'idx': 1, 'conf': 0.7, 'bbox': (60, 60, 110, 90),
+             'area_ratio': 0.03, 'mask_polygon': None, 'is_selected': False},
+        ]
+        rows = classify_secondary_birds(
+            self.orig, birds,
+            proc_dims=(150, 100), orig_dims=(300, 200),
+            main_species=None, filename='DSC_0001',
+            photo_path=prev,
+            min_area_ratio=0.001,
+            identify_fn=fake,
+            dark_retry_conf=40.0)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(seen.get('dark_retry_conf'), 40.0)
+        # 次要鸟的暗版框图已构建并传入：原图坐标框 100x60（proc 50x30 ×2
+        # 缩放）+ 0.15 留边（±15px）= 130x90，来自 _dark.jpg 同位裁剪
+        self.assertIsNotNone(seen.get('retry_crop'))
+        self.assertEqual(seen['retry_crop'].size, (130, 90))
+
     def test_small_bird_boxed_but_not_classified(self):
         """面积 < min_area_ratio：只入框不分类（识别器不被调用）。"""
         birds = [

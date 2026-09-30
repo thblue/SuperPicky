@@ -80,12 +80,15 @@ class TestQuotaAssignment(unittest.TestCase):
         self.assertEqual(res["p000"].reason_key, "rating_v2.eye_capped")
 
     def test_burst_cap(self):
-        """同连拍组 3★ 封顶 2 张,溢出者降 2★ / per-burst 3-star cap."""
+        """同连拍组 3★ 封顶 2 张,溢出者降 1★ / per-burst 3-star cap.
+
+        V5.9 前系（b68e02e「连拍/相似组封顶降1星」）：同组照片互为替品，
+        溢出者直接降 1★（旧版降 2★ 会挤占真正独立的 2★ 位）。"""
         photos = [make_photo(f"p{i}", sharp=800 - i, topiq=6.0, burst_id=7)
                   for i in range(5)]
         res = assign_ratings(photos, quota3=100, quota2=0, burst_cap3=2)
         stars = sorted((r.rating for r in res.values()), reverse=True)
-        self.assertEqual(stars, [3, 3, 2, 2, 2])
+        self.assertEqual(stars, [3, 3, 1, 1, 1])
         capped = [k for k, r in res.items() if r.reason_key == "rating_v2.burst_capped"]
         self.assertEqual(len(capped), 3)
 

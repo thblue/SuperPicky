@@ -360,6 +360,33 @@ def test_detect_tile_pass_finds_hidden_bird(tmp_path, monkeypatch):
     assert abs(x - TARGET_PROC[0]) < 1 and abs(y - TARGET_PROC[1]) < 1
 
 
+def test_detect_tile_unconfirmed_keeps_box_without_rescue(tmp_path,
+                                                           monkeypatch):
+    """V5.9.5: 瓦片框守门未过 → 框保留（found_bird/bird_count=1）但
+    rescued=False（未过两因子核验不豁免置信门槛，走 0★ 仅框路径），
+    all_birds 带 tile_unconfirmed 标记。
+
+    Gate-failed tile boxes survive without flipping rescued — the photo
+    takes the 0-star geometry-only path for human rescue instead."""
+    jpg = _write_fullres_jpg(tmp_path)
+
+    class _Cfg:
+        rescue_scan_enabled = True
+        rescue_birdid_gate = 25
+
+    monkeypatch.setattr(ai_model, "get_advanced_config", lambda: _Cfg())
+    monkeypatch.setattr(ai_model, "_birdid_confirm",
+                        lambda image, xyxy, full_image=None,
+                        xyxy_full=None: ("某鸟", 12.0))
+    result = ai_model.detect_and_draw_birds(
+        jpg, _ContentFakeModel(), None, str(tmp_path), [50, 300, 5.0, False],
+        None)
+    assert result[0] is True          # found_bird：框保留，不再丢弃
+    assert result[8] == 1             # bird_count
+    assert result[9] is False         # rescued：守门未过不构成救回
+    assert result[10][0].get("tile_unconfirmed") is True
+
+
 def test_detect_tile_pass_enriches_big_bird_photo(tmp_path, monkeypatch):
     """pass-1 检出大鸟（过 UI 阈值）时瓦片仍运行，且新增小鸟不与大鸟重复。
     Tiles still run for photos that passed; the added bird is separate."""

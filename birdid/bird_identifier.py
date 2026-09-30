@@ -1540,8 +1540,20 @@ def identify_bird(
             )
             _top_conf = (float(results[0].get("confidence") or 0.0)
                          if results else None)
-            _needs_retry = (_top_conf is None
-                            or _top_conf < float(dark_retry_conf))
+            # V5.9.5: 双渲染对照扩展到采纳线之上——提亮版可能把错误种推过
+            # 采纳线（41% 错判此前无对照机会）。预载暗版（retry_crop）存在时
+            # 总是对照一次，净胜裕度内才翻盘（此时挑战者 ≥ 原判定+3 ≥ 采纳
+            # 线+3，天然是可采纳候选）；惰性工厂（~2s RAW 开发）与内存伽马
+            # 维持「低于采纳线才触发」的成本/风险口径不变。
+            # V5.9.5: the dual-rendition compare now also runs ABOVE the
+            # adoption line — the brightened pass can push a wrong species
+            # just past it. With an eager dark crop the compare always
+            # runs and only wins by the margin (the challenger is then
+            # ≥ original+3 ≥ line+3, a valid candidate); the lazy factory
+            # (~2s RAW develop) and the in-memory gamma stay below-line.
+            _below_line = (_top_conf is None
+                           or _top_conf < float(dark_retry_conf))
+            _needs_retry = True if retry_crop is not None else _below_line
             if _needs_retry:
                 _o_conf = (_top_conf if _top_conf is not None else -1.0)
                 # 备选渲染解析：预载暗版优先，其次惰性工厂（平坦雾片的

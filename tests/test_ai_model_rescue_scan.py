@@ -270,15 +270,22 @@ def test_tile_pass_conf_floor_skips_classifier(tmp_path, monkeypatch):
 
 
 def test_tile_pass_birdid_gate_rejects_leaf(tmp_path, monkeypatch):
-    """BirdID top1 < 门槛 → 候选被剔除（枯叶防线）。
-    Candidates below the BirdID gate are rejected (leaf defense)."""
+    """BirdID top1 < 门槛 → 框保留为 unconfirmed（0★ 仅框待人工回捞）。
+
+    V5.9.5 契约：守门未过不再丢弃——返回框带 unconfirmed=True，由批量
+    链路落库为仅几何行；不触发救回语义（见 detect_and_draw_birds）。
+    Gate-failed candidates are KEPT as unconfirmed geometry-only boxes
+    (V5.9.5) instead of being dropped — human rescue has a box to work
+    with; they never flip the rescued flag."""
     jpg = _write_fullres_jpg(tmp_path)
     monkeypatch.setattr(ai_model, "_birdid_confirm",
                         lambda image, xyxy, full_image=None,
                         xyxy_full=None: ("某鸟", 12.0))
     boxes = ai_model._tile_detect_pass(_ContentFakeModel(), jpg, IMG43,
                                        None, 25, ".", None)
-    assert boxes == []
+    assert len(boxes) == 1
+    assert boxes[0].get("unconfirmed") is True
+    assert boxes[0]["species_conf"] == 12.0
 
 
 def test_tile_pass_disabled(tmp_path, monkeypatch):

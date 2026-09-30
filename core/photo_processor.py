@@ -1340,60 +1340,14 @@ class PhotoProcessor:
                 identify_bird_fn = None
                 self._log(f"  ⚠️ BirdID import failed: {e}", "warning")
         
-        def _build_dark_retry_crop(preview_path, box, ref_dims):
-            """
-            V5.9.2: 从原始暗渲染伴随缓存（<前缀>_dark.jpg）裁出同位框图。
-
-            暗片管线下预览缓存已被 RAW 级提亮版覆盖，但原始内嵌渲染由
-            raw_to_jpeg 另存为 _dark.jpg（见 find_bird_util）。分类双渲染
-            对比需要把同一鸟框（坐标基于提亮版）按两版分辨率换算后从暗版
-            裁出。暗版不存在（非暗片/纯 JPEG/背光护栏豁免）返回 None，
-            identify_bird 自动回退内存伽马重试。
-
-            参数:
-            preview_path (str): 提亮版预览路径（同目录推导 _dark.jpg）
-            box (tuple): 提亮版坐标 (x, y, w, h)（已含 +15% padding）
-            ref_dims (tuple): 提亮版 (w, h)；任一无效返回 None
-
-            返回:
-            PIL.Image 或 None
-
-            V5.9.2: crop the co-registered box from the original dark
-            rendition sidecar (<prefix>_dark.jpg). Coordinates live in the
-            brightened preview's space and are rescaled to the dark
-            rendition's dimensions. Returns None when the sidecar is
-            absent; identify_bird then falls back to the in-memory gamma
-            retry.
-            """
-            try:
-                if not preview_path or not box or not ref_dims:
-                    return None
-                base, _ext = os.path.splitext(preview_path)
-                dark_path = base + "_dark.jpg"
-                if not os.path.exists(dark_path):
-                    return None
-                import cv2 as _cv2
-                from PIL import Image as _PILImage
-                dark = _cv2.imread(dark_path, _cv2.IMREAD_COLOR)
-                if dark is None:
-                    return None
-                dh, dw = dark.shape[:2]
-                rw, rh = ref_dims
-                if rw <= 0 or rh <= 0:
-                    return None
-                sx, sy = dw / float(rw), dh / float(rh)
-                x, y, w, h = box
-                x1 = max(0, int(x * sx))
-                y1 = max(0, int(y * sy))
-                x2 = min(dw, int((x + w) * sx))
-                y2 = min(dh, int((y + h) * sy))
-                if x2 - x1 < 8 or y2 - y1 < 8:
-                    return None
-                crop = dark[y1:y2, x1:x2]
-                return _PILImage.fromarray(
-                    _cv2.cvtColor(crop, _cv2.COLOR_BGR2RGB))
-            except Exception:
-                return None
+        # V5.9.5: 暗版同位框裁剪上移 tools/find_bird_util 单一实现
+        # （build_dark_retry_crop）——主鸟与多鸟次要鸟（core/multi_bird）
+        # 共用同一坐标换算；签名与语义不变，暗版不存在仍返回 None。
+        # V5.9.5: the dark co-registered crop now lives in
+        # tools/find_bird_util (build_dark_retry_crop), shared by the main
+        # bird here and secondary birds in core/multi_bird.
+        from tools.find_bird_util import (
+            build_dark_retry_crop as _build_dark_retry_crop)
 
         def _make_flat_retry_factory(raw_src, box, ref_dims):
             """
@@ -2520,6 +2474,20 @@ class PhotoProcessor:
                 
                     # 记录评分（用于文件移动）- V4.0.4: 使用 original_prefix 确保匹配 NEF
                     self.file_ratings[original_prefix] = rating_value
+
+                    # V5.9.5: 检测被拒但有框的照片，框仍仅几何落库——瓦片
+                    # 守门未过的框、低置信主检框都保留，0★ 供人工回捞/
+                    # backfill（与 V5.6 识鸟门控拒绝兜底同哲学：检测阶段丢
+                    # 框等于连「以后再试」的机会都没有）。
+                    # V5.9.5: detection-rejected photos with boxes still
+                    # persist geometry-only rows (tile-gate failures and
+                    # low-confidence main boxes alike) at 0 stars for human
+                    # rescue / backfill — same philosophy as the V5.6
+                    # identify-gate boxes-only fallback.
+                    if detected and all_birds and img_dims:
+                        _persist_boxes_only(
+                            original_prefix, filepath, all_birds, img_dims,
+                            (yolo_item or {}).get('decoded_image'))
 
                     if path_update_data and self.report_db:
                         self.report_db.update_photo(original_prefix, path_update_data)

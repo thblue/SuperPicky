@@ -93,6 +93,9 @@ def main() -> int:
             continue
         tiles = _tile_detect_pass(model, preview, img, None, gate,
                                   None, None)
+        # V5.9.5: 守门未过的瓦片框是 0★ 仅框候选，不算「可救回」。
+        # V5.9.5: BirdID-gate-failed tile boxes are geometry-only, not rescues.
+        tiles = [t for t in tiles if not t.get("unconfirmed")]
         if tiles:
             best = tiles[0]
             rescued.append((prefix, best["conf"],

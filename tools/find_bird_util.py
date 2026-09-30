@@ -228,6 +228,99 @@ def _dark_sidecar_path(jpg_path: str) -> str:
     return base + "_dark.jpg"
 
 
+def load_dark_rendition(preview_path: str):
+    """
+    读入 <前缀>_dark.jpg 原始暗渲染（V5.9.5，多鸟逐鸟复用一次解码）。
+
+    Load the original dark rendition once for per-bird reuse.
+
+    参数 / Parameters:
+        preview_path (str): 提亮版预览路径（同目录推导 _dark.jpg）
+                           / brightened preview path.
+
+    返回 / Returns:
+        np.ndarray: 暗版 BGR；不存在/解码失败返回 None / BGR array or None.
+    """
+    try:
+        import cv2 as _cv2
+        p = _dark_sidecar_path(preview_path)
+        if not preview_path or not os.path.exists(p):
+            return None
+        return _cv2.imread(p, _cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+
+
+def build_dark_retry_crop(preview_path, box, ref_dims,
+                          dark_image=None, pad_ratio: float = 0.0):
+    """
+    从原始暗渲染伴随缓存（<前缀>_dark.jpg）裁出同位框图（V5.9.2 引入，
+    V5.9.5 上移共享：主鸟 photo_processor 与多鸟次要鸟 core/multi_bird
+    共用同一实现与坐标换算）。
+
+    暗片管线下预览缓存已被 RAW 级提亮版覆盖，但原始内嵌渲染由
+    raw_to_jpeg 另存为 _dark.jpg。分类双渲染对比需要把同一鸟框（坐标
+    基于提亮版）按两版分辨率换算后从暗版裁出。暗版不存在（非暗片/纯
+    JPEG/背光护栏豁免）返回 None，identify_bird 自动回退内存伽马重试。
+
+    Crop the co-registered box from the original dark rendition sidecar
+    (<prefix>_dark.jpg). Introduced in V5.9.2 and shared since V5.9.5 by
+    the main-bird path (photo_processor) and secondary birds
+    (core/multi_bird) — one implementation, one coordinate conversion.
+
+    The brightened pipeline overwrote the preview cache, but the original
+    embedded rendition was preserved as _dark.jpg by raw_to_jpeg. The
+    dual-rendition compare needs the same bird box (brightened-preview
+    coordinates) rescaled to the dark rendition's dimensions. Returns None
+    when the sidecar is absent; identify_bird then falls back to the
+    in-memory gamma retry.
+
+    参数 / Parameters:
+        preview_path (str): 提亮版预览路径（同目录推导 _dark.jpg）
+                           / brightened preview path.
+        box (tuple): 提亮版坐标 (x, y, w, h) / box in preview coords.
+        ref_dims (tuple): 提亮版 (w, h)；任一无效返回 None / reference
+                          dims; any invalid value returns None.
+        dark_image (Optional[np.ndarray]): 预载暗版 BGR（多鸟逐鸟复用，
+            免重复解码 ~30ms/次）；None 时按推导路径现读 / preloaded
+            dark rendition; loaded on demand when None.
+        pad_ratio (float): 框外扩比例（默认 0=box 已含留边；多鸟次要鸟
+            传 0.15 对齐 smart_square_crop 口径）/ outward padding ratio.
+
+    返回 / Returns:
+        PIL.Image 或 None（开发失败/框无效）/ PIL RGB crop or None.
+    """
+    try:
+        if not preview_path or not box or not ref_dims:
+            return None
+        import cv2 as _cv2
+        from PIL import Image as _PILImage
+        dark = dark_image
+        if dark is None:
+            dark = load_dark_rendition(preview_path)
+        if dark is None:
+            return None
+        dh, dw = dark.shape[:2]
+        rw, rh = ref_dims
+        if rw <= 0 or rh <= 0:
+            return None
+        sx, sy = dw / float(rw), dh / float(rh)
+        x, y, w, h = box
+        if pad_ratio > 0:
+            pad = int(max(w, h) * pad_ratio)
+            x, y, w, h = x - pad, y - pad, w + 2 * pad, h + 2 * pad
+        x1 = max(0, int(x * sx))
+        y1 = max(0, int(y * sy))
+        x2 = min(dw, int((x + w) * sx))
+        y2 = min(dh, int((y + h) * sy))
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return None
+        crop = dark[y1:y2, x1:x2]
+        return _PILImage.fromarray(_cv2.cvtColor(crop, _cv2.COLOR_BGR2RGB))
+    except Exception:
+        return None
+
+
 # V5.9.3: 平坦雾片判据与 RAW 开发探测的扩展名集。
 # V5.9.3: flat-fog threshold and RAW extension set for develop probes.
 RAW_DEV_EXTS = (".cr3", ".nef", ".arw", ".raf", ".orf", ".dng")

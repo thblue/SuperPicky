@@ -503,8 +503,11 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
        拦下大鸟被瓦片切出的"半鸟框"；
     b. YOLO conf < RESCUE_TILE_MIN_CONF → 直接丢弃，不送识别
        （实测该区间无真鸟）；
-    c. 从原图裁剪过 BirdID，top1 < birdid_gate → 丢弃。gate=10 时代
-       曾放进枯花误救，2026-09-12 定档 25。
+    c. 从原图裁剪过 BirdID，top1 < birdid_gate → 不构成「救回」，但
+       V5.9.5 起不再丢弃：保留为 unconfirmed=True 的框随照片走
+       0★ 仅几何落库（检测阶段丢框=连人工回捞的机会都没有；与 V5.6
+       识鸟门控拒绝的仅框落库同哲学）。gate=10 时代曾放进枯花误救，
+       2026-09-12 定档 25。
 
     参数:
     model: YOLO 模型实例（与主检测同一线程上下文）
@@ -517,14 +520,18 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
     i18n: I18n 实例（可为 None）
 
     返回:
-    list: 通过门槛的新框字典列表（按置信度降序），每项含
-          xyxy/conf/species/species_conf（species 为守门分类结果，仅供
-          日志与工具脚本参考；批量链路的逐鸟分类会以更优裁剪重新识别）
+    list: 新框字典列表（按置信度降序），每项含
+          xyxy/conf/species/species_conf；过守门的框无额外标记，
+          守门未过的框带 unconfirmed=True（不触发救回语义，落库为
+          仅几何行待人工/回捞）。species 为守门分类结果，仅供日志与
+          工具脚本参考；批量链路的逐鸟分类会以更优裁剪重新识别。
 
     Universal tiled detection pass (V5.8): runs on every photo to find
     tiny camouflaged birds invisible at 1024, filtered by three gates
-    (existing-box dedupe / conf floor / BirdID gate). Returns the kept
-    boxes as dicts sorted by confidence.
+    (existing-box dedupe / conf floor / BirdID gate). Gate failures used
+    to be dropped outright; since V5.9.5 BirdID-gate failures are KEPT
+    as unconfirmed=True boxes that persist geometry-only at 0 stars for
+    human rescue — same philosophy as the V5.6 boxes-only fallback.
     """
     if not image_path or not config.ai.RESCUE_TILE_ENABLED:
         return []
@@ -540,6 +547,7 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
     full_image = None
     xyxy_full = None
     kept = []
+    unconfirmed = []  # V5.9.5: 守门未过但保留的框（仅几何落库，不触发救回）
     rejected = 0
     # 置信度降序逐个过门槛 / evaluate candidates, highest conf first
     for j in bird_ix[np.argsort(-cand_confs[bird_ix])]:
@@ -582,16 +590,35 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
         else:
             species, species_conf = _birdid_confirm(proc_image, box)
         if species_conf < birdid_gate:
-            rejected += 1
+            # V5.9.5: 守门未过不再丢弃——保留为 unconfirmed 框随照片走
+            # 0★ 仅几何落库，人工回捞/backfill 从此有据可依；不触发
+            # rescued（未过两因子核验，不豁免置信门槛）。
+            # V5.9.5: gate failure keeps the box (unconfirmed=True) for a
+            # geometry-only 0-star row instead of dropping it — human
+            # rescue finally has something to work with; no rescued flip
+            # (the box never passed the two-factor verification).
+            unconfirmed.append({"xyxy": box, "conf": conf,
+                                "species": species,
+                                "species_conf": species_conf,
+                                "unconfirmed": True})
             continue
         kept.append({"xyxy": box, "conf": conf,
                      "species": species, "species_conf": species_conf})
-    if kept or rejected:
+    if kept or unconfirmed:
         detail = " · ".join(f"{b['species']} {b['species_conf']:.0f}%"
                             for b in kept) or "—"
         log_message(t("logs.tile_pass", added=len(kept), rejected=rejected,
                       detail=detail), dir)
-    return kept
+        if unconfirmed:
+            # 未确认框单独提示（保留为 0★ 仅框，待人工回捞）
+            # Unconfirmed boxes kept as 0-star geometry-only rows.
+            _ud = " · ".join(f"{b['species']} {b['species_conf']:.0f}%"
+                             for b in unconfirmed)
+            log_message(
+                f"  🧩 Tile gate unconfirmed → kept as 0★ boxes: "
+                f"{len(unconfirmed)} ({_ud}) 瓦片守门未过，保留仅框待回捞",
+                dir)
+    return kept + unconfirmed
 
 
 def _mask_to_polygon(masks, idx: int, width: int, height: int,
@@ -1032,11 +1059,21 @@ def detect_and_draw_birds(
                     'area_ratio': (_bw * _bh) / float(width * height)
                                   if width > 0 and height > 0 else 0.0,
                     'mask_polygon': None,
+                    # V5.9.5: 守门未过的瓦片框——随照片落库为仅几何行，
+                    # 供人工回捞/backfill；标记仅供日志与排查使用。
+                    # V5.9.5: BirdID-gate-failed tile boxes persist as
+                    # geometry-only rows for human rescue / backfill.
+                    'tile_unconfirmed': bool(_b.get("unconfirmed")),
                 })
             bird_count = len(all_birds)
-            # 救回语义：原本判无鸟、靠瓦片检出的照片视同补救
-            # Mark as rescued when the pass turned a no-bird photo around.
-            if not _had_bird_before_tile:
+            # 救回语义：原本判无鸟、靠瓦片检出的照片视同补救。V5.9.5 起
+            # 仅「过守门」的框构成救回——未确认框走 0★ 仅框（无物种核验，
+            # 不豁免置信门槛）。
+            # Mark as rescued only when CONFIRMED tile boxes turned a
+            # no-bird photo around (V5.9.5); unconfirmed boxes take the
+            # 0-star geometry-only path instead.
+            if not _had_bird_before_tile and any(
+                    not b.get("unconfirmed") for b in _tile_new):
                 rescued = True
 
     # V4.2/V5.1: 鸟选择策略（单鸟 → 对焦点命中[多边形优先,bbox回退] →

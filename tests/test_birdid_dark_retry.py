@@ -197,17 +197,44 @@ class TestDarkRetry:
         assert result["results"][0]["confidence"] == pytest.approx(25.0)
         assert "brightened_retry" not in result
 
-    def test_dark_retry_crop_skipped_when_confident(self, patched_identify_env):
-        """亮版首判已过线 → 不做任何重试。"""
+    def test_dark_retry_crop_above_line_keeps_bright(self,
+                                                     patched_identify_env):
+        """V5.9.5: 亮版首判已过线 → 暗版仍对照一次，未净胜保留亮版。
+
+        采纳线之上的错判此前没有任何对照机会；现在预载暗版总是参与
+        对照（恰好多一次分类），净胜 +3 才翻盘。"""
         patched_identify_env.append([_candidate(85.0)])
+        patched_identify_env.append([_candidate(87.0, "紫啸鸫")])  # +2 未达净胜线
 
         result = bi.identify_bird(
             "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(110),
             dark_retry_conf=40.0, retry_crop=_crop(45))
 
         assert result["results"][0]["confidence"] == pytest.approx(85.0)
-        assert len(patched_identify_env) == 1
+        assert result["results"][0]["cn_name"] == "普通翠鸟"
+        assert len(patched_identify_env) == 2  # 过线也对照了一次
         assert "brightened_retry" not in result
+
+    def test_dark_retry_crop_above_line_flips_on_net_win(
+            self, patched_identify_env):
+        """V5.9.5: 过线亮版 41%（疑错判）→ 暗版 66% 净胜 → 采纳暗版。
+
+        Above-line bright verdicts are now challengeable: a dark
+        rendition winning by the margin replaces them (the challenger is
+        ≥ 44 ≥ the adoption line by construction)."""
+        patched_identify_env.append([_candidate(41.0, "灰翅鸫")])
+        patched_identify_env.append([_candidate(66.0, "乌灰鸫")])
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(110),
+            dark_retry_conf=40.0, retry_crop=_crop(45))
+
+        assert result["results"][0]["confidence"] == pytest.approx(66.0)
+        assert result["results"][0]["cn_name"] == "乌灰鸫"
+        retry = result["brightened_retry"]
+        assert retry["retry_kind"] == "dark_original"
+        assert retry["orig_conf"] == pytest.approx(41.0)
+        assert len(patched_identify_env) == 2
 
     def test_dark_retry_crop_preferred_over_gamma(self, patched_identify_env):
         """提供暗版时走暗版重试，不再叠加内存伽马（共 2 次分类）。"""

@@ -121,6 +121,11 @@ def main() -> int:
         existing = [r["xyxy"]] if r is not None else None
         tiles = _tile_detect_pass(model, preview, proc, existing, gate,
                                   None, None)
+        # V5.9.5: 瓦片守门未过的框只落 0★ 仅框，不构成「救回」——本脚本是
+        # 手工救回工具，只采纳过守门的框。
+        # V5.9.5: BirdID-gate-failed tile boxes are 0-star geometry-only,
+        # not rescues — this manual rescue tool adopts confirmed boxes only.
+        tiles = [t for t in tiles if not t.get("unconfirmed")]
         if r is None and not tiles:
             print(f"  [{i}/{len(prefixes)}] {prefix}: 本轮扫描未救回（漂移），跳过")
             continue

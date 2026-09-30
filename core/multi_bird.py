@@ -232,20 +232,31 @@ def classify_secondary_birds(
     rows: List[dict] = []
     from tools.image_crop import smart_square_crop
 
-    # V5.9: 注入的 identify_fn 可能是不认识 dark_retry_conf 的测试替身；
-    # 签名探测一次决定是否传参，避免逐鸟调用 TypeError。
-    # V5.9: an injected identify_fn may be a test double unaware of
-    # dark_retry_conf; probe the signature once instead of catching
-    # TypeError per bird.
-    _fn_supports_retry = False
+    # V5.9/V5.9.5: 注入的 identify_fn 可能是不认识 dark_retry_conf /
+    # retry_crop 的测试替身；签名探测一次决定是否传参，避免逐鸟调用
+    # TypeError。
+    # V5.9/V5.9.5: an injected identify_fn may be a test double unaware of
+    # dark_retry_conf / retry_crop; probe the signature once instead of
+    # catching TypeError per bird.
+    _fn_params = set()
     if dark_retry_conf is not None and identify_fn is not None:
         import inspect
         try:
-            _fn_supports_retry = (
-                'dark_retry_conf'
-                in inspect.signature(identify_fn).parameters)
+            _fn_params = set(inspect.signature(identify_fn).parameters)
         except (TypeError, ValueError):
-            _fn_supports_retry = False
+            _fn_params = set()
+    _fn_supports_retry = 'dark_retry_conf' in _fn_params
+    _fn_supports_retry_crop = 'retry_crop' in _fn_params
+
+    # V5.9.5: 暗版双渲染对齐主鸟——整图暗渲染只解码一次，逐鸟换算裁剪；
+    # 无暗版（非暗片/纯 JPEG/护栏豁免）保持 None，identify_bird 自动回退
+    # 压死证据+内存伽马，与主鸟路径完全同语义。
+    # V5.9.5: secondary birds join the main bird's dual-rendition compare —
+    # the dark rendition is decoded once and cropped per bird; without a
+    # dark sidecar identify_bird falls back exactly like the main path.
+    from tools.find_bird_util import build_dark_retry_crop, load_dark_rendition
+    _dark_img = None
+    _dark_loaded = False
 
     for bird in all_birds:
         bbox_proc = bird.get('bbox')
@@ -317,6 +328,22 @@ def classify_secondary_birds(
             _identify_kwargs = {}
             if dark_retry_conf is not None and _fn_supports_retry:
                 _identify_kwargs['dark_retry_conf'] = dark_retry_conf
+            # V5.9.5: 次鸟暗版同位框图（净胜裕度口径与主鸟一致，见
+            # bird_identifier 双渲染对照）；留边对齐 smart_square_crop。
+            # V5.9.5: per-bird co-registered dark crop, same win-margin
+            # semantics as the main bird; padding mirrors smart_square_crop.
+            if _fn_supports_retry_crop:
+                if not _dark_loaded:
+                    _dark_loaded = True
+                    _dark_img = load_dark_rendition(photo_path)
+                _dark_crop = build_dark_retry_crop(
+                    photo_path,
+                    (x1, y1, x2 - x1, y2 - y1),
+                    (orig_w, orig_h),
+                    dark_image=_dark_img,
+                    pad_ratio=_BIRDID_PADDING_RATIO)
+                if _dark_crop is not None:
+                    _identify_kwargs['retry_crop'] = _dark_crop
             result = identify_fn(
                 photo_path,           # image_path：读 GPS/地理过滤
                 False,                # use_yolo：已按框裁剪，跳过内部复检

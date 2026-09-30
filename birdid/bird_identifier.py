@@ -1305,16 +1305,20 @@ def identify_bird(
     name_format (Optional[str]): 鸟名格式
     preloaded_crop (Optional[Image.Image]): 上游已裁剪的鸟框图（跳过 YOLO）
     focus_point (Optional[Tuple[float, float]]): 对焦点（多目标选框）
-    dark_retry_conf (Optional[float]): 暗框重识别的置信度线（0-100，与
-        results[].confidence 同口径）。None=关闭重试。启用后：首次分类
-        结果缺失或 top1 置信度低于该线时做一次重试，净胜裕度内择优。
-        动机：逆光/林荫猛禽常「框检出但太黑定不了种」，与 DPP 伽马
-        批次的补种经验一致——提亮后的图分类器看得更清。
+    dark_retry_conf (Optional[float]): 备选渲染重试的置信度线（0-100，
+        与 results[].confidence 同口径）。None=关闭重试。启用后的重试面
+        （V5.9.5）：提供 retry_crop 时暗版对照**不限采纳线**（总是对照、
+        净胜裕度内翻盘——提亮版可能把错误种推过线）；未提供时该线门控
+        惰性工厂与内存伽马重试（结果缺失或 top1 低于线才触发）。动机：
+        逆光/林荫猛禽常「框检出但太黑定不了种」，与 DPP 伽马批次的补种
+        经验一致——提亮/暗版对照看得更清。
     retry_crop (Optional[Image.Image]): 暗片原始渲染的同位框图（V5.9.2
-        双渲染对比）。提供时优先用它重试（提亮版首判失败 → 暗版直判，
-        实测暗图直判本就有 65-72% 正确率的样本）；未提供时回退「压死
-        证据门控 + 内存伽马提亮重试」。框图坐标由调用方按两版分辨率
-        换算（见 photo_processor 的暗版裁剪构建）。
+        双渲染对比）。提供时与亮版**总是对照一次**（V5.9.5 起不限采纳
+        线），净胜裕度内翻盘——暗图直判实测本就有 65-72% 正确率的样本；
+        未提供时回退「压死证据门控 + 内存伽马提亮重试」。框图坐标由
+        调用方按两版分辨率换算（共享实现：
+        tools.find_bird_util.build_dark_retry_crop，主鸟与多鸟次要鸟
+        同源）。
     retry_factory (Optional[Callable]): 惰性重试图工厂（V5.9.3 平坦雾片
         救援）。首判低于采纳线且 retry_crop 未提供时调用一次，返回
         (PIL框图, retry_kind) 或 None——开发 RAW（~2s）只在真正需要
@@ -1342,13 +1346,27 @@ def identify_bird(
     preloaded_crop (Optional[Image.Image]): upstream crop (skips YOLO)
     focus_point (Optional[Tuple[float, float]]): focus point for subject selection
     dark_retry_conf (Optional[float]): confidence line (0-100, same scale
-        as results[].confidence) below which a dark crop is re-classified
-        brightened; None disables. When enabled and the first pass misses
-        or lands under the line with a dark crop (mean < 90), the crop is
-        gamma-brightened toward the target mean and classified once more;
-        the higher-confidence result wins. Rationale: backlit/shaded
-        raptors often get "box detected, species rejected", and the DPP
-        gamma batches proved the classifier reads brightened crops better.
+        as results[].confidence) gating the alternate-rendition retry;
+        None disables. With retry_crop the dark compare runs regardless
+        of the line (V5.9.5 — the brightened pass can push a wrong
+        species just past it); without it the line gates the lazy
+        factory and the in-memory gamma retry (missing results or top1
+        under the line). Rationale: backlit/shaded raptors often get
+        "box detected, species rejected", and the DPP gamma batches
+        proved the classifier reads brightened crops better.
+    retry_crop (Optional[Image.Image]): co-registered crop from the
+        original dark rendition (V5.9.2 dual-rendition compare). When
+        provided it is ALWAYS classified against the brightened pass
+        (V5.9.5 lifted the below-line gate) and replaces it only on a
+        net win by the margin — the dark direct pass alone measures
+        65-72% correct on real samples; without it the caller-side
+        crush-evidence + in-memory gamma retry applies. Crops are built
+        by the shared tools.find_bird_util.build_dark_retry_crop for
+        main and secondary birds alike.
+    retry_factory (Optional[Callable]): lazy retry-image factory
+        (V5.9.3 flat-fog rescue), called once below the line when no
+        retry_crop was given; returns (PIL crop, retry_kind) or None —
+        the ~2s RAW develop is paid only when actually needed.
 
     Return:
     Dict: success/results/yolo_info/gps_info/geo_info/error; when the
@@ -1515,24 +1533,31 @@ def identify_bird(
         results, geo_info = _classify_once(image)
         result["geo_info"] = geo_info
 
-        # V5.9.2/V5.9.3: 备选渲染重试。暗片管线（raw_to_jpeg RAW 级提亮）
-        # 下 preloaded_crop 是提亮版框图；原始暗渲染被另存为 <前缀>_dark.jpg
-        # 且由调用方裁成同位框图传入 retry_crop。平坦雾片（全图灰阶跨度
-        # <45）由调用方传 retry_factory 惰性开发 RAW + 框内拉伸重判。实测
-        # （2026-09-30）：提亮版/内嵌预览分类可能崩（7%/16%），而备选渲染
-        # 本就正确率更高——首判低于采纳线时用备选渲染重判一次，净胜裕度
-        # 内择优。无备选（背光护栏豁免/纯 JPEG/多鸟次要鸟）时回退 V5.9.1
-        # 的「压死证据 + 内存伽马」重试。
-        # V5.9.2/V5.9.3: alternate-rendition retry. With the RAW-grade
-        # pipeline the preloaded_crop is the BRIGHTENED crop; the original
-        # dark rendition is preserved as <prefix>_dark.jpg and cropped by
-        # the caller into retry_crop. Flat fog frames (gray span <45) get
-        # a retry_factory that lazily develops the RAW with an in-box
-        # contrast stretch. Measured: the brightened/embedded pass can
-        # collapse (7%/16%) while alternates ID better — retry below the
-        # adoption line and keep the better one. Without alternates
-        # (highlight-guard frames, pure JPEGs, secondary birds) fall back
-        # to the V5.9.1 crush-evidence + in-memory gamma retry.
+        # V5.9.2/V5.9.3/V5.9.5: 备选渲染重试。暗片管线（raw_to_jpeg RAW 级
+        # 提亮）下 preloaded_crop 是提亮版框图；原始暗渲染被另存为
+        # <前缀>_dark.jpg 且由调用方裁成同位框图传入 retry_crop（主鸟与
+        # 多鸟次要鸟同享共享裁剪实现）。平坦雾片（全图灰阶跨度 <45）由
+        # 调用方传 retry_factory 惰性开发 RAW + 框内拉伸重判。实测
+        # （2026-09-30）：提亮版/内嵌预览分类可能崩（7%/16%），备选渲染
+        # 本就正确率更高；提亮版也可能把错误种推过采纳线（41% 错判无
+        # 对照）——故预载暗版存在时对照**不限采纳线**（V5.9.5），净胜
+        # 裕度内择优；惰性工厂与内存伽马维持「低于采纳线才触发」的成本/
+        # 风险口径。无备选（背光护栏豁免/纯 JPEG）时回退 V5.9.1 的
+        # 「压死证据 + 内存伽马」重试。
+        # V5.9.2/V5.9.3/V5.9.5: alternate-rendition retry. With the
+        # RAW-grade pipeline the preloaded_crop is the BRIGHTENED crop;
+        # the original dark rendition is preserved as <prefix>_dark.jpg
+        # and cropped co-registered by the caller into retry_crop (main
+        # and secondary birds share the same builder). Flat fog frames
+        # (gray span <45) get a retry_factory that lazily develops the
+        # RAW with an in-box contrast stretch. Measured: the
+        # brightened/embedded pass can collapse (7%/16%) while alternates
+        # ID better — and it can also push a wrong species just past the
+        # adoption line, so an eager dark crop compares regardless of
+        # the line (V5.9.5) and wins only by the margin, while the lazy
+        # factory and the gamma stay below-line-only. Without alternates
+        # (highlight-guard frames, pure JPEGs) fall back to the V5.9.1
+        # crush-evidence + in-memory gamma retry.
         if dark_retry_conf is not None:
             from tools.tone_curve import (
                 BRIGHTEN_WIN_MARGIN, DEFAULT_CRUSH_P95, DEFAULT_DARK_MEAN,

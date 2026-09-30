@@ -118,14 +118,20 @@ C:\Users\<用户>\AppData\Local\SuperPicky\advanced_config.json
 ## DPP 伽马编辑（暗片拉曲线）重跑
 
 在 Canon DPP「工具调色板 → 伽马调整」拉亮过的 CR3，recipe 以 CanonVRD 二进制
-trailer 写回文件（`exiftool -CanonVRD:Gamma*` 可读）；但 SuperPicky 跑批用的
-是机身内嵌 JPEG（原始暗图）——缩略图黑、关键点找不到、锐度算 0、星级被压死。
-跑批后检测到伽马编辑的照片按下面顺序重跑（每步写库前自动备份）：
+trailer 写回文件（`exiftool -CanonVRD:Gamma*` 可读）。
+
+**V5.9.4 起跑批内已「人工优先」消化**：RAW 转换前批量预读 recipe，本次新抽取的
+预览先套人工 LUT、跳过自动提亮不叠加（日志见 `🎛 DPP 人工伽马编辑 N 张` 与逐张
+`DPPGAMMA` 行；开关 `advanced_config.preview_dpp_gamma` 默认开）。因此本节只服务
+两种情况：**跑批之后**才做的 DPP 编辑回补、V5.9.4 之前处理的老批次。判断口诀：
+跑批日志已有 DPPGAMMA 行且跑批后没再进过 DPP → 跳过本节。四步链对已消化的批次
+①幂等无害（重抽原始预览再套同一 LUT，产出一致），但 ②③④ 不必空转——④ 的
+`--metrics-rebuilt` 无人工改星豁免，指标没变就不要跑。
 
 ```bash
 cd G:/code/SuperPicky
 D="<目录>"
-.venv/Scripts/python.exe -X utf8 scripts_dev/refresh_gamma_previews.py "$D" --dry   # 检测：列出有编辑的照片
+.venv/Scripts/python.exe -X utf8 scripts_dev/refresh_gamma_previews.py "$D" --dry   # 检测（只读不动缓存）
 .venv/Scripts/python.exe -X utf8 scripts_dev/refresh_gamma_previews.py "$D"         # ① 刷亮缩略图（幂等）
 .venv/Scripts/python.exe -X utf8 scripts_dev/recalc_gamma_scores.py    "$D" --execute  # ② 重算指标
 .venv/Scripts/python.exe -X utf8 scripts_dev/backfill_species.py       "$D" --threshold 40 --execute  # ③ 补种

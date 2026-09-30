@@ -191,7 +191,10 @@ def classify_secondary_birds(
     classify (bool): True=逐鸟分类（默认）；False=仅落库几何行不推理
     dark_retry_conf (Optional[float]): 暗框提亮重识别置信度线（0-100），
         透传给 identify_fn；None=关闭。注入的 identify_fn 若为不支持该
-        参数的测试替身，会自动降级为不传，避免测试面破裂。
+        参数的测试替身，会自动降级为不传，避免测试面破裂。V5.9.5 起
+        次要鸟的暗版同位框图在本函数内部构建并作为 retry_crop 一并
+        传入（暗版整图只解码一次；与主鸟共享
+        tools.find_bird_util.build_dark_retry_crop，对照不限采纳线）。
 
     返回:
     List[dict]: bird_detections 行（DETECTION_COLUMNS 键），按检测 idx 排序；

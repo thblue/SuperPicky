@@ -1423,15 +1423,18 @@ class PhotoProcessor:
                         1,      # top_k
                         nf,     # name_format
                         bird_crop_pil,  # preloaded_crop
-                        # V5.9: 暗框提亮重识别——采纳线以下且鸟框偏暗时
-                        # 自动提亮重试一次（见 identify_bird.dark_retry_conf）
-                        # V5.9: brightened retry for dark crops below the
-                        # adoption line (see identify_bird.dark_retry_conf)
+                        # V5.9: 备选渲染重试开关线——有暗版时对照不限线
+                        # （V5.9.5），无暗版时门控伽马重试（低于线才触发）
+                        # （见 identify_bird.dark_retry_conf）
+                        # V5.9: alternate-rendition retry line — with a
+                        # dark crop the compare is line-less (V5.9.5);
+                        # without one it gates the gamma retry
                         dark_retry_conf=self.settings.birdid_confidence_threshold,
-                        # V5.9.2: 亮版（RAW 级提亮预览）首判失败时用原始
-                        # 暗渲染框图重判（见 identify_bird.retry_crop）
-                        # V5.9.2: retry with the original dark-rendition
-                        # crop when the brightened first pass fails
+                        # V5.9.2/V5.9.5: 原始暗渲染同位框图——与亮版总是
+                        # 对照一次，净胜 +3 才翻盘（含过线错判场景）
+                        # V5.9.2/V5.9.5: co-registered dark crop — always
+                        # compared against the brightened pass, replacing
+                        # it only on a net win (above-line flips included)
                         retry_crop=dark_retry_crop,
                         # V5.9.3: 平坦雾片惰性 RAW 救援（首判失败才开发）
                         # V5.9.3: lazy RAW rescue for flat fog frames
@@ -1503,9 +1506,13 @@ class PhotoProcessor:
                                     region_code=self.settings.birdid_region_code,
                                     name_format=nf,
                                     identify_fn=identify_bird_fn,
-                                    # V5.9: 次要鸟同样吃暗框提亮重识别
-                                    # V5.9: secondary birds get the
-                                    # brightened retry too
+                                    # V5.9.5: 次要鸟与主鸟同享暗版双渲染
+                                    # （含过线对照；暗版框图在 multi_bird
+                                    # 内部按共享实现构建）
+                                    # V5.9.5: secondary birds share the
+                                    # main bird's dual-rendition compare
+                                    # (incl. above-line), crops built
+                                    # inside multi_bird
                                     dark_retry_conf=self.settings.birdid_confidence_threshold,
                                 )
                                 # V5.1: 焦点未命中（fallback）时综合重选主鸟

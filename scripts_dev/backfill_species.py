@@ -185,17 +185,25 @@ def detect_fallback_box(bgr: np.ndarray,
 
 def classify(bgr: np.ndarray, box: Tuple[int, int, int, int],
              exif_path: str, country: str,
-             dark_retry_conf: float = None) -> Optional[Dict]:
+             dark_retry_conf: float = None,
+             dark_bgr: np.ndarray = None,
+             dark_box: Tuple[int, int, int, int] = None) -> Optional[Dict]:
     """
     与管线逐鸟分类完全相同的路径识别单框：方形的智能裁剪 → identify_bird。
 
+    V5.9.2: 提供暗版渲染（dark_bgr + dark_box）时走双渲染对比——亮版首判
+    低于采纳线时用原始暗版框图重判一次，净胜择优（暗图直判在部分样本上
+    本就有 65-72% 正确率，见 bird_identifier.retry_crop）。
+
     参数:
-        bgr (np.ndarray): 全分辨率 BGR 图
+        bgr (np.ndarray): 全分辨率 BGR 图（亮版/管线预览）
         box (Tuple[int, int, int, int]): 原图像素空间 (x1, y1, x2, y2)
         exif_path (str): 供 GPS/EXIF 读取的源文件路径
         country (str): 地理过滤国家码
-        dark_retry_conf (float): 暗框提亮重识别置信度线（0-100，V5.9 起
+        dark_retry_conf (float): 暗框重识别置信度线（0-100，V5.9 起
             与主管线一致；None=关闭）
+        dark_bgr (Optional[np.ndarray]): 原始暗渲染全图（V5.9.2 双渲染）
+        dark_box (Optional[Tuple]): 暗版坐标系的同位框
 
     返回:
         Optional[Dict]: identify_bird 原始结果；异常/无结果返回 None
@@ -207,9 +215,16 @@ def classify(bgr: np.ndarray, box: Tuple[int, int, int, int],
         from PIL import Image as _PILImage
         pil_crop = _PILImage.fromarray(
             cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        retry_pil = None
+        if dark_bgr is not None and dark_box is not None:
+            dark_crop = smart_square_crop(dark_bgr, dark_box,
+                                          padding_ratio=_PADDING)
+            retry_pil = _PILImage.fromarray(
+                cv2.cvtColor(dark_crop, cv2.COLOR_BGR2RGB))
         return identify_bird(exif_path, False, True, True, country,
                              None, 1, None, pil_crop,
-                             dark_retry_conf=dark_retry_conf)
+                             dark_retry_conf=dark_retry_conf,
+                             retry_crop=retry_pil)
     except Exception:
         return None
 
@@ -431,10 +446,29 @@ def main() -> int:
             failed += 1
             print(f"  [{idx}/{total}] {entry_prefix}: 预览/RAW/本体均不可读，跳过")
             return
+        # V5.9.2: 暗版双渲染——存在 <前缀>_dark.jpg（原始暗渲染）时裁同位
+        # 框供重试对比；亮版首判低于采纳线才触发，无暗版自动回退伽马。
+        # V5.9.2: dual-rendition — crop the co-registered box from
+        # <prefix>_dark.jpg (original dark rendition) when present; the
+        # retry fires only below the adoption line and falls back to
+        # gamma without a dark rendition.
+        dark_bgr, dark_box = None, None
+        dark_sidecar = os.path.join(root, ".superpicky", "cache",
+                                    "temp_preview", entry_prefix + "_dark.jpg")
+        if os.path.exists(dark_sidecar):
+            dark_bgr = read_bgr(dark_sidecar)
+            if dark_bgr is not None:
+                ih, iw = img.shape[:2]
+                dh, dw = dark_bgr.shape[:2]
+                x1, y1, x2, y2 = box
+                sx, sy = dw / float(iw), dh / float(ih)
+                dark_box = (max(0, int(x1 * sx)), max(0, int(y1 * sy)),
+                            min(dw, int(x2 * sx)), min(dh, int(y2 * sy)))
         # V5.9: 暗框提亮重识别与主管线同线（--threshold 即采纳线）
         # V5.9: brightened retry shares the pipeline adoption line.
         result = classify(img, box, exif_path, args.country,
-                          dark_retry_conf=float(args.threshold))
+                          dark_retry_conf=float(args.threshold),
+                          dark_bgr=dark_bgr, dark_box=dark_box)
         if not (result and result.get("success") and result.get("results")):
             still_low.append({"prefix": entry_prefix, "name": "（无结果）",
                               "conf": 0.0, "row": row, "source": source,

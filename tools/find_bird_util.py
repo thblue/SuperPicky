@@ -209,22 +209,181 @@ def _auto_brighten_enabled(flag: Optional[bool]) -> bool:
         return True
 
 
+def _dark_sidecar_path(jpg_path: str) -> str:
+    """
+    暗片原始渲染的伴随缓存路径（<前缀>_dark.jpg）。
+
+    V5.9.2 双渲染架构：暗片提亮改在 RAW 开发级进行，原内嵌渲染另存为
+    _dark.jpg，供分类「亮版优先、暗版重试」对比使用（实测暗图直判在
+    部分样本上本就有 65-72% 正确率，单一亮版会丢掉这些判定）。
+
+    Companion cache path of the original dark rendition (<prefix>_dark.jpg).
+
+    V5.9.2 dual-rendition architecture: dark previews are brightened at RAW
+    development level while the original embedded rendition is preserved as
+    _dark.jpg for the classifier's bright-first/dark-retry compare (the dark
+    image alone already IDs correctly at 65-72% on some real samples).
+    """
+    base, _ext = os.path.splitext(jpg_path)
+    return base + "_dark.jpg"
+
+
+def _raw_dev_brighten(raw_path: str, jpg_path: str, preview_mean: float) -> bool:
+    """
+    RAW 开发级提亮：postprocess 线性域 bright 倍率重开发传感器数据。
+
+    8-bit JPEG 暗部仅十几个离散灰阶，伽马拉曲线在放大量化噪声；RAW 是
+    12/14-bit 线性数据，去马赛克/白平衡后在线性域乘 bright 再伽马编码，
+    是真正的信息提取（实测：伽马崩溃样本 RAW 级恢复 25%→70%）。倍率由
+    预览均值估算 m=(目标/均值)^2.2，上限 8（约 +3 挡）；开发后仍暗于
+    判定线时用伽马补足一次（同时保证下次运行的幂等跳过）。
+
+    RAW-development-grade brightening: re-develop the sensor data with a
+    linear-domain bright multiplier in postprocess. An 8-bit JPEG has only
+    a dozen usable shadow codes (gamma lifting amplifies quantization noise)
+    while RAW is 12/14-bit linear — a real information gain (measured: a
+    gamma-collapsed sample recovered 25%→70% at RAW grade). The multiplier
+    is estimated from the preview mean, m=(target/mean)^2.2, capped at 8
+    (~+3 stops); if the result still lands below the dark line, one gamma
+    top-up is applied (which also restores idempotent skipping next run).
+
+    参数 / Parameters:
+        raw_path (str): RAW 文件路径（rawpy 可解的 Bayer 格式）
+                       / RAW path (rawpy-decodable Bayer format).
+        jpg_path (str): 预览缓存路径（将被提亮版覆盖）
+                       / preview cache path (overwritten with the lift).
+        preview_mean (float): 原始渲染的平均亮度 / original rendition mean.
+
+    返回 / Returns:
+        bool: 开发成功并已写回返回 True；任何失败返回 False（调用方回退
+              伽马路径） / True when re-developed and written; False on any
+              failure (caller falls back to the gamma path).
+    """
+    import time as _time
+
+    from tools.tone_curve import DEFAULT_TARGET_MEAN
+    t0 = _time.perf_counter()
+    try:
+        import cv2
+        import numpy as _np
+
+        # 精确单遍方案：让 LibRaw 输出 16-bit 线性数据（gamma=(1,1)），
+        # 在 numpy 里做线性乘法 + 2.2 伽马编码。纯 `bright` 参数的实测
+        # 传递特性与幂律假设有偏差（34→148 过冲），而线性域乘法的均值
+        # 关系是精确的：编码均值按 m^(1/2.2) 缩放，落点即目标。
+        # Exact single-pass: LibRaw outputs 16-bit linear data
+        # (gamma=(1,1)); the lift is a numpy linear multiply + 2.2 gamma
+        # encode. The bare `bright` param's measured transfer deviates
+        # from the power-law assumption (overshoot 34→148), while a
+        # linear-domain multiply is exact: encoded means scale by
+        # m^(1/2.2), landing on the target.
+        with rawpy.imread(raw_path) as raw:
+            lin = raw.postprocess(
+                use_camera_wb=True,     # 机内白平衡，色彩不漂 / camera WB
+                no_auto_bright=True,    # 提升只来自本次乘法 / sole lift
+                output_bps=16,
+                gamma=(1, 1),           # 线性输出 / linear output
+            )
+        lin_f = lin.astype(_np.float32) / 65535.0
+        # 用 1/8 子采样测基准编码均值（Rec.601 亮度口径，与 preview_tone_stats
+        # 的 PIL "L" 一致——三通道简单平均会因绿权重差异偏 10+ 点）
+        # Measure the base encoded mean on a 1/8 subsample with the
+        # Rec.601 luma convention, matching preview_tone_stats (PIL "L");
+        # a plain channel average drifts 10+ points because green weighs
+        # heavier in luma.
+        sub = lin_f[::8, ::8] ** (1.0 / 2.2) * 255.0
+        base_enc = float((0.299 * sub[..., 0] + 0.587 * sub[..., 1]
+                          + 0.114 * sub[..., 2]).mean())
+        m = float(_np.clip(
+            (DEFAULT_TARGET_MEAN / max(base_enc, 1.0)) ** 2.2, 1.0, 8.0))
+        lifted = _np.clip(lin_f * m, 0.0, 1.0)
+        del lin_f
+        bgr = (lifted[:, :, ::-1] ** (1.0 / 2.2) * 255.0 + 0.5) \
+            .astype(_np.uint8)
+        del lifted
+        cv2.imwrite(jpg_path, bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        del bgr
+        new_mean = preview_tone_stats(jpg_path)["mean"]
+        if 0 <= new_mean < PREVIEW_DARK_MEAN:
+            # 极暗帧提升到上限仍偏暗：伽马补足到判定线以上，保证幂等
+            # Extreme frame still dark at the cap: gamma top-up past the
+            # dark line so subsequent runs skip.
+            brighten_preview_if_dark(jpg_path, os.path.dirname(raw_path))
+            new_mean = preview_tone_stats(jpg_path)["mean"]
+        log_message(
+            f"DEVBRIGHTEN, {os.path.basename(jpg_path)}: mean "
+            f"{preview_mean:.0f} -> {new_mean:.0f} (raw-dev m={m:.2f}, "
+            f"{_time.perf_counter() - t0:.1f}s)",
+            os.path.dirname(raw_path))
+        return True
+    except Exception as e:
+        log_message(
+            f"DEBUG: raw-dev brighten unavailable for {raw_path} "
+            f"({type(e).__name__}: {e}), falling back to gamma",
+            os.path.dirname(raw_path))
+        return False
+
+
+def _brighten_dark_preview(raw_path: str, jpg_path: str) -> None:
+    """
+    暗预览提亮调度：原始渲染另存 _dark.jpg → RAW 开发级提亮（伽马回退）。
+
+    门控与 brighten_preview_if_dark 相同（均值暗 + 高光护栏）。原始渲染
+    必须在覆盖前另存——分类侧的暗版重试依赖它；HEIF/X3F 等 rawpy 无法
+    postprocess 的格式自动落伽马路径（_dark 同样保留）。
+
+    Dispatch for dark-preview brightening: preserve the original rendition
+    to _dark.jpg → RAW-development lift (gamma fallback). Gates match
+    brighten_preview_if_dark (dark mean + highlight guard). The original
+    must be saved BEFORE overwriting — the classifier's dark retry depends
+    on it; formats rawpy cannot postprocess (HEIF/X3F) fall back to gamma
+    (the _dark copy is kept either way).
+
+    参数 / Parameters:
+        raw_path (str): RAW 文件路径 / RAW file path.
+        jpg_path (str): 预览缓存路径 / preview cache path.
+    """
+    from tools.tone_curve import DEFAULT_HIGHLIGHT_GUARD_FRAC
+
+    tone = preview_tone_stats(jpg_path)
+    mean = tone["mean"]
+    if mean < 0 or mean >= PREVIEW_DARK_MEAN:
+        return
+    if 0 <= tone["frac_highlight"] and \
+            tone["frac_highlight"] > DEFAULT_HIGHLIGHT_GUARD_FRAC:
+        return
+    dark_path = _dark_sidecar_path(jpg_path)
+    if not os.path.exists(dark_path):
+        try:
+            shutil.copy2(jpg_path, dark_path)
+        except Exception:
+            pass  # 另存失败只损失暗版重试，不阻断提亮 / best effort
+    if _raw_dev_brighten(raw_path, jpg_path, mean):
+        return
+    brighten_preview_if_dark(jpg_path, os.path.dirname(raw_path))
+
+
 def raw_to_jpeg(raw_file_path, auto_brighten: Optional[bool] = None):
     """
     RAW → 预览 JPEG 转换（缓存优先），并可按配置对暗预览做自动提亮。
 
-    提亮只作用于 .superpicky/cache 预览缓存（可再生的应用自管文件），
-    由亮度护栏保证幂等（见 brighten_preview_if_dark）。DPP 伽马工作流
-    （refresh_gamma_previews）需要「原始渲染 + DPP LUT」，必须传
-    auto_brighten=False，否则会在提亮版上叠加 LUT 造成双重提亮。
+    V5.9.2: 暗片提亮为 RAW 开发级（传感器数据线性域提升，原内嵌渲染另
+    存 <前缀>_dark.jpg 供分类双渲染对比）；rawpy 无法开发时回退伽马。
+    提亮只作用于 .superpicky/cache 预览缓存（可再生的应用自管文件），由
+    亮度护栏保证幂等。DPP 伽马工作流（refresh_gamma_previews）需要
+    「原始渲染 + DPP LUT」，必须传 auto_brighten=False，否则会在提亮版
+    上叠加 LUT 造成双重提亮。
 
     Convert a RAW file to a preview JPEG (cache-first), optionally
-    auto-brightening dark previews per config. Brightening only touches
-    the regenerable .superpicky/cache preview and is idempotent via the
-    luma guard (see brighten_preview_if_dark). The DPP-gamma workflow
-    (refresh_gamma_previews) needs the ORIGINAL rendition before its own
-    LUT and must pass auto_brighten=False, otherwise the LUT would stack
-    on an already-brightened preview.
+    auto-brightening dark previews per config. V5.9.2: brightening is
+    RAW-development grade (linear-domain lift of sensor data, with the
+    original embedded rendition preserved as <prefix>_dark.jpg for the
+    classifier's dual-rendition compare); gamma is the fallback when rawpy
+    cannot develop the format. Only the regenerable .superpicky/cache
+    preview is touched; idempotent via the luma guard. The DPP-gamma
+    workflow (refresh_gamma_previews) needs the ORIGINAL rendition and must
+    pass auto_brighten=False, otherwise the LUT would stack on an
+    already-brightened preview.
 
     参数 / Parameters:
         raw_file_path (str): RAW 文件路径 / path to the RAW file.
@@ -237,8 +396,7 @@ def raw_to_jpeg(raw_file_path, auto_brighten: Optional[bool] = None):
     jpg_file_path = _raw_to_jpeg_extract(raw_file_path)
     if jpg_file_path and _auto_brighten_enabled(auto_brighten):
         try:
-            brighten_preview_if_dark(
-                jpg_file_path, os.path.dirname(raw_file_path))
+            _brighten_dark_preview(raw_file_path, jpg_file_path)
         except Exception:
             pass  # 提亮是增强步骤，绝不阻断转换主流程 / best effort only
     return jpg_file_path

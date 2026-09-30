@@ -104,6 +104,27 @@ def _bright_crop_path(photo: dict) -> Optional[str]:
                         f"{prefix}_bright.jpg")
 
 
+def _dark_preview_path(photo: dict) -> Optional[str]:
+    """返回 V5.9.2 原始暗渲染伴随缓存路径（可能不存在，调用方判断）。
+
+    暗片 RAW 级提亮时原始内嵌渲染被另存为 temp_preview/<前缀>_dark.jpg
+    （见 tools/find_bird_util._dark_sidecar_path），无 DB 列——彻底删除时
+    按前缀推导，防缓存残留。
+
+    Path of the V5.9.2 original dark-rendition sidecar (may not exist).
+    Preserved as temp_preview/<prefix>_dark.jpg when a dark preview is
+    RAW-grade brightened; referenced by no DB column, so derive it from
+    the prefix to leave no orphans behind.
+    """
+    filename = photo.get("filename") or ""
+    base_dir = photo.get("_base_dir") or ""
+    if not filename or not base_dir:
+        return None
+    prefix = os.path.splitext(os.path.basename(filename))[0]
+    return os.path.join(base_dir, ".superpicky", "cache", "temp_preview",
+                        f"{prefix}_dark.jpg")
+
+
 def collect_purge_files(photo: dict) -> List[str]:
     """
     计算彻底删除一张照片要删掉的全部文件（纯函数，无副作用）。
@@ -162,11 +183,14 @@ def collect_purge_files(photo: dict) -> List[str]:
     if sidecar:
         candidates.append(sidecar)
 
-    # 7. V5.9 亮框复核图（DB 无列，按前缀推导，存在才删）
-    #    V5.9 brightened-crop review image (no DB column, prefix-derived).
+    # 7. V5.9 复核图与暗版伴随缓存（DB 无列，按前缀推导，存在才删）
+    #    V5.9 review crops & dark sidecar (no DB columns, prefix-derived).
     bright_crop = _bright_crop_path(photo)
     if bright_crop:
         candidates.append(bright_crop)
+    dark_preview = _dark_preview_path(photo)
+    if dark_preview:
+        candidates.append(dark_preview)
 
     # 去重 + 只保留真实存在的普通文件（绝不碰目录）
     # Deduplicate and keep only existing regular files (never directories).

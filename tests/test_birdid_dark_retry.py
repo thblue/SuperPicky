@@ -167,6 +167,62 @@ class TestDarkRetry:
         assert result["results"][0]["cn_name"] == "紫啸鸫"
         assert "brightened_retry" in result
 
+    def test_dark_retry_crop_wins(self, patched_identify_env):
+        """V5.9.2 暗版重试：亮版首判 25% → 原始暗版 66% → 采纳暗版。"""
+        patched_identify_env.append([_candidate(25.0, "灰翅鸫")])
+        patched_identify_env.append([_candidate(66.0)])
+
+        bright = _crop(110)
+        dark = _crop(45)
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=bright,
+            dark_retry_conf=40.0, retry_crop=dark)
+
+        assert result["results"][0]["confidence"] == pytest.approx(66.0)
+        retry = result["brightened_retry"]
+        assert retry["retry_kind"] == "dark_original"
+        assert retry["orig_conf"] == pytest.approx(25.0)
+        assert result["brightened_crop"] is dark
+        assert len(patched_identify_env) == 2
+
+    def test_dark_retry_crop_respects_margin(self, patched_identify_env):
+        """暗版仅 +1.5 < 3 → 保留亮版判定。"""
+        patched_identify_env.append([_candidate(25.0, "灰翅鸫")])
+        patched_identify_env.append([_candidate(26.5, "紫啸鸫")])
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(110),
+            dark_retry_conf=40.0, retry_crop=_crop(45))
+
+        assert result["results"][0]["confidence"] == pytest.approx(25.0)
+        assert "brightened_retry" not in result
+
+    def test_dark_retry_crop_skipped_when_confident(self, patched_identify_env):
+        """亮版首判已过线 → 不做任何重试。"""
+        patched_identify_env.append([_candidate(85.0)])
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(110),
+            dark_retry_conf=40.0, retry_crop=_crop(45))
+
+        assert result["results"][0]["confidence"] == pytest.approx(85.0)
+        assert len(patched_identify_env) == 1
+        assert "brightened_retry" not in result
+
+    def test_dark_retry_crop_preferred_over_gamma(self, patched_identify_env):
+        """提供暗版时走暗版重试，不再叠加内存伽马（共 2 次分类）。"""
+        patched_identify_env.append([_candidate(20.0, "乌灰鸫")])
+        patched_identify_env.append([_candidate(55.0)])
+
+        # 亮版本身是压死暗框（均值低+p95低），伽马路径本可触发
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(45),
+            dark_retry_conf=40.0, retry_crop=_crop(50))
+
+        assert result["results"][0]["confidence"] == pytest.approx(55.0)
+        assert result["brightened_retry"]["retry_kind"] == "dark_original"
+        assert len(patched_identify_env) == 2  # 无第三次伽马分类
+
     def test_disabled_by_default(self, patched_identify_env):
         """不传 dark_retry_conf → 永远单次分类（向后兼容）。"""
         patched_identify_env.append([_candidate(10.0, "噪鹃")])

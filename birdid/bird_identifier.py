@@ -1288,6 +1288,7 @@ def identify_bird(
     preloaded_crop: Optional[Image.Image] = None,
     focus_point: Optional[Tuple[float, float]] = None,
     dark_retry_conf: Optional[float] = None,
+    retry_crop: Optional[Image.Image] = None,
 ) -> Dict:
     """
     识别单张照片中的鸟种，支持暗框提亮重识别。
@@ -1305,15 +1306,20 @@ def identify_bird(
     focus_point (Optional[Tuple[float, float]]): 对焦点（多目标选框）
     dark_retry_conf (Optional[float]): 暗框重识别的置信度线（0-100，与
         results[].confidence 同口径）。None=关闭重试。启用后：首次分类
-        结果缺失或 top1 置信度低于该线、且鸟框整体偏暗（均值 < 90）时，
-        把框图按目标均值伽马提亮后再分类一次，取置信度更高者返回。
+        结果缺失或 top1 置信度低于该线时做一次重试，净胜裕度内择优。
         动机：逆光/林荫猛禽常「框检出但太黑定不了种」，与 DPP 伽马
         批次的补种经验一致——提亮后的图分类器看得更清。
+    retry_crop (Optional[Image.Image]): 暗片原始渲染的同位框图（V5.9.2
+        双渲染对比）。提供时优先用它重试（提亮版首判失败 → 暗版直判，
+        实测暗图直判本就有 65-72% 正确率的样本）；未提供时回退「压死
+        证据门控 + 内存伽马提亮重试」。框图坐标由调用方按两版分辨率
+        换算（见 photo_processor 的暗版裁剪构建）。
 
     返回:
-    Dict: success/results/yolo_info/gps_info/geo_info/error；触发提亮
-        重试且结果更好时，额外带 brightened_retry（新旧置信度等）与
-        brightened_crop（提亮后的 PIL 框图，供上层保存亮框缩略图）。
+    Dict: success/results/yolo_info/gps_info/geo_info/error；重试且净胜
+        时额外带 brightened_retry（orig_conf/bright_conf/retry_kind=
+        dark_original|gamma/gamma 等）与 brightened_crop（胜出的 PIL
+        框图，供上层保存复核缩略图）。
 
     Identify the bird species in one photo, with a brightened-crop retry
     for dark frames.
@@ -1503,31 +1509,23 @@ def identify_bird(
         results, geo_info = _classify_once(image)
         result["geo_info"] = geo_info
 
-        # V5.9: 暗框提亮重识别。首跑无候选或 top1 低于采纳线、且框图整体
-        # 偏暗时，按目标均值伽马提亮后再分类一次，置信度更高者胜出。提亮
-        # 只作用于内存中的框图副本（原图永不修改）；两次分类共享同一地理
-        # 候选集，差异只来自图像本身。
-        # V5.9.1: 门控升级为「压死证据」双条件——均值暗 **且** p95 低
-        # （高光饥荒）。用真实库校准：正确曝光的黑鸟（乌鸫/乌鸦）框均值
-        # 也会低，但羽轴/眼点留有高光拖尾（p95≈173-203），提亮对它们
-        # 无益且可能翻错种；压死暗片 p95≈87-91 才是提亮的适用面。
-        # 采纳侧：实测伽马在压死片上可能把 66% 正确判定崩到 16%，因此
-        # 提亮结果必须净胜 BRIGHTEN_WIN_MARGIN 个点才替换原判定。
-        # V5.9: brightened-crop retry. When the first pass has no candidate
-        # or a top-1 under the adoption line on a dark crop, classify a
-        # gamma-brightened copy once more; the higher confidence wins. The
-        # brightening touches only the in-memory copy (originals are never
-        # modified); both passes share the same geo candidate set, so any
-        # difference comes from the image alone.
-        # V5.9.1: the gate became two-signal "crush evidence" — dark mean
-        # AND low p95 (highlight starvation). Calibrated on real library
-        # samples: correctly-exposed black birds (blackbirds/crows) also
-        # have low crop means but keep a plumage highlight tail (p95
-        # ~173-203); brightening them is useless and risks species flips.
-        # Crushed frames (p95 ~87-91) are the actual target. On adoption,
-        # gamma was measured collapsing a correct 66% ID to 16% on a
-        # crushed frame, so a brightened result must beat the original by
-        # BRIGHTEN_WIN_MARGIN points to replace it.
+        # V5.9.2: 双渲染对比重试。暗片管线（raw_to_jpeg RAW 级提亮）下
+        # preloaded_crop 是提亮版框图；原始暗渲染被另存为 <前缀>_dark.jpg
+        # 且由调用方裁成同位框图传入 retry_crop。实测（2026-09-30 玉渊潭
+        # 压死样本）：提亮版分类可能崩（7%/16%），而暗图直判本就有 65-72%
+        # 正确率——亮版首判低于采纳线时用暗版重判一次，净胜裕度内择优。
+        # 未传 retry_crop（无暗伴随文件：背光护栏豁免/纯 JPEG/多鸟次要鸟）
+        # 时回退 V5.9.1 的「压死证据 + 内存伽马」重试。
+        # V5.9.2: dual-rendition retry. With the RAW-grade pipeline the
+        # preloaded_crop is the BRIGHTENED crop; the original dark
+        # rendition is preserved as <prefix>_dark.jpg and cropped by the
+        # caller into retry_crop. Measured on crushed samples: the
+        # brightened pass can collapse (7%/16%) while the dark rendition
+        # alone IDs at 65-72% — when the bright first pass lands under the
+        # adoption line, retry with the dark crop and keep the better one.
+        # Without retry_crop (no dark sidecar: highlight-guard frames,
+        # pure JPEGs, secondary birds) fall back to the V5.9.1
+        # crush-evidence + in-memory gamma retry.
         if dark_retry_conf is not None:
             from tools.tone_curve import (
                 BRIGHTEN_WIN_MARGIN, DEFAULT_CRUSH_P95, DEFAULT_DARK_MEAN,
@@ -1538,62 +1536,90 @@ def identify_bird(
             _needs_retry = (_top_conf is None
                             or _top_conf < float(dark_retry_conf))
             if _needs_retry:
-                _gray = np.asarray(image.convert("L"), dtype=np.float32)
-                _crop_mean = float(_gray.mean())
-                _crop_p95 = float(np.percentile(_gray, 95))
-                if 0 <= _crop_mean < DEFAULT_DARK_MEAN \
-                        and _crop_p95 < DEFAULT_CRUSH_P95:
-                    _gamma = compute_brighten_gamma(
-                        _crop_mean, min_gamma=DEFAULT_MIN_GAMMA)
-                    if _gamma < 1.0:
-                        # PIL point() 对多通道图要求「每通道各 256 项」的
-                        # 表，同一 LUT 平铺三份即各通道同表提亮，不改变
-                        # 色相平衡，与预览提亮同一套数学。
-                        # PIL point() needs 256 entries PER BAND for
-                        # multi-band images; tiling the same LUT three
-                        # times brightens every channel identically —
-                        # hue balance preserved, same math as the
-                        # preview brightening.
-                        lut = np.array(
-                            [((i / 255.0) ** _gamma) * 255.0
-                             for i in range(256)],
-                            dtype=np.uint8,
-                        )
-                        # point() 的 LUT 长度按通道数校验，先归一到 RGB，
-                        # 防御 RGBA/L 等非常规模式（正常链路均为 RGB 框图）。
-                        # point() validates the LUT length against the band
-                        # count; normalize to RGB first to be safe against
-                        # exotic modes (the normal path always sees RGB
-                        # crops).
-                        _retry_src = (image if image.mode == "RGB"
-                                      else image.convert("RGB"))
-                        _bright = _retry_src.point(np.tile(lut, 3).tolist())
-                        _b_results, _b_geo = _classify_once(_bright)
-                        _b_conf = (float(_b_results[0].get("confidence") or 0.0)
-                                   if _b_results else -1.0)
-                        _o_conf = (_top_conf if _top_conf is not None
-                                   else -1.0)
-                        # 净胜裕度：首跑无候选（_o_conf=-1）时直接采纳首个
-                        # 结果；有原判定时必须明显更好才翻盘（防 +1 噪声
-                        # 翻转，实测案例见 DEFAULT_CRUSH_P95 注释）。
-                        # Win margin: with no first-pass candidate
-                        # (_o_conf=-1) the first brightened result is
-                        # adopted as-is; otherwise it must clearly beat
-                        # the original (a +1 noise flip once measured
-                        # collapses correct IDs on crushed frames — see
-                        # DEFAULT_CRUSH_P95 notes).
-                        if _b_conf >= _o_conf + BRIGHTEN_WIN_MARGIN:
-                            results = _b_results
-                            result["brightened_retry"] = {
-                                "orig_conf": (_top_conf
-                                              if _top_conf is not None
-                                              else None),
-                                "bright_conf": _b_conf,
-                                "crop_mean": _crop_mean,
-                                "crop_p95": _crop_p95,
-                                "gamma": _gamma,
-                            }
-                            result["brightened_crop"] = _bright
+                _o_conf = (_top_conf if _top_conf is not None else -1.0)
+                if retry_crop is not None:
+                    # 暗版直判重试（无色调操作，坐标同位由调用方保证）
+                    # Dark-rendition retry (no tone op; the caller keeps
+                    # the crop co-registered).
+                    _r_results, _r_geo = _classify_once(retry_crop)
+                    _r_conf = (float(_r_results[0].get("confidence") or 0.0)
+                               if _r_results else -1.0)
+                    if _r_conf >= _o_conf + BRIGHTEN_WIN_MARGIN:
+                        results = _r_results
+                        result["brightened_retry"] = {
+                            "orig_conf": _top_conf,
+                            "bright_conf": _r_conf,
+                            "retry_kind": "dark_original",
+                        }
+                        result["brightened_crop"] = retry_crop
+                else:
+                    # V5.9: 内存伽马重识别（回退路径）。门控为「压死证据」
+                    # 双条件——均值暗 **且** p95 低（高光饥荒）。实测校准：
+                    # 正确曝光的黑鸟（乌鸫/乌鸦）框均值也低，但羽轴/眼点
+                    # 留有高光拖尾（p95≈173-203），提亮无益且可能翻错种；
+                    # 压死暗片 p95≈87-91 才是适用面。伽马在压死片上可能
+                    # 把 66% 正确判定崩到 16%，故须净胜才翻盘。
+                    # V5.9: in-memory gamma retry (fallback path), gated by
+                    # two-signal "crush evidence" — dark mean AND low p95
+                    # (highlight starvation). Calibrated on real library
+                    # samples: correctly-exposed black birds keep a plumage
+                    # highlight tail (p95 ~173-203) and must be left alone;
+                    # crushed frames (p95 ~87-91) are the target. Gamma was
+                    # measured collapsing a correct 66% ID to 16% on a
+                    # crushed frame, so it must win by the margin.
+                    _gray = np.asarray(image.convert("L"), dtype=np.float32)
+                    _crop_mean = float(_gray.mean())
+                    _crop_p95 = float(np.percentile(_gray, 95))
+                    if 0 <= _crop_mean < DEFAULT_DARK_MEAN \
+                            and _crop_p95 < DEFAULT_CRUSH_P95:
+                        _gamma = compute_brighten_gamma(
+                            _crop_mean, min_gamma=DEFAULT_MIN_GAMMA)
+                        if _gamma < 1.0:
+                            # PIL point() 对多通道图要求「每通道各 256 项」
+                            # 的表，同一 LUT 平铺三份即各通道同表提亮，不改
+                            # 变色相平衡，与预览提亮同一套数学。
+                            # PIL point() needs 256 entries PER BAND for
+                            # multi-band images; tiling the same LUT three
+                            # times brightens every channel identically —
+                            # hue balance preserved, same math as the
+                            # preview brightening.
+                            lut = np.array(
+                                [((i / 255.0) ** _gamma) * 255.0
+                                 for i in range(256)],
+                                dtype=np.uint8,
+                            )
+                            # point() 的 LUT 长度按通道数校验，先归一到
+                            # RGB，防御 RGBA/L 等非常规模式（正常链路均为
+                            # RGB 框图）。
+                            # point() validates the LUT length against the
+                            # band count; normalize to RGB first to be safe
+                            # against exotic modes (the normal path always
+                            # sees RGB crops).
+                            _retry_src = (image if image.mode == "RGB"
+                                          else image.convert("RGB"))
+                            _bright = _retry_src.point(
+                                np.tile(lut, 3).tolist())
+                            _b_results, _b_geo = _classify_once(_bright)
+                            _b_conf = (float(_b_results[0]
+                                             .get("confidence") or 0.0)
+                                       if _b_results else -1.0)
+                            # 净胜裕度：有原判定时必须明显更好才翻盘（防
+                            # +1 噪声翻转）。
+                            # Win margin: must clearly beat the original
+                            # (guards against +1 noise flips).
+                            if _b_conf >= _o_conf + BRIGHTEN_WIN_MARGIN:
+                                results = _b_results
+                                result["brightened_retry"] = {
+                                    "orig_conf": (_top_conf
+                                                  if _top_conf is not None
+                                                  else None),
+                                    "bright_conf": _b_conf,
+                                    "retry_kind": "gamma",
+                                    "crop_mean": _crop_mean,
+                                    "crop_p95": _crop_p95,
+                                    "gamma": _gamma,
+                                }
+                                result["brightened_crop"] = _bright
 
         # 人工定种白名单：用户核定的易混种对（欧亚喜鹊→喜鹊等）在此出口
         # 统一替换。放最后一层是为了让主鸟采纳、多鸟行、视频封面、补种

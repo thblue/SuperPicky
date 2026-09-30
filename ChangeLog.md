@@ -53,23 +53,23 @@ and everything runs about 30% faster.
     "Delete Permanently" removes selected photos for real — it works on NAS
     drives, where the recycle bin doesn't — together with their paired JPEGs,
     companion videos, sidecar JSON, preview caches and database records.
-18. **Dark shots brighten themselves.** Camera-embedded RAW previews are
-    scene-metered, so backlit raptors and shaded forest birds used to come out
-    globally underexposed: black thumbnails, missing keypoints, zero sharpness,
-    and species IDs rejected for darkness. Dark previews are now auto-brightened
-    to a target mean with a power-law gamma at conversion time (idempotent,
-    cache-only — delete the cached JPEG to get the original rendition back, or
-    turn off `preview_auto_brighten` in advanced settings). Frames that already
-    carry large highlight areas (backlit sky) are not lifted globally, so
-    highlights never clip. On top of that, when a detected bird box is still
-    too dark to clear the species adoption line, the high-res crop is brightened
-    in memory and classified once more — gated by calibrated "crush evidence"
-    (dark mean AND no highlight tail, so naturally black birds like blackbirds
-    and crows are left alone), and a brightened result only replaces the
-    original when it wins by a clear margin. The log notes the old→new
-    confidence, and the brightened crop is saved to
-    `.superpicky/cache/crop_debug/<name>_bright.jpg` for review. The DPP-gamma
-    workflow is untouched and no longer stacks on top of the auto brightening.
+18. **Dark shots brighten themselves — at RAW grade.** Camera-embedded RAW
+    previews are scene-metered, so backlit raptors and shaded forest birds used
+    to come out globally underexposed: black thumbnails, missing keypoints,
+    zero sharpness, and species IDs rejected for darkness. A dark preview is
+    now re-developed from the actual RAW sensor data with a calibrated linear
+    lift (~+1.3s per dark frame), landing exactly on the target brightness —
+    JPEG gamma lifting only amplified quantization noise. The original dark
+    rendition is preserved as a sidecar, and species classification compares
+    both renditions (brightened first, original dark as a gated retry, better
+    one wins) because measurements showed brightened crops can collapse a
+    correct 66% ID while the dark original reads 65-72% correct. Naturally
+    black birds (blackbirds, crows) are exempted by a calibrated "crush
+    evidence" gate (dark mean AND no plumage-highlight tail). Everything is
+    cache-only and idempotent — delete the cached JPEG to get the original
+    rendition back, or turn off `preview_auto_brighten` in advanced settings.
+    Winning retry crops land in `.superpicky/cache/crop_debug/` for review,
+    and the DPP-gamma workflow is untouched (no stacking).
 
 ## Before you upgrade
 

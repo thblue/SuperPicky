@@ -1262,6 +1262,61 @@ class PhotoProcessor:
                 identify_bird_fn = None
                 self._log(f"  ⚠️ BirdID import failed: {e}", "warning")
         
+        def _build_dark_retry_crop(preview_path, box, ref_dims):
+            """
+            V5.9.2: 从原始暗渲染伴随缓存（<前缀>_dark.jpg）裁出同位框图。
+
+            暗片管线下预览缓存已被 RAW 级提亮版覆盖，但原始内嵌渲染由
+            raw_to_jpeg 另存为 _dark.jpg（见 find_bird_util）。分类双渲染
+            对比需要把同一鸟框（坐标基于提亮版）按两版分辨率换算后从暗版
+            裁出。暗版不存在（非暗片/纯 JPEG/背光护栏豁免）返回 None，
+            identify_bird 自动回退内存伽马重试。
+
+            参数:
+            preview_path (str): 提亮版预览路径（同目录推导 _dark.jpg）
+            box (tuple): 提亮版坐标 (x, y, w, h)（已含 +15% padding）
+            ref_dims (tuple): 提亮版 (w, h)；任一无效返回 None
+
+            返回:
+            PIL.Image 或 None
+
+            V5.9.2: crop the co-registered box from the original dark
+            rendition sidecar (<prefix>_dark.jpg). Coordinates live in the
+            brightened preview's space and are rescaled to the dark
+            rendition's dimensions. Returns None when the sidecar is
+            absent; identify_bird then falls back to the in-memory gamma
+            retry.
+            """
+            try:
+                if not preview_path or not box or not ref_dims:
+                    return None
+                base, _ext = os.path.splitext(preview_path)
+                dark_path = base + "_dark.jpg"
+                if not os.path.exists(dark_path):
+                    return None
+                import cv2 as _cv2
+                from PIL import Image as _PILImage
+                dark = _cv2.imread(dark_path, _cv2.IMREAD_COLOR)
+                if dark is None:
+                    return None
+                dh, dw = dark.shape[:2]
+                rw, rh = ref_dims
+                if rw <= 0 or rh <= 0:
+                    return None
+                sx, sy = dw / float(rw), dh / float(rh)
+                x, y, w, h = box
+                x1 = max(0, int(x * sx))
+                y1 = max(0, int(y * sy))
+                x2 = min(dw, int((x + w) * sx))
+                y2 = min(dh, int((y + h) * sy))
+                if x2 - x1 < 8 or y2 - y1 < 8:
+                    return None
+                crop = dark[y1:y2, x1:x2]
+                return _PILImage.fromarray(
+                    _cv2.cvtColor(crop, _cv2.COLOR_BGR2RGB))
+            except Exception:
+                return None
+
         def submit_birdid_task(
             file_prefix: str,
             image_path: str,
@@ -1270,6 +1325,7 @@ class PhotoProcessor:
             bird_crop_pil=None,  # 主流水线已裁剪的 PIL Image，避免 BirdID 重跑 YOLO
             multibird_birds=None,  # V5.0: all_birds（多鸟逐鸟分类；None=单鸟/关闭）
             multibird_dims=None,   # V5.0: 处理图 (w, h)，bbox 坐标换算用
+            dark_retry_crop=None,  # V5.9.2: 原始暗渲染同位框图（双渲染对比重试）
         ):
             if birdid_executor is None or identify_bird_fn is None:
                 return
@@ -1297,6 +1353,11 @@ class PhotoProcessor:
                         # V5.9: brightened retry for dark crops below the
                         # adoption line (see identify_bird.dark_retry_conf)
                         dark_retry_conf=self.settings.birdid_confidence_threshold,
+                        # V5.9.2: 亮版（RAW 级提亮预览）首判失败时用原始
+                        # 暗渲染框图重判（见 identify_bird.retry_crop）
+                        # V5.9.2: retry with the original dark-rendition
+                        # crop when the brightened first pass fails
+                        retry_crop=dark_retry_crop,
                     )
                     # V5.0(multibird): 多鸟照片在同一 future 里接着做逐鸟分类，
                     # 结果挂在返回 dict 上由 apply_birdid_result 统一落库。
@@ -1580,16 +1641,17 @@ class PhotoProcessor:
                     is_zh = not self.i18n.current_lang.startswith('en')
                     tier_suffix = f"  {tier_icon(tier_idx)} {tier_name(tier_idx, is_zh=is_zh)}"
 
-                # V5.9: 暗框提亮重识别命中时，日志标注新旧置信度，并把
-                # 提亮后的框图存进 crop_debug（<前缀>_bright.jpg）供人工
-                # 复核鸟种——缩略图链路（temp_preview）的提亮由转换层
-                # （raw_to_jpeg 自动提亮）负责，这里只存鸟框。
-                # V5.9: when the brightened retry won, annotate the log
-                # with old/new confidence and persist the brightened crop
-                # to crop_debug (<prefix>_bright.jpg) for manual review.
+                # V5.9.2: 双渲染重试命中时，日志标注新旧置信度，并把胜出
+                # 框图存进 crop_debug 供人工复核——暗版重试胜出存
+                # <前缀>_dark.jpg，伽马重试胜出存 <前缀>_bright.jpg。缩略图
+                # 链路（temp_preview）的提亮由转换层（raw_to_jpeg）负责，
+                # 这里只存鸟框。
+                # V5.9.2: when a dual-rendition retry won, annotate the log
+                # with old/new confidence and persist the winning crop to
+                # crop_debug for manual review — <prefix>_dark.jpg for a
+                # dark-original win, <prefix>_bright.jpg for a gamma win.
                 # Thumbnail-side brightening is the conversion layer's job
-                # (raw_to_jpeg auto brighten); only the bird crop is
-                # saved here.
+                # (raw_to_jpeg); only the bird crop is saved here.
                 _retry_info = birdid_result.get('brightened_retry')
                 if _retry_info:
                     bird_log += self.i18n.t(
@@ -1600,6 +1662,9 @@ class PhotoProcessor:
                     _bright_crop = birdid_result.get('brightened_crop')
                     if _bright_crop is not None:
                         try:
+                            _kind = _retry_info.get('retry_kind') or 'gamma'
+                            _suffix = ('_dark' if _kind == 'dark_original'
+                                       else '_bright')
                             _bright_dir = os.path.join(
                                 self.dir_path, ".superpicky", "cache",
                                 "crop_debug")
@@ -1607,7 +1672,8 @@ class PhotoProcessor:
                                 self.dir_path, ".superpicky"))
                             os.makedirs(_bright_dir, exist_ok=True)
                             _bright_path = os.path.join(
-                                _bright_dir, f"{file_prefix}_bright.jpg")
+                                _bright_dir,
+                                f"{file_prefix}{_suffix}.jpg")
                             _bright_crop.convert("RGB").save(
                                 _bright_path, "JPEG", quality=92)
                             self._log(self.i18n.t(
@@ -3082,6 +3148,15 @@ class PhotoProcessor:
                                     )
                                 except Exception:
                                     pass
+                            # V5.9.2: 暗片双渲染对比——从原始暗渲染裁同位框图
+                            # V5.9.2: dual-rendition compare — co-registered
+                            # crop from the original dark rendition.
+                            _dark_retry = (
+                                _build_dark_retry_crop(
+                                    filepath,
+                                    (x_orig, y_orig, w_orig_box, h_orig_box),
+                                    (w_orig, h_orig))
+                                if bird_crop_bgr is not None else None)
                             # V5.0(multibird): 多鸟照片随主鸟任务一起逐鸟分类
                             # V5.0: 单鸟也传（入库一行主鸟记录，零额外推理）
                             _mb_birds = (all_birds
@@ -3095,6 +3170,7 @@ class PhotoProcessor:
                                 _birdid_crop_pil,
                                 multibird_birds=_mb_birds,
                                 multibird_dims=img_dims,
+                                dark_retry_crop=_dark_retry,
                             )
                         # V5.6: 门控拒绝兜底——检测框仍落库（仅几何，物种
                         # 留空），供 backfill/浏览器/召回使用（同 JPEG 分支）
@@ -3168,6 +3244,15 @@ class PhotoProcessor:
                                     )
                                 except Exception:
                                     pass
+                            # V5.9.2: 暗片双渲染对比——从原始暗渲染裁同位框图
+                            # V5.9.2: dual-rendition compare — co-registered
+                            # crop from the original dark rendition.
+                            _dark_retry = (
+                                _build_dark_retry_crop(
+                                    filepath,
+                                    (x_orig, y_orig, w_orig_box, h_orig_box),
+                                    (w_orig, h_orig))
+                                if bird_crop_bgr is not None else None)
                             # V5.0(multibird): 多鸟照片随主鸟任务一起逐鸟分类
                             # V5.0: 单鸟也传（入库一行主鸟记录，零额外推理）
                             _mb_birds = (all_birds
@@ -3181,6 +3266,7 @@ class PhotoProcessor:
                                 _birdid_crop_pil,
                                 multibird_birds=_mb_birds,
                                 multibird_dims=img_dims,
+                                dark_retry_crop=_dark_retry,
                             )
                         # V5.6: 门控拒绝兜底——检测框仍落库（仅几何，物种
                         # 留空），供 backfill/浏览器/召回使用（同 RAW 分支）

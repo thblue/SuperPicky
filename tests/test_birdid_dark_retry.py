@@ -24,6 +24,19 @@ def _crop(mean: float, size: tuple = (64, 64)) -> Image.Image:
     return Image.fromarray(arr.astype(np.uint8), "RGB")
 
 
+def _blackbird_like(size: tuple = (64, 64)) -> Image.Image:
+    """模拟「健康黑鸟」框：均值低但羽轴高光拖尾（p95≈200，> 压死线 120）。
+
+    85% 像素聚在暗部（黑羽），15% 像素是高光羽轴/背景亮斑。
+    """
+    rng = np.random.default_rng(23)
+    dark = rng.normal(40, 12, (size[1], size[0], 3))
+    bright = rng.normal(205, 12, (size[1], size[0], 3))
+    mask = (rng.random((size[1], size[0], 1)) > 0.85)
+    arr = np.where(mask, bright, dark)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB")
+
+
 def _candidate(conf: float, name: str = "普通翠鸟") -> dict:
     return {
         "cn_name": name, "en_name": "Common Kingfisher",
@@ -111,6 +124,48 @@ class TestDarkRetry:
 
         assert result["results"][0]["confidence"] == pytest.approx(30.0)
         assert len(patched_identify_env) == 1
+
+    def test_no_retry_on_healthy_blackbird(self, patched_identify_env):
+        """V5.9.1 压死证据门控：均值暗但 p95 高（羽轴高光拖尾）→ 不重试。
+
+        正确曝光的乌鸫/乌鸦属于此类：鸟本来就黑，提亮无益且可能翻错种。
+        """
+        patched_identify_env.append([_candidate(30.0, "乌鸫")])
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_blackbird_like(),
+            dark_retry_conf=40.0)
+
+        assert result["results"][0]["confidence"] == pytest.approx(30.0)
+        assert len(patched_identify_env) == 1
+        assert "brightened_retry" not in result
+
+    def test_flip_requires_margin(self, patched_identify_env):
+        """V5.9.1 翻盘裕度：提亮结果仅 +1.5 < 3 → 保留原判定。"""
+        patched_identify_env.append([_candidate(30.0, "乌灰鸫")])
+        patched_identify_env.append([_candidate(31.5, "紫啸鸫")])
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(50),
+            dark_retry_conf=40.0)
+
+        assert result["results"][0]["confidence"] == pytest.approx(30.0)
+        assert result["results"][0]["cn_name"] == "乌灰鸫"
+        assert "brightened_retry" not in result
+        assert len(patched_identify_env) == 2
+
+    def test_flip_at_exact_margin(self, patched_identify_env):
+        """提亮结果恰好净胜 3 个点 → 允许翻盘。"""
+        patched_identify_env.append([_candidate(30.0, "乌灰鸫")])
+        patched_identify_env.append([_candidate(33.0, "紫啸鸫")])
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(50),
+            dark_retry_conf=40.0)
+
+        assert result["results"][0]["confidence"] == pytest.approx(33.0)
+        assert result["results"][0]["cn_name"] == "紫啸鸫"
+        assert "brightened_retry" in result
 
     def test_disabled_by_default(self, patched_identify_env):
         """不传 dark_retry_conf → 永远单次分类（向后兼容）。"""

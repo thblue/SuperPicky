@@ -1507,24 +1507,42 @@ def identify_bird(
         # 偏暗时，按目标均值伽马提亮后再分类一次，置信度更高者胜出。提亮
         # 只作用于内存中的框图副本（原图永不修改）；两次分类共享同一地理
         # 候选集，差异只来自图像本身。
+        # V5.9.1: 门控升级为「压死证据」双条件——均值暗 **且** p95 低
+        # （高光饥荒）。用真实库校准：正确曝光的黑鸟（乌鸫/乌鸦）框均值
+        # 也会低，但羽轴/眼点留有高光拖尾（p95≈173-203），提亮对它们
+        # 无益且可能翻错种；压死暗片 p95≈87-91 才是提亮的适用面。
+        # 采纳侧：实测伽马在压死片上可能把 66% 正确判定崩到 16%，因此
+        # 提亮结果必须净胜 BRIGHTEN_WIN_MARGIN 个点才替换原判定。
         # V5.9: brightened-crop retry. When the first pass has no candidate
         # or a top-1 under the adoption line on a dark crop, classify a
         # gamma-brightened copy once more; the higher confidence wins. The
         # brightening touches only the in-memory copy (originals are never
         # modified); both passes share the same geo candidate set, so any
         # difference comes from the image alone.
+        # V5.9.1: the gate became two-signal "crush evidence" — dark mean
+        # AND low p95 (highlight starvation). Calibrated on real library
+        # samples: correctly-exposed black birds (blackbirds/crows) also
+        # have low crop means but keep a plumage highlight tail (p95
+        # ~173-203); brightening them is useless and risks species flips.
+        # Crushed frames (p95 ~87-91) are the actual target. On adoption,
+        # gamma was measured collapsing a correct 66% ID to 16% on a
+        # crushed frame, so a brightened result must beat the original by
+        # BRIGHTEN_WIN_MARGIN points to replace it.
         if dark_retry_conf is not None:
             from tools.tone_curve import (
-                DEFAULT_DARK_MEAN, DEFAULT_MIN_GAMMA,
-                compute_brighten_gamma, mean_luma_pil,
+                BRIGHTEN_WIN_MARGIN, DEFAULT_CRUSH_P95, DEFAULT_DARK_MEAN,
+                DEFAULT_MIN_GAMMA, compute_brighten_gamma,
             )
             _top_conf = (float(results[0].get("confidence") or 0.0)
                          if results else None)
             _needs_retry = (_top_conf is None
                             or _top_conf < float(dark_retry_conf))
             if _needs_retry:
-                _crop_mean = mean_luma_pil(image)
-                if 0 <= _crop_mean < DEFAULT_DARK_MEAN:
+                _gray = np.asarray(image.convert("L"), dtype=np.float32)
+                _crop_mean = float(_gray.mean())
+                _crop_p95 = float(np.percentile(_gray, 95))
+                if 0 <= _crop_mean < DEFAULT_DARK_MEAN \
+                        and _crop_p95 < DEFAULT_CRUSH_P95:
                     _gamma = compute_brighten_gamma(
                         _crop_mean, min_gamma=DEFAULT_MIN_GAMMA)
                     if _gamma < 1.0:
@@ -1555,7 +1573,16 @@ def identify_bird(
                                    if _b_results else -1.0)
                         _o_conf = (_top_conf if _top_conf is not None
                                    else -1.0)
-                        if _b_conf > _o_conf:
+                        # 净胜裕度：首跑无候选（_o_conf=-1）时直接采纳首个
+                        # 结果；有原判定时必须明显更好才翻盘（防 +1 噪声
+                        # 翻转，实测案例见 DEFAULT_CRUSH_P95 注释）。
+                        # Win margin: with no first-pass candidate
+                        # (_o_conf=-1) the first brightened result is
+                        # adopted as-is; otherwise it must clearly beat
+                        # the original (a +1 noise flip once measured
+                        # collapses correct IDs on crushed frames — see
+                        # DEFAULT_CRUSH_P95 notes).
+                        if _b_conf >= _o_conf + BRIGHTEN_WIN_MARGIN:
                             results = _b_results
                             result["brightened_retry"] = {
                                 "orig_conf": (_top_conf
@@ -1563,6 +1590,7 @@ def identify_bird(
                                               else None),
                                 "bright_conf": _b_conf,
                                 "crop_mean": _crop_mean,
+                                "crop_p95": _crop_p95,
                                 "gamma": _gamma,
                             }
                             result["brightened_crop"] = _bright

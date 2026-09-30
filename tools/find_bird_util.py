@@ -62,6 +62,36 @@ from tools.tone_curve import (  # noqa: E402,F401
 )
 
 
+def preview_tone_stats(jpg_path: str) -> dict:
+    """
+    一次 draft 解码同时取均值 / p95 / 高光占比（提亮判据的全部输入）。
+
+    Single draft-mode decode returning mean / p95 / highlight fraction —
+    everything the brightening gates need, decoded once.
+
+    参数 / Parameters:
+        jpg_path (str): JPEG 文件路径 / path to the JPEG file.
+
+    返回 / Returns:
+        dict: {mean, p95, frac_highlight}；解码失败各项为 -1.0 / stats,
+              all -1.0 on failure.
+    """
+    try:
+        from PIL import Image
+        with Image.open(jpg_path) as im:
+            im.draft("L", (512, 512))  # 1/2..1/8 解码，仅影响精度不影响方向
+            gray = im.convert("L")
+            import numpy as _np
+            arr = _np.asarray(gray, dtype=_np.float32)
+            return {
+                "mean": float(arr.mean()),
+                "p95": float(_np.percentile(arr, 95)),
+                "frac_highlight": float((arr >= 235).mean()),
+            }
+    except Exception:
+        return {"mean": -1.0, "p95": -1.0, "frac_highlight": -1.0}
+
+
 def preview_mean_luma(jpg_path: str) -> float:
     """
     快速估算预览 JPEG 的平均亮度（Rec.601 灰度均值，0-255）。
@@ -79,15 +109,7 @@ def preview_mean_luma(jpg_path: str) -> float:
     返回 / Returns:
         float: 平均亮度；解码失败返回 -1.0 / mean luma, or -1.0 on failure.
     """
-    try:
-        from PIL import Image
-        with Image.open(jpg_path) as im:
-            im.draft("L", (512, 512))  # 1/2..1/8 解码，仅影响精度不影响方向
-            gray = im.convert("L")
-            import numpy as _np
-            return float(_np.asarray(gray, dtype=_np.float32).mean())
-    except Exception:
-        return -1.0
+    return preview_tone_stats(jpg_path)["mean"]
 
 
 def brighten_preview_if_dark(
@@ -125,8 +147,20 @@ def brighten_preview_if_dark(
     """
     if not jpg_path or not os.path.exists(jpg_path):
         return None
-    mean = preview_mean_luma(jpg_path)
+    from tools.tone_curve import (
+        DEFAULT_HIGHLIGHT_GUARD_FRAC, DEFAULT_HIGHLIGHT_LEVEL,
+    )
+    tone = preview_tone_stats(jpg_path)
+    mean = tone["mean"]
     if mean < 0 or mean >= dark_mean:
+        return None
+    # V5.9.1 高光护栏：已有大片高光的背光/高反差画面不做全局提亮
+    # （高光会被削掉），鸟区域由暗框重识别负责。
+    # V5.9.1 highlight guard: frames with large highlight areas (backlit /
+    # high-contrast) are not lifted globally — highlights would clip; the
+    # bird region is the dark-crop retry's job.
+    if 0 <= tone["frac_highlight"] and \
+            tone["frac_highlight"] > DEFAULT_HIGHLIGHT_GUARD_FRAC:
         return None
     gamma = compute_brighten_gamma(mean, target_mean)
     if gamma >= 1.0:
@@ -140,7 +174,7 @@ def brighten_preview_if_dark(
             return None
         cv2.imwrite(jpg_path, cv2.LUT(img, build_gamma_lut(gamma)),
                     [cv2.IMWRITE_JPEG_QUALITY, 92])
-        new_mean = preview_mean_luma(jpg_path)
+        new_mean = preview_tone_stats(jpg_path)["mean"]
         log_message(
             f"BRIGHTEN, {os.path.basename(jpg_path)}: mean {mean:.0f} -> "
             f"{new_mean:.0f} (gamma {gamma:.2f})",

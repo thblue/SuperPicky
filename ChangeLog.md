@@ -59,13 +59,17 @@ and everything runs about 30% faster.
     and species IDs rejected for darkness. Dark previews are now auto-brightened
     to a target mean with a power-law gamma at conversion time (idempotent,
     cache-only — delete the cached JPEG to get the original rendition back, or
-    turn off `preview_auto_brighten` in advanced settings). On top of that, when
-    a detected bird box is still too dark to clear the species adoption line,
-    the high-res crop is brightened in memory and classified once more; the
-    higher-confidence result wins, the log notes the old→new confidence, and the
-    brightened crop is saved to `.superpicky/cache/crop_debug/<name>_bright.jpg`
-    for review. The DPP-gamma workflow is untouched and no longer stacks on top
-    of the auto brightening.
+    turn off `preview_auto_brighten` in advanced settings). Frames that already
+    carry large highlight areas (backlit sky) are not lifted globally, so
+    highlights never clip. On top of that, when a detected bird box is still
+    too dark to clear the species adoption line, the high-res crop is brightened
+    in memory and classified once more — gated by calibrated "crush evidence"
+    (dark mean AND no highlight tail, so naturally black birds like blackbirds
+    and crows are left alone), and a brightened result only replaces the
+    original when it wins by a clear margin. The log notes the old→new
+    confidence, and the brightened crop is saved to
+    `.superpicky/cache/crop_debug/<name>_bright.jpg` for review. The DPP-gamma
+    workflow is untouched and no longer stacks on top of the auto brightening.
 
 ## Before you upgrade
 

@@ -41,6 +41,30 @@ DEFAULT_DARK_MEAN = 90.0
 DEFAULT_TARGET_MEAN = 115.0
 DEFAULT_MIN_GAMMA = 0.45  # γ=0.45 ≈ 最亮 2.2 倍，防噪声过度放大 / ≈2.2x lift cap
 
+# V5.9.1: 暗框重识别的「压死证据」判据与翻盘裕度——用真实库校准
+# （2026-09-30 奥森/南堡样本，详见 scripts_dev 沙盒校准脚本）：
+#   健康黑鸟（正确曝光的乌鸫/乌鸦）：crop p95 ≈ 173-203（羽轴高光拖尾）；
+#   压死暗片：crop p95 ≈ 87-91（高光饥荒）。
+# 只有「均值暗 且 p95 低」才值得提亮重试；黑鸟本身黑不欠曝，不该重试。
+# 实测另证：伽马提亮在压死片上可能把 66% 的正确判定崩到 16%，故提亮
+# 结果必须净胜 BRIGHTEN_WIN_MARGIN 个点才允许替换原判定。
+# V5.9.1: "crush evidence" gate and flip margin for the dark-crop retry,
+# calibrated on real library samples: healthy black birds keep a plumage
+# highlight tail (crop p95 ~173-203) while crushed frames starve (p95
+# ~87-91). Retry only when BOTH dark mean and low p95. Measurements also
+# showed gamma can collapse a correct 66% ID to 16% on crushed frames,
+# so a brightened result must win by BRIGHTEN_WIN_MARGIN points.
+DEFAULT_CRUSH_P95 = 120.0
+BRIGHTEN_WIN_MARGIN = 3.0
+
+# V5.9.1: 预览整体提亮的高光护栏：画面里已有大片 ≥235 高光（背光天空/
+# 舞台灯）时全局提亮只会削掉高光，鸟区域交给暗框重识别（Layer B）处理。
+# Guard for whole-preview brightening: frames already carrying large
+# highlight areas (backlit sky / stage light) must not be globally lifted
+# (clipping); the bird itself is handled by the dark-crop retry.
+DEFAULT_HIGHLIGHT_GUARD_FRAC = 0.15
+DEFAULT_HIGHLIGHT_LEVEL = 235
+
 
 def mean_luma_bgr(img_bgr: "np.ndarray") -> float:
     """

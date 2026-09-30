@@ -132,6 +132,30 @@ class TestPreviewFileBrighten:
                     [cv2.IMWRITE_JPEG_QUALITY, 92])
         assert brighten_preview_if_dark(path, str(tmp_path)) is None
 
+    def test_highlight_guard_skips_backlit_frame(self, tmp_path):
+        """V5.9.1 高光护栏：均值暗但已有大片 ≥235 高光（背光）→ 不提亮。
+
+        全局提亮只会削掉高光；80% 暗部(20) + 20% 高光(250) → mean≈66
+        但 frac_highlight=0.2 > 0.15。
+        """
+        from tools.find_bird_util import (
+            brighten_preview_if_dark, preview_tone_stats,
+        )
+        import cv2
+
+        rng = np.random.default_rng(6)
+        dark = _random_bgr(rng, 20)
+        bright = _random_bgr(rng, 250)
+        mask = (rng.random((48, 64, 1)) > 0.75)
+        frame = np.where(mask, bright, dark).astype(np.uint8)
+        path = str(tmp_path / "backlit.jpg")
+        cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+        stats = preview_tone_stats(path)
+        assert stats["mean"] < 90
+        assert stats["frac_highlight"] > 0.15
+        assert brighten_preview_if_dark(path, str(tmp_path)) is None
+
     def test_missing_file(self, tmp_path):
         from tools.find_bird_util import brighten_preview_if_dark
         assert brighten_preview_if_dark(

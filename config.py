@@ -394,6 +394,21 @@ class AIConfig:
     # V5.8: min YOLO conf for a tile candidate to earn a BirdID gate call.
     # Field data: real hidden birds start at 0.15; nothing real below 0.1.
     RESCUE_TILE_MIN_CONF: float = 0.1
+    # V5.9.5: 瓦片守门未过框「仅几何保留（0★ 仅框行）」的最低 YOLO 置信
+    # 度，与上面的守门调用地板（0.1）刻意解耦：0.1~0.2 的候选仍送 BirdID
+    # 守门（过门即正常救回——乐活中堤实测真鸟最低 0.15），只有守门未过
+    # 且低于本地板的才不落仅框行（实测杂乱暗片 10 个守门未过框中 7 个
+    # 落在 0.1~0.2 区间，全是 BirdID≈1% 的植被杂物）。若日后出现真鸟
+    # 被此地板挡掉仅框行，可下调至 0.15（实测真鸟下界）。
+    # V5.9.5: min YOLO conf for a BirdID-gate-failed tile box to persist
+    # as a geometry-only 0-star row, deliberately decoupled from the
+    # gate-call floor above: 0.1-0.2 candidates still get the BirdID
+    # confirm (a pass is a normal rescue; real birds measure down to
+    # 0.15), while gate failures below this floor skip the 0-star row
+    # (on the measured cluttered dark frame 7 of 10 gate failures sat in
+    # 0.1-0.2, all vegetation junk at BirdID ~= 1%). Drop to 0.15 (the
+    # measured real-bird floor) if a real bird ever loses its row here.
+    RESCUE_TILE_UNCONFIRMED_MIN_CONF: float = 0.2
     # COCO 中飞鸟常被误认的类别 / COCO classes birds in flight are mistaken for
     RESCUE_CONFUSABLE_CLASS_IDS: dict = field(
         default_factory=lambda: {4: "airplane", 33: "kite"})

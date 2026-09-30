@@ -288,6 +288,28 @@ def test_tile_pass_birdid_gate_rejects_leaf(tmp_path, monkeypatch):
     assert boxes[0]["species_conf"] == 12.0
 
 
+def test_tile_pass_unconfirmed_floor_drops_low_conf(tmp_path, monkeypatch):
+    """V5.9.5: 守门未过且 conf < 仅框保留地板 → 丢弃（植被杂物降噪）。
+
+    地板与守门调用地板（0.1）解耦：候选仍过 BirdID 守门，只是守门未过
+    且低于 0.2 的不再落 0★ 仅框行。假模型固定 conf 0.45，把地板抬到
+    0.5 即可模拟低置信场景。
+    Gate failures below the geometry-keep floor (decoupled from the
+    0.1 gate-call floor) are dropped; the candidate still gets its
+    BirdID confirm call first. The fake model reports conf 0.45, so
+    raising the floor to 0.5 simulates the low-conf scenario."""
+    from config import config as app_config
+
+    jpg = _write_fullres_jpg(tmp_path)
+    monkeypatch.setattr(ai_model, "_birdid_confirm",
+                        lambda image, xyxy, full_image=None,
+                        xyxy_full=None: ("某鸟", 12.0))
+    monkeypatch.setattr(app_config.ai, "RESCUE_TILE_UNCONFIRMED_MIN_CONF", 0.5)
+    boxes = ai_model._tile_detect_pass(_ContentFakeModel(), jpg, IMG43,
+                                       None, 25, ".", None)
+    assert boxes == []
+
+
 def test_tile_pass_disabled(tmp_path, monkeypatch):
     """RESCUE_TILE_ENABLED=False → 完全不跑瓦片推理。
     Disabled → no tile inference at all."""

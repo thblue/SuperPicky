@@ -504,9 +504,10 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
     b. YOLO conf < RESCUE_TILE_MIN_CONF → 直接丢弃，不送识别
        （实测该区间无真鸟）；
     c. 从原图裁剪过 BirdID，top1 < birdid_gate → 不构成「救回」，但
-       V5.9.5 起不再丢弃：保留为 unconfirmed=True 的框随照片走
-       0★ 仅几何落库（检测阶段丢框=连人工回捞的机会都没有；与 V5.6
-       识鸟门控拒绝的仅框落库同哲学）。gate=10 时代曾放进枯花误救，
+       V5.9.5 起不再丢弃：conf ≥ RESCUE_TILE_UNCONFIRMED_MIN_CONF(0.2)
+       的保留为 unconfirmed=True 的框随照片走 0★ 仅几何落库（检测阶段
+       丢框=连人工回捞的机会都没有；与 V5.6 识鸟门控拒绝的仅框落库同
+       哲学），低于地板的视为植被杂物丢弃。gate=10 时代曾放进枯花误救，
        2026-09-12 定档 25。
 
     参数:
@@ -592,11 +593,20 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
         if species_conf < birdid_gate:
             # V5.9.5: 守门未过不再丢弃——保留为 unconfirmed 框随照片走
             # 0★ 仅几何落库，人工回捞/backfill 从此有据可依；不触发
-            # rescued（未过两因子核验，不豁免置信门槛）。
+            # rescued（未过两因子核验，不豁免置信门槛）。仅框保留另有
+            # 独立地板（RESCUE_TILE_UNCONFIRMED_MIN_CONF=0.2，高于守门
+            # 调用地板 0.1）：守门未过且低置信的是植被杂物，不落行降噪
+            # ——0.1~0.2 的真鸟仍会先过守门获得完整救回，不受此地板影响。
             # V5.9.5: gate failure keeps the box (unconfirmed=True) for a
             # geometry-only 0-star row instead of dropping it — human
             # rescue finally has something to work with; no rescued flip
-            # (the box never passed the two-factor verification).
+            # (the box never passed the two-factor verification). A
+            # separate, higher keep floor (0.2 vs the 0.1 gate-call floor)
+            # drops gate-failed low-conf vegetation junk; real birds in
+            # 0.1-0.2 still earn a full rescue by passing the gate first.
+            if conf < config.ai.RESCUE_TILE_UNCONFIRMED_MIN_CONF:
+                rejected += 1
+                continue
             unconfirmed.append({"xyxy": box, "conf": conf,
                                 "species": species,
                                 "species_conf": species_conf,

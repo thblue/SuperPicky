@@ -188,6 +188,10 @@ def collect_purge_files(photo: dict) -> List[str]:
     bright_crop = _bright_crop_path(photo)
     if bright_crop:
         candidates.append(bright_crop)
+        # V5.9.3: raw_stretch 重试胜出的复核图（<前缀>_raw.jpg）
+        # V5.9.3: review crop for raw_stretch retry wins (<prefix>_raw.jpg)
+        candidates.append(bright_crop.replace("_bright.jpg", "_raw.jpg"))
+        candidates.append(bright_crop.replace("_bright.jpg", "_dark.jpg"))
     dark_preview = _dark_preview_path(photo)
     if dark_preview:
         candidates.append(dark_preview)

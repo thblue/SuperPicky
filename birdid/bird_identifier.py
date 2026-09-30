@@ -1289,6 +1289,7 @@ def identify_bird(
     focus_point: Optional[Tuple[float, float]] = None,
     dark_retry_conf: Optional[float] = None,
     retry_crop: Optional[Image.Image] = None,
+    retry_factory=None,
 ) -> Dict:
     """
     识别单张照片中的鸟种，支持暗框提亮重识别。
@@ -1314,12 +1315,17 @@ def identify_bird(
         实测暗图直判本就有 65-72% 正确率的样本）；未提供时回退「压死
         证据门控 + 内存伽马提亮重试」。框图坐标由调用方按两版分辨率
         换算（见 photo_processor 的暗版裁剪构建）。
+    retry_factory (Optional[Callable]): 惰性重试图工厂（V5.9.3 平坦雾片
+        救援）。首判低于采纳线且 retry_crop 未提供时调用一次，返回
+        (PIL框图, retry_kind) 或 None——开发 RAW（~2s）只在真正需要
+        重试时发生，不在批处理主循环白白付费。retry_kind 用于上层
+        落复核图命名（如 raw_stretch）。
 
     返回:
     Dict: success/results/yolo_info/gps_info/geo_info/error；重试且净胜
         时额外带 brightened_retry（orig_conf/bright_conf/retry_kind=
-        dark_original|gamma/gamma 等）与 brightened_crop（胜出的 PIL
-        框图，供上层保存复核缩略图）。
+        dark_original|raw_stretch|gamma 等）与 brightened_crop（胜出的
+        PIL 框图，供上层保存复核缩略图）。
 
     Identify the bird species in one photo, with a brightened-crop retry
     for dark frames.
@@ -1509,23 +1515,24 @@ def identify_bird(
         results, geo_info = _classify_once(image)
         result["geo_info"] = geo_info
 
-        # V5.9.2: 双渲染对比重试。暗片管线（raw_to_jpeg RAW 级提亮）下
-        # preloaded_crop 是提亮版框图；原始暗渲染被另存为 <前缀>_dark.jpg
-        # 且由调用方裁成同位框图传入 retry_crop。实测（2026-09-30 玉渊潭
-        # 压死样本）：提亮版分类可能崩（7%/16%），而暗图直判本就有 65-72%
-        # 正确率——亮版首判低于采纳线时用暗版重判一次，净胜裕度内择优。
-        # 未传 retry_crop（无暗伴随文件：背光护栏豁免/纯 JPEG/多鸟次要鸟）
-        # 时回退 V5.9.1 的「压死证据 + 内存伽马」重试。
-        # V5.9.2: dual-rendition retry. With the RAW-grade pipeline the
-        # preloaded_crop is the BRIGHTENED crop; the original dark
-        # rendition is preserved as <prefix>_dark.jpg and cropped by the
-        # caller into retry_crop. Measured on crushed samples: the
-        # brightened pass can collapse (7%/16%) while the dark rendition
-        # alone IDs at 65-72% — when the bright first pass lands under the
-        # adoption line, retry with the dark crop and keep the better one.
-        # Without retry_crop (no dark sidecar: highlight-guard frames,
-        # pure JPEGs, secondary birds) fall back to the V5.9.1
-        # crush-evidence + in-memory gamma retry.
+        # V5.9.2/V5.9.3: 备选渲染重试。暗片管线（raw_to_jpeg RAW 级提亮）
+        # 下 preloaded_crop 是提亮版框图；原始暗渲染被另存为 <前缀>_dark.jpg
+        # 且由调用方裁成同位框图传入 retry_crop。平坦雾片（全图灰阶跨度
+        # <45）由调用方传 retry_factory 惰性开发 RAW + 框内拉伸重判。实测
+        # （2026-09-30）：提亮版/内嵌预览分类可能崩（7%/16%），而备选渲染
+        # 本就正确率更高——首判低于采纳线时用备选渲染重判一次，净胜裕度
+        # 内择优。无备选（背光护栏豁免/纯 JPEG/多鸟次要鸟）时回退 V5.9.1
+        # 的「压死证据 + 内存伽马」重试。
+        # V5.9.2/V5.9.3: alternate-rendition retry. With the RAW-grade
+        # pipeline the preloaded_crop is the BRIGHTENED crop; the original
+        # dark rendition is preserved as <prefix>_dark.jpg and cropped by
+        # the caller into retry_crop. Flat fog frames (gray span <45) get
+        # a retry_factory that lazily develops the RAW with an in-box
+        # contrast stretch. Measured: the brightened/embedded pass can
+        # collapse (7%/16%) while alternates ID better — retry below the
+        # adoption line and keep the better one. Without alternates
+        # (highlight-guard frames, pure JPEGs, secondary birds) fall back
+        # to the V5.9.1 crush-evidence + in-memory gamma retry.
         if dark_retry_conf is not None:
             from tools.tone_curve import (
                 BRIGHTEN_WIN_MARGIN, DEFAULT_CRUSH_P95, DEFAULT_DARK_MEAN,
@@ -1537,11 +1544,25 @@ def identify_bird(
                             or _top_conf < float(dark_retry_conf))
             if _needs_retry:
                 _o_conf = (_top_conf if _top_conf is not None else -1.0)
-                if retry_crop is not None:
-                    # 暗版直判重试（无色调操作，坐标同位由调用方保证）
-                    # Dark-rendition retry (no tone op; the caller keeps
-                    # the crop co-registered).
-                    _r_results, _r_geo = _classify_once(retry_crop)
+                # 备选渲染解析：预载暗版优先，其次惰性工厂（平坦雾片的
+                # RAW 开发 ~2s，只在首判失败时才付费），最后回退伽马。
+                # Alternate rendition resolution: eager dark crop first,
+                # then the lazy factory (the ~2s RAW develop for flat fog
+                # frames is paid only when the first pass fails), then
+                # the gamma fallback.
+                _alt_crop, _alt_kind = retry_crop, "dark_original"
+                if _alt_crop is None and retry_factory is not None:
+                    try:
+                        _made = retry_factory()
+                        if _made is not None:
+                            _alt_crop, _alt_kind = _made
+                    except Exception:
+                        _alt_crop = None
+                if _alt_crop is not None:
+                    # 备选渲染直判重试（无色调操作，坐标同位由调用方保证）
+                    # Alternate-rendition retry (no tone op; the caller
+                    # keeps the crop co-registered).
+                    _r_results, _r_geo = _classify_once(_alt_crop)
                     _r_conf = (float(_r_results[0].get("confidence") or 0.0)
                                if _r_results else -1.0)
                     if _r_conf >= _o_conf + BRIGHTEN_WIN_MARGIN:
@@ -1549,9 +1570,9 @@ def identify_bird(
                         result["brightened_retry"] = {
                             "orig_conf": _top_conf,
                             "bright_conf": _r_conf,
-                            "retry_kind": "dark_original",
+                            "retry_kind": _alt_kind,
                         }
-                        result["brightened_crop"] = retry_crop
+                        result["brightened_crop"] = _alt_crop
                 else:
                     # V5.9: 内存伽马重识别（回退路径）。门控为「压死证据」
                     # 双条件——均值暗 **且** p95 低（高光饥荒）。实测校准：

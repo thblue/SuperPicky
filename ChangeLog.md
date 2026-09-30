@@ -71,6 +71,18 @@ and everything runs about 30% faster.
     Winning retry crops land in `.superpicky/cache/crop_debug/` for review,
     and the DPP-gamma workflow is untouched (no stacking).
 
+19. **Fog silhouettes get a RAW-develop rescue.** Overcast days used to
+    produce "flat" photos — the whole frame squeezed into ~20 gray levels by
+    the camera's JPEG rendering — and the species classifier mostly gave up
+    on them (9-39%). The RAW data actually holds ~1600 real levels inside
+    that fog band, so when a flat frame fails the adoption line, the bird box
+    is re-developed from RAW with an in-box contrast stretch and classified
+    once more (only then — the ~2s develop is never paid for photos that pass).
+    Measured on a real overcast batch: three of four unadopted silhouettes
+    crossed the line (15%→44%, 25%→67%, 39%→68%); the safety gates keep
+    already-adopted IDs untouched and healthy frames never trigger anything.
+    Review crops land in `.superpicky/cache/crop_debug/<name>_raw.jpg`.
+
 ## Before you upgrade
 
 - **The browser shows everything by default now.** Zero-star and no-bird photos

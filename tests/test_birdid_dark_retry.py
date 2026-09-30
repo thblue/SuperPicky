@@ -223,6 +223,54 @@ class TestDarkRetry:
         assert result["brightened_retry"]["retry_kind"] == "dark_original"
         assert len(patched_identify_env) == 2  # 无第三次伽马分类
 
+    def test_retry_factory_lazy_and_wins(self, patched_identify_env):
+        """V5.9.3 惰性工厂：首判低于线才调用，胜出带 raw_stretch 标记。"""
+        patched_identify_env.append([_candidate(22.0, "红脚隼")])
+        patched_identify_env.append([_candidate(46.0, "红隼")])
+        calls = []
+
+        def _factory():
+            calls.append(1)
+            return (_crop(140), "raw_stretch")
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(145),
+            dark_retry_conf=40.0, retry_factory=_factory)
+
+        assert calls == [1]                      # 首判失败后才开发
+        assert result["results"][0]["confidence"] == pytest.approx(46.0)
+        assert result["results"][0]["cn_name"] == "红隼"
+        assert result["brightened_retry"]["retry_kind"] == "raw_stretch"
+
+    def test_retry_factory_not_called_when_confident(self, patched_identify_env):
+        """首判过线 → 工厂零调用（RAW 开发从不发生）。"""
+        patched_identify_env.append([_candidate(85.0)])
+        calls = []
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(145),
+            dark_retry_conf=40.0,
+            retry_factory=lambda: calls.append(1) or (_crop(140),
+                                                     "raw_stretch"))
+
+        assert calls == []
+        assert result["results"][0]["confidence"] == pytest.approx(85.0)
+        assert "brightened_retry" not in result
+
+    def test_retry_factory_returning_none_falls_back_to_gamma(
+            self, patched_identify_env):
+        """工厂返回 None（RAW 开发失败）→ 回退内存伽马路径。"""
+        patched_identify_env.append([_candidate(20.0, "乌灰鸫")])
+        patched_identify_env.append([_candidate(50.0)])  # 伽马重试胜出
+
+        result = bi.identify_bird(
+            "X:/fake.jpg", use_yolo=False, preloaded_crop=_crop(45),
+            dark_retry_conf=40.0, retry_factory=lambda: None)
+
+        assert result["results"][0]["confidence"] == pytest.approx(50.0)
+        assert result["brightened_retry"]["retry_kind"] == "gamma"
+        assert len(patched_identify_env) == 2
+
     def test_disabled_by_default(self, patched_identify_env):
         """不传 dark_retry_conf → 永远单次分类（向后兼容）。"""
         patched_identify_env.append([_candidate(10.0, "噪鹃")])

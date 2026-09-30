@@ -1317,6 +1317,48 @@ class PhotoProcessor:
             except Exception:
                 return None
 
+        def _make_flat_retry_factory(raw_src, box, ref_dims):
+            """
+            V5.9.3: 构建平坦雾片的惰性重试工厂（返回给 identify_bird）。
+
+            平坦雾片（全图灰阶跨度 <45，阴天剪影）的内嵌预览把雾带层次
+            压成 ~22 个 8-bit 码值；RAW 14-bit 线性数据在同区间有 ~1600
+            个真实灰阶。工厂在被调用时（仅首判低于采纳线）才开发 RAW
+            （~2s/张）并做框内百分位线性拉伸重判——实测三张未定种剪影
+            由此跨过采纳线（11%→40%、24%→51%、36%→42%）。
+
+            Build the lazy retry factory for flat fog frames. The embedded
+            preview crushes the fog band into ~22 8-bit codes while the
+            14-bit RAW holds ~1600 real levels; the factory develops the
+            RAW (only when the first pass fails, ~2s) with an in-box
+            percentile stretch — measured to carry three unadopted
+            silhouettes across the adoption line.
+
+            参数 / Parameters:
+                raw_src (str): RAW 文件路径 / RAW file path.
+                box (tuple): 预览坐标框 (x, y, w, h) / box in preview coords.
+                ref_dims (tuple): 参照系 (w, h) / reference dims.
+
+            返回 / Returns:
+                Callable: () -> (PIL.Image, "raw_stretch") 或 None / factory.
+            """
+            from tools.find_bird_util import raw_dev_stretched_crop
+
+            def _factory():
+                # box（x_orig..h_orig_box）在关键点阶段已含 +15% padding，
+                # 此处 pad_ratio=0 防止双重留边——多裹的雾会主导框内拉伸
+                # 的百分位，小鸟对比度反而被稀释（实测三张救不回的根因）。
+                # The box (x_orig..h_orig_box) already carries +15% padding
+                # from the keypoint stage; pad_ratio=0 here prevents double
+                # padding — the extra fog would dominate the in-box stretch
+                # percentiles and dilute a small bird's contrast (the exact
+                # cause of the three failed rescues).
+                crop = raw_dev_stretched_crop(raw_src, box, ref_dims,
+                                              pad_ratio=0.0)
+                return (crop, "raw_stretch") if crop is not None else None
+
+            return _factory
+
         def submit_birdid_task(
             file_prefix: str,
             image_path: str,
@@ -1326,6 +1368,7 @@ class PhotoProcessor:
             multibird_birds=None,  # V5.0: all_birds（多鸟逐鸟分类；None=单鸟/关闭）
             multibird_dims=None,   # V5.0: 处理图 (w, h)，bbox 坐标换算用
             dark_retry_crop=None,  # V5.9.2: 原始暗渲染同位框图（双渲染对比重试）
+            retry_factory=None,    # V5.9.3: 惰性备选渲染工厂（平坦雾片 RAW 救援）
         ):
             if birdid_executor is None or identify_bird_fn is None:
                 return
@@ -1358,6 +1401,9 @@ class PhotoProcessor:
                         # V5.9.2: retry with the original dark-rendition
                         # crop when the brightened first pass fails
                         retry_crop=dark_retry_crop,
+                        # V5.9.3: 平坦雾片惰性 RAW 救援（首判失败才开发）
+                        # V5.9.3: lazy RAW rescue for flat fog frames
+                        retry_factory=retry_factory,
                     )
                     # V5.0(multibird): 多鸟照片在同一 future 里接着做逐鸟分类，
                     # 结果挂在返回 dict 上由 apply_birdid_result 统一落库。
@@ -1663,8 +1709,9 @@ class PhotoProcessor:
                     if _bright_crop is not None:
                         try:
                             _kind = _retry_info.get('retry_kind') or 'gamma'
-                            _suffix = ('_dark' if _kind == 'dark_original'
-                                       else '_bright')
+                            _suffix = {'dark_original': '_dark',
+                                       'raw_stretch': '_raw'}.get(
+                                           _kind, '_bright')
                             _bright_dir = os.path.join(
                                 self.dir_path, ".superpicky", "cache",
                                 "crop_debug")
@@ -2490,7 +2537,8 @@ class PhotoProcessor:
                 bird_crop_bgr = None  # 裁剪区域缓存（BGR）
                 bird_crop_mask = None # 裁剪区域掩码缓存
                 bird_mask_orig = None  # V3.9: 原图尺寸的分割掩码（用于对焦验证）
-            
+                _frame_flat = False    # V5.9.3: 平坦雾片标记（orig_img 释放前判定）
+
                 keypoint_start = time.time()
                 if use_keypoints and detected and bird_bbox is not None and img_dims is not None:
                     try:
@@ -2536,6 +2584,21 @@ class PhotoProcessor:
                             # 裁剪鸟的区域（保存BGR版本供关键点/飞版/曝光使用）
                             # .copy() 断开对 orig_img 的 view 依赖，使 orig_img 可在 TOPIQ 后提前释放
                             bird_crop_bgr = orig_img[y_orig:y_orig+h_orig_box, x_orig:x_orig+w_orig_box].copy()
+
+                            # V5.9.3: 平坦雾片标记——orig_img 即将被释放，
+                            # 趁存活时测全图灰阶跨度（跨度 <45 且非暗片 =
+                            # 阴天雾片，内嵌预览压掉了雾带层次，识鸟可走
+                            # RAW 开发救援重试，见 _make_flat_retry_factory）
+                            # V5.9.3: flag flat fog frames while orig_img is
+                            # still alive (narrow gray span + not dark) —
+                            # the camera JPEG crushed the fog band's levels
+                            # and ID may need the RAW-develop rescue retry.
+                            if not _frame_flat:
+                                try:
+                                    from tools.find_bird_util import frame_is_flat
+                                    _frame_flat = frame_is_flat(orig_img)
+                                except Exception:
+                                    pass
                         
                             # 同样裁剪 mask (如果存在)
                             if bird_mask is not None:
@@ -3157,6 +3220,26 @@ class PhotoProcessor:
                                     (x_orig, y_orig, w_orig_box, h_orig_box),
                                     (w_orig, h_orig))
                                 if bird_crop_bgr is not None else None)
+                            # V5.9.3: 平坦雾片惰性 RAW 救援工厂（暗片路径
+                            # 互斥：均值<90 走暗片，跨度<45 走本路径）
+                            # V5.9.3: lazy RAW rescue factory for flat fog
+                            # frames (mutually exclusive with the dark path:
+                            # mean<90 → dark, span<45 → this).
+                            _flat_factory = None
+                            if _dark_retry is None and _frame_flat                                     and bird_crop_bgr is not None:
+                                try:
+                                    from tools.find_bird_util import (
+                                        find_raw_sibling)
+                                    _raw_src = find_raw_sibling(
+                                        self.dir_path, original_prefix)
+                                    if _raw_src:
+                                        _flat_factory = _make_flat_retry_factory(
+                                            _raw_src,
+                                            (x_orig, y_orig, w_orig_box,
+                                             h_orig_box),
+                                            (w_orig, h_orig))
+                                except Exception:
+                                    _flat_factory = None
                             # V5.0(multibird): 多鸟照片随主鸟任务一起逐鸟分类
                             # V5.0: 单鸟也传（入库一行主鸟记录，零额外推理）
                             _mb_birds = (all_birds
@@ -3171,6 +3254,7 @@ class PhotoProcessor:
                                 multibird_birds=_mb_birds,
                                 multibird_dims=img_dims,
                                 dark_retry_crop=_dark_retry,
+                                retry_factory=_flat_factory,
                             )
                         # V5.6: 门控拒绝兜底——检测框仍落库（仅几何，物种
                         # 留空），供 backfill/浏览器/召回使用（同 JPEG 分支）
@@ -3253,6 +3337,26 @@ class PhotoProcessor:
                                     (x_orig, y_orig, w_orig_box, h_orig_box),
                                     (w_orig, h_orig))
                                 if bird_crop_bgr is not None else None)
+                            # V5.9.3: 平坦雾片惰性 RAW 救援工厂（暗片路径
+                            # 互斥：均值<90 走暗片，跨度<45 走本路径）
+                            # V5.9.3: lazy RAW rescue factory for flat fog
+                            # frames (mutually exclusive with the dark path:
+                            # mean<90 → dark, span<45 → this).
+                            _flat_factory = None
+                            if _dark_retry is None and _frame_flat                                     and bird_crop_bgr is not None:
+                                try:
+                                    from tools.find_bird_util import (
+                                        find_raw_sibling)
+                                    _raw_src = find_raw_sibling(
+                                        self.dir_path, original_prefix)
+                                    if _raw_src:
+                                        _flat_factory = _make_flat_retry_factory(
+                                            _raw_src,
+                                            (x_orig, y_orig, w_orig_box,
+                                             h_orig_box),
+                                            (w_orig, h_orig))
+                                except Exception:
+                                    _flat_factory = None
                             # V5.0(multibird): 多鸟照片随主鸟任务一起逐鸟分类
                             # V5.0: 单鸟也传（入库一行主鸟记录，零额外推理）
                             _mb_birds = (all_birds
@@ -3267,6 +3371,7 @@ class PhotoProcessor:
                                 multibird_birds=_mb_birds,
                                 multibird_dims=img_dims,
                                 dark_retry_crop=_dark_retry,
+                                retry_factory=_flat_factory,
                             )
                         # V5.6: 门控拒绝兜底——检测框仍落库（仅几何，物种
                         # 留空），供 backfill/浏览器/召回使用（同 RAW 分支）

@@ -228,6 +228,173 @@ def _dark_sidecar_path(jpg_path: str) -> str:
     return base + "_dark.jpg"
 
 
+# V5.9.3: 平坦雾片判据与 RAW 开发探测的扩展名集。
+# V5.9.3: flat-fog threshold and RAW extension set for develop probes.
+RAW_DEV_EXTS = (".cr3", ".nef", ".arw", ".raf", ".orf", ".dng")
+FLAT_MAX_SPAN = 45.0   # 全图 p99-p1 灰阶跨度低于此值视为平坦雾片 / fog span
+FLAT_MIN_MEAN = 90.0   # 均值低于此走暗片路径，不重复处理 / dark path owns <90
+
+
+def find_raw_sibling(directory: str, prefix: str,
+                     max_depth: int = 2) -> Optional[str]:
+    """
+    按前缀探测 RAW 文件路径（浅层子目录递归，兼容整理过的目录布局）。
+
+    Probe a RAW file by prefix, searching shallow subdirectories to
+    tolerate organized (species-first) layouts.
+
+    参数 / Parameters:
+        directory (str): 起始目录 / starting directory.
+        prefix (str): 文件名前缀（不含扩展名）/ filename prefix.
+        max_depth (int): 子目录搜索深度上限 / max subdirectory depth.
+
+    返回 / Returns:
+        Optional[str]: RAW 文件完整路径；未找到返回 None / path or None.
+    """
+    base_depth = directory.rstrip(os.sep).count(os.sep)
+    try:
+        for dirpath, dirnames, _files in os.walk(directory):
+            if dirpath.rstrip(os.sep).count(os.sep) - base_depth \
+                    >= max_depth:
+                dirnames[:] = []  # 剪枝：不超深 / prune deeper
+                continue
+            for ext in RAW_DEV_EXTS:
+                p = os.path.join(dirpath, prefix + ext)
+                if os.path.exists(p):
+                    return p
+    except OSError:
+        pass
+    return None
+
+
+def frame_is_flat(img_bgr: "np.ndarray",
+                  max_span: float = FLAT_MAX_SPAN,
+                  min_mean: float = FLAT_MIN_MEAN) -> bool:
+    """
+    判定整幅画面是否为「平坦雾片」：灰阶跨度极窄且不是暗片。
+
+    实测（2026-09-30 奥森阴天批）：平坦剪影片全图挤在 132-154（跨度
+    22-31），相机渲染 JPEG 时压掉了雾带内的真实层次；正常片跨度普遍
+    >130。均值 < 90 的暗片走暗片路径（_dark 双渲染），此处排除以免双重
+    处理。
+
+    Classify a frame as "flat fog": an extremely narrow gray span while not
+    being dark. Measured on an overcast batch: flat silhouettes span 22-31
+    levels (132-154) with the tonal detail crushed by the camera JPEG
+    rendering, while healthy frames span 130+. Frames darker than 90 belong
+    to the dark-frame path and are excluded here.
+
+    参数 / Parameters:
+        img_bgr (np.ndarray): 全幅 BGR / full-frame BGR image.
+        max_span (float): 平坦判定跨度上限 / span threshold.
+        min_mean (float): 暗片排除线 / dark-path exclusion line.
+
+    返回 / Returns:
+        bool: 是否平坦雾片 / whether the frame is flat fog.
+    """
+    try:
+        import cv2
+        sub = img_bgr[::8, ::8]
+        gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+        p1, p99 = np.percentile(gray, [1, 99])
+        return (p99 - p1) < max_span and float(gray.mean()) >= min_mean
+    except Exception:
+        return False
+
+
+def _raw_dev_linear(raw_path: str) -> Optional["np.ndarray"]:
+    """
+    RAW 中性线性开发：postprocess 16-bit 线性输出（gamma=(1,1)）。
+
+    返回 float32 [0,1] RGB 线性数组；rawpy 不可开发的格式（HEIF/X3F
+    等）返回 None。线性域是所有后续运算（提亮乘法/拉伸）的精确基础，
+    避免 bare bright 参数的传递偏差（实测 34→148 过冲）。
+
+    Neutral linear RAW develop via postprocess with 16-bit linear output
+    (gamma=(1,1)). Returns a float32 [0,1] RGB linear array, or None for
+    formats rawpy cannot develop (HEIF/X3F...). The linear domain is the
+    exact basis for later math (lift multiply / contrast stretch), avoiding
+    the bare bright parameter's measured transfer deviation.
+
+    参数 / Parameters:
+        raw_path (str): RAW 文件路径 / RAW file path.
+
+    返回 / Returns:
+        Optional[np.ndarray]: HxWx3 float32 线性数组 / linear array or None.
+    """
+    try:
+        with rawpy.imread(raw_path) as raw:
+            lin = raw.postprocess(
+                use_camera_wb=True,     # 机内白平衡 / camera white balance
+                no_auto_bright=True,
+                output_bps=16,
+                gamma=(1, 1),           # 线性输出 / linear output
+            )
+        return lin.astype(np.float32) / 65535.0
+    except Exception:
+        return None
+
+
+def raw_dev_stretched_crop(raw_path: str, box, ref_dims,
+                           pad_ratio: float = 0.15):
+    """
+    平坦雾片的 RAW 级救援裁剪：线性开发 → 框内百分位拉伸 → 伽马编码。
+
+    实测（奥森 5 张平坦剪影）：JPEG 框内拉伸放大带状伪影（有害），但
+    RAW 线性域内雾带有 ~1600 个真实灰阶（14-bit vs JPEG 的 ~22 个），
+    框内 [p1,p99] 线性拉伸后重编码可救回定种（11%→40%、24%→51%、
+    36%→42% 三张跨过采纳线）。全图拉伸仍然有害（夜鹰垃圾桶），拉伸
+    必须限制在鸟框内。
+
+    RAW-grade rescue crop for flat fog frames: linear develop →
+    in-box percentile stretch → gamma encode. Measured on five flat
+    silhouettes: stretching the JPEG amplifies banding (harmful), but the
+    RAW linear domain holds ~1600 real levels inside the fog band (14-bit
+    vs ~22 in JPEG), and an in-box [p1,p99] linear stretch recovers IDs
+    (11%→40%, 24%→51%, 36%→42% crossing the adoption line). GLOBAL stretch
+    stays harmful; the stretch must stay inside the bird box.
+
+    参数 / Parameters:
+        raw_path (str): RAW 文件路径 / RAW file path.
+        box (tuple): 预览坐标 (x, y, w, h)（含 padding 语义由调用方决定）
+                    / box in preview coords.
+        ref_dims (tuple): box 参照系 (w, h)（预览尺寸）/ reference dims.
+        pad_ratio (float): 额外留边比例 / extra padding ratio.
+
+    返回 / Returns:
+        PIL.Image.Image 或 None（开发失败/框无效）/ PIL RGB crop or None.
+    """
+    try:
+        import cv2
+        from PIL import Image
+        lin_f = _raw_dev_linear(raw_path)
+        if lin_f is None:
+            return None
+        dh, dw = lin_f.shape[:2]
+        rw, rh = ref_dims
+        if rw <= 0 or rh <= 0:
+            return None
+        sx, sy = dw / float(rw), dh / float(rh)
+        x, y, w, h = box
+        pad = int(max(w, h) * pad_ratio)
+        x1 = max(0, int(x * sx) - pad)
+        y1 = max(0, int(y * sy) - pad)
+        x2 = min(dw, int((x + w) * sx) + pad)
+        y2 = min(dh, int((y + h) * sy) + pad)
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return None
+        crop = lin_f[y1:y2, x1:x2]
+        luma = (0.299 * crop[..., 0] + 0.587 * crop[..., 1]
+                + 0.114 * crop[..., 2])
+        lo, hi = np.percentile(luma, [1, 99])
+        stretched = np.clip((crop - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+        bgr = (stretched[:, :, ::-1] ** (1.0 / 2.2) * 255.0 + 0.5) \
+            .astype(np.uint8)
+        return Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    except Exception:
+        return None
+
+
 def _raw_dev_brighten(raw_path: str, jpg_path: str, preview_mean: float) -> bool:
     """
     RAW 开发级提亮：postprocess 线性域 bright 倍率重开发传感器数据。
@@ -267,26 +434,16 @@ def _raw_dev_brighten(raw_path: str, jpg_path: str, preview_mean: float) -> bool
         import cv2
         import numpy as _np
 
-        # 精确单遍方案：让 LibRaw 输出 16-bit 线性数据（gamma=(1,1)），
-        # 在 numpy 里做线性乘法 + 2.2 伽马编码。纯 `bright` 参数的实测
-        # 传递特性与幂律假设有偏差（34→148 过冲），而线性域乘法的均值
-        # 关系是精确的：编码均值按 m^(1/2.2) 缩放，落点即目标。
-        # Exact single-pass: LibRaw outputs 16-bit linear data
-        # (gamma=(1,1)); the lift is a numpy linear multiply + 2.2 gamma
-        # encode. The bare `bright` param's measured transfer deviates
-        # from the power-law assumption (overshoot 34→148), while a
-        # linear-domain multiply is exact: encoded means scale by
-        # m^(1/2.2), landing on the target.
-        with rawpy.imread(raw_path) as raw:
-            lin = raw.postprocess(
-                use_camera_wb=True,     # 机内白平衡，色彩不漂 / camera WB
-                no_auto_bright=True,    # 提升只来自本次乘法 / sole lift
-                output_bps=16,
-                gamma=(1, 1),           # 线性输出 / linear output
-            )
-        lin_f = lin.astype(_np.float32) / 65535.0
-        # 用 1/8 子采样测基准编码均值（Rec.601 亮度口径，与 preview_tone_stats
-        # 的 PIL "L" 一致——三通道简单平均会因绿权重差异偏 10+ 点）
+        # 共享的 RAW 中性线性开发（见 _raw_dev_linear）；提亮乘法与伽马
+        # 编码在本函数完成，数学关系精确可控。
+        # Shared neutral linear develop (see _raw_dev_linear); the lift
+        # multiply and gamma encode happen here with exact math.
+        lin_f = _raw_dev_linear(raw_path)
+        if lin_f is None:
+            raise RuntimeError("rawpy develop unavailable")
+        # 用 1/8 子采样测基准编码均值（Rec.601 亮度口径，与
+        # preview_tone_stats 的 PIL "L" 一致——三通道简单平均会因绿权重
+        # 差异偏 10+ 点）
         # Measure the base encoded mean on a 1/8 subsample with the
         # Rec.601 luma convention, matching preview_tone_stats (PIL "L");
         # a plain channel average drifts 10+ points because green weighs

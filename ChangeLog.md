@@ -46,9 +46,23 @@ and everything runs about 30% faster.
     vs Oriental Magpie) can now be pinned in `species_whitelist.json` in the app
     config folder: the correct species is substituted automatically, exactly like
     a manual correction.
+17. **Nothing gets hidden, and nothing gets stuck.** The results browser now shows
+    all photos by default, including zero-star and no-bird shots (they also keep
+    their preview images), so a bird that was too small or buried in clutter can
+    be spotted and rescued by hand — or cleared away. A new right-click
+    "Delete Permanently" removes selected photos for real — it works on NAS
+    drives, where the recycle bin doesn't — together with their paired JPEGs,
+    companion videos, sidecar JSON, preview caches and database records.
 
 ## Before you upgrade
 
+- **The browser shows everything by default now.** Zero-star and no-bird photos
+  are no longer filtered out on open, and no-bird RAWs keep their preview JPEGs
+  on disk (a few MB per shoot). Uncheck the ⊘ chip to get the old keeper-only
+  view; turn off "keep temp files" for batch jobs if disk is tight.
+- **"Delete Permanently" is forever.** It bypasses the recycle bin (the only
+  option on NAS shares) and cannot be undone. The keyboard delete and fullscreen
+  delete still move files to the trash as before.
 - **Colour labels changed.** Flight is now **blue** (was green), critical focus is
   **green** (was red), and soft photos are **red**. If you built Lightroom smart
   collections on "green means flying", change them to blue.

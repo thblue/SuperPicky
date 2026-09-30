@@ -241,7 +241,11 @@ class MergedReportDB:
         return updated
 
     def delete_photo(self, photo_key) -> bool:
-        """按稳定键删除记录，兼容 filename 或 (source_dir, filename)。"""
+        """按稳定键删除记录，兼容 filename 或 (source_dir, filename)。
+
+        V5.9: 同步级联删除目标子库的 bird_detections 逐鸟记录，与
+        ReportDB.delete_photo 的语义保持一致（不留孤儿检测框）。
+        """
         targets = self._resolve_photo_targets(photo_key)
         if not targets:
             return False
@@ -252,6 +256,10 @@ class MergedReportDB:
             for alias in targets:
                 cursor = self._conn.execute(
                     f"DELETE FROM {alias}.photos WHERE filename = ?",
+                    (filename,),
+                )
+                self._conn.execute(
+                    f"DELETE FROM {alias}.bird_detections WHERE filename = ?",
                     (filename,),
                 )
                 deleted = deleted or cursor.rowcount > 0

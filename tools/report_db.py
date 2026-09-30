@@ -1838,7 +1838,11 @@ class ReportDB:
             return cursor.rowcount
 
     def delete_photo(self, filename: str) -> bool:
-        """从 photos 表中删除指定文件名的记录。
+        """删除指定照片的全部记录（photos + bird_detections）。
+
+        V5.9: 同事务级联删除 bird_detections 逐鸟记录——只删 photos 会
+        留下孤儿检测框，浏览器补录/多鸟编辑会读到已删照片的旧数据。
+        文件本身（照片/预览/sidecar）不在此处删除，见 core/photo_purge。
 
         Args:
             filename: 照片文件名
@@ -1846,9 +1850,9 @@ class ReportDB:
         Returns:
             是否成功删除
         """
-        sql = "DELETE FROM photos WHERE filename = ?"
         with self._lock:
-            cursor = self._conn.execute(sql, [filename])
+            cursor = self._conn.execute("DELETE FROM photos WHERE filename = ?", [filename])
+            self._conn.execute("DELETE FROM bird_detections WHERE filename = ?", [filename])
             self._safe_commit()
             return cursor.rowcount > 0
 

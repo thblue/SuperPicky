@@ -639,6 +639,39 @@ def _build_context_menu(parent_widget, photo: dict, directory: str):
         copy_action.triggered.connect(_copy_path)
     menu.addAction(copy_action)
 
+    menu.addSeparator()
+
+    # 彻底删除（V5.9）：永久删除照片及全部痕迹（成对 JPG/伴生视频/
+    # sidecar JSON/预览调试图缓存/report.db 记录）。不可逆、不进回收站，
+    # NAS(UNC) 上系统回收站不可用，这是唯一的真删除路径。
+    # 若点击的照片在 Ctrl/Shift 多选集合里，则对整批生效。
+    # Delete Permanently (V5.9): irreversibly remove the photo and every
+    # trace (paired JPEG, companion video, sidecar JSON, preview/debug
+    # cache, report.db record). No recycle bin — the only real delete on
+    # NAS (UNC) libraries. Applies to the whole multi-selection when the
+    # clicked photo is part of it.
+    _purge_count = 1
+    _grid = getattr(parent_widget, '_thumb_grid', None)
+    if _grid is not None:
+        try:
+            _multi = _grid.get_multi_selected_photos()
+        except Exception:
+            _multi = []
+        _anchor_id = _photo_identity(photo)
+        if _anchor_id in {_photo_identity(p) for p in _multi}:
+            _purge_count = len(_multi)
+    purge_action = QAction(
+        _i18n.t('browser.ctx_purge').format(count=_purge_count), parent_widget)
+    purge_action.setEnabled(bool(filepath))
+
+    def _purge(_checked=False, _p=photo):
+        handler = getattr(parent_widget, "_on_purge_photos", None)
+        if callable(handler):
+            handler(_p)
+
+    purge_action.triggered.connect(_purge)
+    menu.addAction(purge_action)
+
     return menu
 
 
@@ -2503,6 +2536,131 @@ class ResultsBrowserWindow(QMainWindow):
                 self._detail_panel.show_photo(None)
                 
         # 7. Update Status bar
+        self._update_status(len(self._all_photos), len(self._filtered_photos))
+
+    @Slot(dict)
+    def _on_purge_photos(self, anchor_photo: dict):
+        """右键「彻底删除」：永久删除一张或一批照片的全部痕迹。
+
+        与回收站式删除（_delete_selected_photos，可从系统回收站恢复）不同，
+        本流程不可恢复：照片主文件、成对 JPG、伴生视频、sidecar JSON、
+        预览/调试图缓存与 report.db 记录一次清除（core/photo_purge 执行）。
+        为 NAS(UNC) 库设计——其上系统回收站不可用。
+
+        目标集合：点击的照片在 Ctrl/Shift 多选集合里 → 删整批；否则只删
+        点击的这一张。确认弹窗**每次必弹**且无「不再询问」——不可逆操作
+        不提供永久跳过。
+
+        参数:
+        anchor_photo (dict): 右键点击的照片（已解析路径的记录）
+
+        Delete Permanently (right-click): irreversibly remove one photo or
+        the whole multi-selection — main file, paired JPEG, companion
+        video, sidecar JSON, preview/debug cache and report.db record via
+        core/photo_purge. Designed for NAS (UNC) libraries where the OS
+        trash is unavailable. Acts on the whole multi-selection when the
+        clicked photo is part of it. The confirmation dialog is always
+        shown (irreversible actions never get a "don't ask again").
+
+        Parameters:
+        anchor_photo (dict): the right-clicked, path-resolved photo record.
+        """
+        # 1. 目标集合：多选整批 或 单张
+        #    Targets: whole multi-selection, or the single clicked photo.
+        targets = [anchor_photo]
+        grid = getattr(self, '_thumb_grid', None)
+        if grid is not None:
+            try:
+                multi = grid.get_multi_selected_photos()
+            except Exception:
+                multi = []
+            if _photo_identity(anchor_photo) in {_photo_identity(p) for p in multi}:
+                targets = multi
+        if not targets:
+            return
+
+        # 2. 确认弹窗（必弹，无跳过项）
+        #    Confirmation (always, no skip option).
+        count = len(targets)
+        box = QMessageBox(self)
+        box.setWindowTitle(self.i18n.t("browser.purge_title"))
+        box.setIcon(QMessageBox.Warning)
+        if count == 1:
+            box.setText(self.i18n.t("browser.purge_msg_1").format(
+                filename=targets[0].get("filename", "")))
+        else:
+            box.setText(self.i18n.t("browser.purge_msg_n").format(count=count))
+        yes_btn = box.addButton(self.i18n.t("browser.purge_confirm_btn"),
+                                QMessageBox.AcceptRole)
+        box.addButton(self.i18n.t("browser.delete_cancel_btn"),
+                      QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() != yes_btn:
+            return
+
+        # 3. 执行：文件（主文件/成对JPG/伴生视频/预览/调试图/sidecar）→ DB
+        #    Execute: files (main/paired JPEG/video/preview/debug/sidecar)
+        #    then DB records.
+        from core.photo_purge import purge_photos
+        purged, failed = purge_photos(self._db, targets)
+
+        if failed:
+            QMessageBox.warning(
+                self,
+                self.i18n.t("browser.purge_failed"),
+                self.i18n.t("browser.purge_failed_msg").format(
+                    error="\n".join(f"{path}\n  {err}" for path, err in failed[:10]))
+            )
+        if not purged:
+            return
+
+        # 4. UI 同步（与 _delete_selected_photos 同一套收尾）
+        #    UI sync (same teardown as _delete_selected_photos).
+        deleted_identities = {_photo_identity(p) for p in purged}
+        in_fullscreen = (self._stack.currentIndex() == 1)
+        next_photo = None
+        if in_fullscreen and self._fullscreen._current_photo:
+            curr_id = _photo_identity(self._fullscreen._current_photo)
+            if curr_id in deleted_identities:
+                _ids = [_photo_identity(p) for p in self._filtered_photos]
+                try:
+                    curr_idx = _ids.index(curr_id)
+                except ValueError:
+                    curr_idx = 0
+                remaining = [p for p in self._filtered_photos
+                             if _photo_identity(p) not in deleted_identities]
+                if remaining:
+                    next_photo = remaining[min(curr_idx, len(remaining) - 1)]
+
+        self._filtered_photos = [p for p in self._filtered_photos
+                                 if _photo_identity(p) not in deleted_identities]
+        self._all_photos = [p for p in self._all_photos
+                            if _photo_identity(p) not in deleted_identities]
+
+        for photo in purged:
+            self._thumb_grid.remove_photo(photo)
+
+        if self._thumb_grid._selected_key in deleted_identities:
+            self._thumb_grid._selected_key = None
+        self._thumb_grid.clear_multi_select()
+
+        self._fullscreen.set_photo_list(self._filtered_photos)
+
+        if in_fullscreen:
+            if next_photo:
+                self._thumb_grid.select_photo(next_photo)
+                self._fullscreen.show_photo(next_photo)
+                self._detail_panel.show_photo(next_photo)
+            else:
+                self._exit_fullscreen()
+        else:
+            if self._filtered_photos:
+                first_remaining = self._filtered_photos[0]
+                self._thumb_grid.select_photo(first_remaining)
+                self._detail_panel.show_photo(first_remaining)
+            else:
+                self._detail_panel.show_photo(None)
+
         self._update_status(len(self._all_photos), len(self._filtered_photos))
 
     def _enter_comparison(self):

@@ -162,3 +162,7 @@ img/IMG_5214.CR3
 _tm_*
 keep_list.txt
 有鸟目录审核清单.html
+
+# 分布库运行期备份（specieskey 修复等迁移脚本自动生成，不入库）
+# Runtime backups of the geo distribution DB, auto-created by migration scripts
+birdid/data/*.bak_*

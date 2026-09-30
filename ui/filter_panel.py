@@ -46,10 +46,16 @@ _RATING_OPTIONS = [
     # 未选用：0星(有鸟但0分) + 无鸟(-1) 合并为一个 ⊘ 筹码,避免 0 与无鸟混淆
     ("nobird", "×",  [-1, 0]),
 ]
-# 默认勾选的评分按钮（V4.2.7：3星 + 2星，与摄影师常用「能用的片子」一致）
-# Default checked rating buttons (V4.2.7): 3★ + 2★ — matches the "keeper" pile
-# photographers typically review first.
-_DEFAULT_RATINGS = {"3", "2"}
+# 默认勾选的评分按钮（V5.9：全选，含 ⊘ 未选用 0★/无鸟）。检测可能因
+# 鸟太小/背景杂乱而漏检，无鸟与 0★ 照片必须默认可见，供人工排查后
+# 救回（右键补录鸟种 / Up 键救星）或删除；想「只看能用的片子」时
+# 取消勾选 ⊘ 即可。
+# Default checked rating buttons (V5.9): all chips checked, including ⊘
+# (0★/no-bird). The detector can miss tiny or cluttered-background birds,
+# so no-bird and 0★ photos must be visible by default for manual review
+# (rescue via right-click species assign / Up key) or deletion. Uncheck
+# the ⊘ chip to narrow down to the keeper pile.
+_DEFAULT_RATINGS = {"3", "2", "1", "nobird"}
 
 # 对焦按钮配置 (mode_key, statuses_list, color_key)
 # statuses_list 是传给 DB 的 focus_status 列表;显示文案统一走

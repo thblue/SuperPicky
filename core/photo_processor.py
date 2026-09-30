@@ -4096,56 +4096,34 @@ class PhotoProcessor:
             self._log(self.i18n.t("logs.temp_files_cleaned", count=0))
     
     def _save_temp_paths_to_db(self):
-        """保留临时文件时，将路径写入数据库的 temp_jpeg_path 列。
+        """保留临时文件时，将预览 JPG 路径写入数据库 temp_jpeg_path 列。
 
-        V5.5: 仅保留「有鸟」照片的 RAW 预览 JPG——无鸟照片的预览在批末删除
-        （检测阶段必须先转换出预览才能判定有无鸟，此处只决定去留）。无鸟 RAW
-        在浏览器里将没有缩略图；面向大量无鸟生活照的批次可省下主要磁盘开销。
-        DB 中查不到该照片（处理失败的边缘情形）时保守保留，不误删。
+        V5.9: 全部预览保留（含无鸟照片）。检测可能因鸟太小/背景杂乱而
+        漏检，无鸟照片必须在浏览器中以缩略图可见，供人工排查后救回
+        （补录鸟种/救星）或删除——没有预览图就无法人工复查。
+        V5.5 曾在此删除无鸟预览以省磁盘（当时注释「无鸟 RAW 在浏览器里
+        将没有缩略图」），与上述人工复查需求冲突，故回退；磁盘紧张时
+        应整体关闭「保留临时文件」（cleanup_temp 分支），而不是只删无鸟。
+        DB 中查不到该照片（处理失败的边缘情形）时 update_photo 零行命中，
+        无副作用。
 
-        V5.5: keep RAW preview JPGs only for photos with a bird; no-bird
-        previews are deleted at batch end (conversion itself is required
-        for detection — this only decides retention). DB-missing photos
-        keep their previews conservatively.
+        V5.9: keep ALL preview JPGs, including no-bird photos. The detector
+        can miss tiny or cluttered-background birds, so no-bird photos must
+        stay visible as browser thumbnails for manual review (rescue via
+        species assign / star raise, or delete) — impossible without a
+        preview. V5.5 deleted no-bird previews here to save disk (leaving
+        no-bird RAWs thumbnail-less in the browser), which conflicts with
+        that review workflow and is therefore reverted; when disk is tight,
+        turn off keep-temp-files entirely (cleanup_temp branch) instead.
+        For DB-missing photos (edge case) update_photo is a harmless no-op.
         """
         if not self.temp_converted_jpegs:
             return
 
-        # 批末一次性取 filename -> has_bird 映射，避免逐张查询
-        # One batch-end fetch of the filename -> has_bird map.
-        has_bird_map = None
-        if hasattr(self, 'report_db') and self.report_db:
-            try:
-                has_bird_map = {
-                    row.get("filename"): bool(row.get("has_bird"))
-                    for row in self.report_db.get_all_photos()
-                    if row.get("filename")
-                }
-            except Exception as e:
-                self._log(f"⚠️ 读取 has_bird 映射失败，预览保留策略退化为全部保留: {e}", "warning")
-                has_bird_map = None
-
         saved_count = 0
-        dropped_count = 0
         for rel_path in self.temp_converted_jpegs:
-            # rel_path 格式: .superpicky/cache[/temp_preview]/XXXX.jpg
             basename = os.path.basename(rel_path)
             file_prefix = os.path.splitext(basename)[0]
-
-            # 无鸟照片：删除预览，不写 temp_jpeg_path
-            # No-bird photo: delete the preview, skip temp_jpeg_path.
-            if (has_bird_map is not None
-                    and file_prefix in has_bird_map
-                    and not has_bird_map[file_prefix]):
-                try:
-                    abs_preview = os.path.join(self.dir_path, rel_path)
-                    if os.path.exists(abs_preview):
-                        os.remove(abs_preview)
-                    dropped_count += 1
-                except Exception as e:
-                    self._log(f"⚠️ 删除无鸟预览失败 {file_prefix}: {e}", "warning")
-                continue
-
             try:
                 if hasattr(self, 'report_db') and self.report_db:
                     self.report_db.update_photo(file_prefix, {
@@ -4157,8 +4135,6 @@ class PhotoProcessor:
 
         if saved_count > 0:
             self._log(self.i18n.t("logs.cache_paths_saved", count=saved_count))
-        if dropped_count > 0:
-            self._log(f"  🧹 无鸟预览已清理: {dropped_count} 个（有鸟保留 {saved_count} 个）")
 
     def _cleanup_expired_cache(self):
         """V4.3: 已移除基于天数的定期清理（auto_cleanup_days 已删除）。

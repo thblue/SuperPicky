@@ -60,10 +60,13 @@ cd G:/code/SuperPicky
    「视频阶段完成」行（封面数/有鸟数/已定种数/无鸟数/已归类数）。
 3. **sidecar 对账**：`.superpicky/meta/` 的 JSON 数 == has_bird 数（无鸟照片和
    无鸟视频封面按瘦身策略不导出；有鸟视频封面正常导出）。
-4. **DPP 伽马编辑检测**：`scripts_dev/refresh_gamma_previews.py "<目录>" --dry`。
-   用户常在 Canon DPP「工具调色板 → 伽马调整」给暗片提亮，recipe 以 CanonVRD
-   二进制 trailer 写回 CR3；但 process 用的是机身内嵌 JPEG（原始暗图）——
-   缩略图黑、关键点找不到、锐度算 0、星级被压死。检测到 ≥1 张就走第 4 节全流程。
+4. **DPP 伽马编辑核对**：V5.9.4（W1）起跑批内已「人工优先」消化 DPP 编辑——
+   RAW 转换前批量预读 CR3 的 CanonVRD recipe，本次新抽取的预览先套人工 LUT、
+   跳过自动提亮不叠加（日志见「DPP 人工伽马编辑 N 张」与逐张 `DPPGAMMA` 行，
+   开关 `advanced_config.preview_dpp_gamma` 默认开）。因此：
+   - 跑批日志已有 DPPGAMMA 行、且跑批后没再进过 DPP → 本步跳过；
+   - 跑批**之后**又做了 DPP 伽马编辑、或处理 V5.9.4 之前的老批次 → 走第 4 节
+     （其 `--dry` 只读不动缓存，可放心先用）。
 5. **未定种回捞**：`scripts_dev/backfill_species.py "<目录>" --threshold 40`
    （dry）→ 可采纳 >0 就 `--execute`。V5.6 起识鸟门控有替代通道（喙可见或
    YOLO≥0.6 照常识鸟）+ 门控拒绝仍落框行，「零机会」照片已从源头消灭；
@@ -75,7 +78,7 @@ cd G:/code/SuperPicky
    `scripts_dev/reexport_sidecars.py "<目录>"` 重导。视频封面行自本次
    修复起随封面写入拍摄日期（本地墙钟），老批次缺日期的封面也被这一步兜住。
 
-## 4. DPP 伽马编辑重跑（检测到编辑时执行，顺序不可乱）
+## 4. DPP 伽马编辑重跑（跑批后新做的编辑 / V5.9.4 之前的老批次，顺序不可乱）
 
 ```bash
 cd G:/code/SuperPicky
@@ -86,9 +89,15 @@ D="<目录>"
 .venv/Scripts/python.exe -X utf8 superpicky_cli.py rerate-v2 "$D" --min-conf 0.4 --metrics-rebuilt --execute  # ④ 重定星
 ```
 
+- V5.9.4（W1）起，跑批**前**已存在的 DPP 编辑由跑批内自动消化（人工 LUT 优先，
+  跳过自动提亮）；本节只服务两种情况——跑批**后**新做的编辑回补、V5.9.4 之前
+  处理的老批次。对已消化的批次实跑本节 ① 幂等无害（重抽原始预览再套同一 LUT，
+  产出一致），但 ②③④ 不必空转（④ 的 `--metrics-rebuilt` 无人工改星豁免，
+  指标没变就不要跑）。
 - **① 刷缩略图**：解析每张 CanonVRD 伽马中点 → 幂律 LUT（`g=2^中点值`）应用到
   `.superpicky/cache/temp_preview/`。幂等（每次从 CR3 重抽原始预览再套 LUT，
-  重复跑不叠加）；回退 = 删缓存 jpg 自动重生原始版。只动缓存，零接触照片/DB。
+  重复跑不叠加）；`--dry` 只读不动缓存；回退 = 删缓存 jpg 自动重生原始版。
+  只动缓存，零接触照片/DB。
 - **② 重算指标**：用提亮预览按主管线口径（主鸟框+15% padding → 关键点锐度/眼/喙
   → TOPIQ 鸟裁剪区 → ISO 归一化 + 原 caption 对焦权重 + 飞版加成）更新
   head_sharp/eyes/beak/nima_score/adj_* 列。无库内框的照片（当时锐度 0 被识鸟

@@ -563,8 +563,13 @@ class PhotoProcessor:
             
             # 阶段2: RAW转换
             raw_files_to_convert = self._identify_raws_to_convert(raw_dict, jpg_dict, files_tbr)
+            # 阶段1.9: W1/V5.9.4 DPP 人工伽马编辑批前预读——人工编辑优先于
+            # 自动提亮（转换时先套 DPP LUT、跳过自动提亮，绝不叠加）。
+            # 阶段1.9: pre-read DPP human gamma edits before conversion —
+            # human edits win over auto-brightening (LUT first, never stacked).
+            dpp_gamma_map = self._read_dpp_gamma_map(raw_files_to_convert)
             if raw_files_to_convert:
-                self._convert_raws(raw_files_to_convert, files_tbr)
+                self._convert_raws(raw_files_to_convert, files_tbr, dpp_gamma_map)
 
             files_tbr = self._sort_processing_files(files_tbr)
             display_start = 1
@@ -974,6 +979,63 @@ class PhotoProcessor:
             return {'sharpness': sharpness, 'topiq': topiq}
         return None
     
+    def _read_dpp_gamma_map(self, raw_files_to_convert) -> Dict[str, float]:
+        """
+        批前预读 DPP 人工伽马编辑（W1 / V5.9.4）。
+
+        用 ExifTool 一次性批量读取待转换 CR3 的 CanonVRD GammaMidPoint
+        （无编辑的目录返回空表，代价仅一次元数据扫描）。结果传入
+        _convert_raws → raw_to_jpeg(dpp_gamma_mid=...)：人工编辑优先，
+        预览先套 DPP LUT、跳过自动提亮（人工与自动绝不叠加）。
+
+        任何失败（ExifTool 缺失/超时等）都降级为空表并告警——DPP 预读
+        是增强步骤，绝不阻断跑批主流程。
+
+        Batch-pre-read DPP human gamma edits (W1 / V5.9.4).
+
+        One chunked ExifTool sweep reads CanonVRD GammaMidPoint for the
+        CR3 files about to be converted (unedited directories return an
+        empty map at the cost of a single metadata scan). The map feeds
+        _convert_raws → raw_to_jpeg(dpp_gamma_mid=...): human edits win,
+        the preview gets the DPP LUT first and auto-brightening is skipped
+        (never stacked).
+
+        Any failure (missing ExifTool, timeout, ...) degrades to an empty
+        map with a warning — DPP pre-reading must never block the batch.
+
+        参数 / Parameters:
+            raw_files_to_convert (List[Tuple[str, str]]): (前缀, RAW路径)
+                列表，来自 _identify_raws_to_convert / (prefix, RAW path)
+                pairs from _identify_raws_to_convert.
+
+        返回 / Returns:
+            Dict[str, float]: {前缀: GammaMidPoint 浮点值}；无编辑或
+            开关关闭时为空字典 / {prefix: midpoint float}, empty when
+            nothing is edited or the switch is off.
+        """
+        if not raw_files_to_convert:
+            return {}
+        try:
+            if not get_advanced_config().preview_dpp_gamma:
+                return {}
+            cr3_paths = [raw_path for _key, raw_path in raw_files_to_convert
+                         if raw_path.lower().endswith('.cr3')]
+            if not cr3_paths:
+                return {}
+            from tools.dpp_gamma import read_dpp_gamma_map
+            exiftool_path = get_exiftool_manager().exiftool_path
+            gamma_map = read_dpp_gamma_map(cr3_paths, exiftool_path)
+            if gamma_map:
+                self._log(
+                    f"  🎛 DPP 人工伽马编辑 {len(gamma_map)} 张：预览按"
+                    f"人工 LUT 优先生成（跳过自动提亮，不叠加）")
+            return gamma_map
+        except Exception as e:
+            self._log(
+                f"  ⚠️ DPP 伽马预读失败（忽略，转自动提亮路径）: {e}",
+                "warning")
+            return {}
+
     def _identify_raws_to_convert(self, raw_dict, jpg_dict, files_tbr):
         """识别需要转换的RAW文件"""
         raw_files_to_convert = []
@@ -988,18 +1050,34 @@ class PhotoProcessor:
         
         return raw_files_to_convert
     
-    def _convert_raws(self, raw_files_to_convert, files_tbr):
-        """并行转换RAW文件"""
+    def _convert_raws(self, raw_files_to_convert, files_tbr,
+                      dpp_gamma_map: Optional[Dict[str, float]] = None):
+        """
+        并行转换 RAW 文件。
+
+        V5.9.4（W1）：dpp_gamma_map 携带 DPP 人工伽马中点时按前缀传入
+        raw_to_jpeg——人工编辑优先，新抽取的预览先套 DPP LUT、跳过自动
+        提亮；不在映射里的前缀走原自动提亮路径，行为不变。
+
+        Convert RAW files in parallel.
+
+        V5.9.4 (W1): prefixes found in dpp_gamma_map pass their human
+        gamma midpoint to raw_to_jpeg — human edit first (DPP LUT on
+        fresh extraction, auto-brightening skipped); prefixes absent from
+        the map keep the original auto-brighten behavior unchanged.
+        """
         raw_start = time.time()
         import multiprocessing
         max_workers = min(4, multiprocessing.cpu_count())
-        
+
         self._log(self.i18n.t("logs.raw_conversion_start", count=len(raw_files_to_convert), threads=max_workers))
-        
+
         def convert_single(args):
             key, raw_path = args
             try:
-                jpg_path = raw_to_jpeg(raw_path)
+                jpg_path = raw_to_jpeg(
+                    raw_path,
+                    dpp_gamma_mid=(dpp_gamma_map or {}).get(key))
                 # V5.4: raw_to_jpeg 对损坏/空 RAW 可能不抛异常而返回 None
                 # （如 NAS 上全零字节或 IO 错误的 CR3）。此处必须降级为
                 # 单文件失败进入 ❌ 日志路径，绝不能让 None 流入 relpath

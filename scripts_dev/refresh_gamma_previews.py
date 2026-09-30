@@ -17,125 +17,29 @@ DPP 伽马调整预览刷新：解析 CR3 内 CanonVRD recipe 的伽马参数，
 - 只写 temp_preview 缓存（可再生的应用自管文件），不碰 CR3/DB/sidecar；
   回退 = 删除缓存 jpg，raw_to_jpeg 会重新生成原始版。
 
+读取/LUT/应用的实现在 tools/dpp_gamma.py（V5.9.4 起与跑批内 M1 共享
+同一实现）；本脚本保留 CLI 编排：找有编辑的 CR3 → 重抽原始预览 →
+套 LUT。V5.9.4 起跑批时已对「本次新抽取」的预览先套 DPP LUT（人工
+优先、跳过自动提亮），本脚本的定位收窄为：老批次回补 + 跑批之后
+才做的 DPP 编辑。
+
 用法:
     python scripts_dev/refresh_gamma_previews.py <照片目录> [--dry]
 """
 
 import argparse
 import os
-import subprocess
 import sys
-from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import cv2  # noqa: E402
-import numpy as np  # noqa: E402
-
+from tools.dpp_gamma import (  # noqa: E402
+    apply_lut_to_jpeg,
+    build_lut,
+    read_bgr,
+    read_gamma_params,
+)
 from tools.find_bird_util import raw_to_jpeg  # noqa: E402
-
-
-def read_gamma_params(cr3_paths: List[str],
-                      exiftool: str) -> Dict[str, Tuple[str, str]]:
-    """
-    批量读 CR3 的 CanonVRD 伽马参数。
-
-    大目录（如 640 张 UNC 路径）会超出 Windows 32K 命令行上限
-    （WinError 206），因此按块分批调用 exiftool 再合并结果。
-
-    参数:
-        cr3_paths (List[str]): CR3 绝对路径
-        exiftool (str): exiftool 可执行文件路径
-
-    返回:
-        Dict[str, Tuple[str, str]]: {文件名前缀: (中点值, 白点值)}；
-        未编辑（无 CanonVRD 伽马区）的文件不在字典里
-    """
-
-    def _read_batch(batch: List[str]) -> Dict[str, Tuple[str, str]]:
-        """读单批文件，返回 {前缀: (中点, 白点)}。Read one batch."""
-        out = subprocess.run(
-            [exiftool, '-s3', '-csv', '-FileName',
-             '-CanonVRD:GammaMidPoint', '-CanonVRD:GammaWhitePoint',
-             '-ext', 'CR3', *batch],
-            capture_output=True, timeout=600)
-        lines = out.stdout.decode('utf-8', 'replace').strip().splitlines()
-        if len(lines) < 2:
-            return {}
-        header = lines[0].split(',')
-        ix_fn = header.index('FileName')
-        ix_mid = header.index('GammaMidPoint') if 'GammaMidPoint' in header else -1
-        ix_wp = header.index('GammaWhitePoint') if 'GammaWhitePoint' in header else -1
-        batch_result: Dict[str, Tuple[str, str]] = {}
-        for ln in lines[1:]:
-            cols = ln.split(',')
-            fn = cols[ix_fn] if ix_fn < len(cols) else ''
-            mid = cols[ix_mid].strip() if 0 <= ix_mid < len(cols) else ''
-            wp = cols[ix_wp].strip() if 0 <= ix_wp < len(cols) else ''
-            if mid:
-                prefix = os.path.splitext(fn)[0]
-                batch_result[prefix] = (mid, wp)
-        return batch_result
-
-    # 每批 100 个文件：单条命令约 8-9K 字符，远低于 Windows 32K 上限
-    # 100 files per batch: ~8-9K chars per command, well under the 32K limit
-    result: Dict[str, Tuple[str, str]] = {}
-    chunk_size = 100
-    for i in range(0, len(cr3_paths), chunk_size):
-        result.update(_read_batch(cr3_paths[i:i + chunk_size]))
-    return result
-
-
-def build_lut(mid_point: float) -> np.ndarray:
-    """
-    DPP 伽马中点 → 256 级 LUT。
-
-    DPP 中点滑块负值=提亮（实测 21 张全负、用户描述「亮度提高」）。
-    幂律近似：g = 2^m，y = (x/255)^g。m=-1.65 → g≈0.32，中灰 0.5 → 0.80。
-
-    参数:
-        mid_point (float): CanonVRD GammaMidPoint 原始值
-
-    返回:
-        np.ndarray: uint8[256] 查找表
-    """
-    g = 2.0 ** mid_point
-    x = np.arange(256, dtype=np.float64) / 255.0
-    y = np.clip(x ** g, 0.0, 1.0)
-    return (y * 255.0 + 0.5).astype(np.uint8)
-
-
-def read_bgr(path: str) -> Optional[np.ndarray]:
-    """中文/UNC 安全读图。/ UNC-safe read."""
-    try:
-        data = np.fromfile(path, dtype=np.uint8)
-        if data.size == 0:
-            return None
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)
-    except Exception:
-        return None
-
-
-def apply_lut_to_jpeg(jpg_path: str, lut: np.ndarray) -> Optional[float]:
-    """
-    对缓存 JPEG 应用 LUT 并写回（原地刷新，JPEG 质量参数 95）。
-
-    参数:
-        jpg_path (str): temp_preview 缓存 JPEG 路径
-        lut (np.ndarray): uint8[256] 查找表
-
-    返回:
-        Optional[float]: 应用后的平均亮度（0-255）；读写失败返回 None
-    """
-    img = read_bgr(jpg_path)
-    if img is None:
-        return None
-    out = cv2.LUT(img, lut)
-    ok, buf = cv2.imencode('.jpg', out, [cv2.IMWRITE_JPEG_QUALITY, 95])
-    if not ok:
-        return None
-    buf.tofile(jpg_path)
-    return float(out.mean())
 
 
 def main() -> int:
@@ -178,16 +82,28 @@ def main() -> int:
         cache = os.path.join(root, '.superpicky', 'cache',
                              'temp_preview', prefix + '.jpg')
         raw = os.path.join(root, prefix + '.CR3')
-        # 幂等保证：先删缓存从 CR3 重抽原始预览，避免在已提亮的图上
-        # 二次应用 LUT（重复运行不会叠加提亮）。auto_brighten=False 必须
+        # dry 只读（V5.9.4/W1 修正）：不删缓存、不重抽——老实现「先重抽
+        # 原始预览再 continue」会把已套 LUT 的缓存（W1 跑批内产出或本脚本
+        # 上次真跑的结果）静默回退成暗图。dry 仅报告 recipe 与当前缓存亮度。
+        # Read-only dry (fixed in V5.9.4/W1): never delete/re-extract the
+        # cache — the old "re-extract then continue" silently regressed an
+        # already-LUTed preview (from in-batch W1 or a previous real run).
+        if args.dry:
+            cur = read_bgr(cache)
+            c_mean = float(cur.mean()) if cur is not None else -1.0
+            print(f"  {prefix}: 中点{mid} 白点{wp} → "
+                  f"LUT[128]={lut[128]}（当前缓存亮度 {c_mean:.0f}）")
+            continue
+        # 幂等保证（真跑）：先删缓存从 CR3 重抽原始预览，避免在已提亮的图
+        # 上二次应用 LUT（重复运行不会叠加提亮）。auto_brighten=False 必须
         # 显式传：V5.9 起 raw_to_jpeg 默认会给暗预览做目标均值提亮，这里
         # 的语义是「原始渲染 + DPP LUT」，叠加自动提亮会双重变亮。
-        # Idempotency: always re-extract the original preview from the CR3
-        # so re-running never stacks the brightening on an edited cache.
-        # auto_brighten=False is REQUIRED: since V5.9 raw_to_jpeg
-        # auto-brightens dark previews by default, while this script's
-        # contract is "original rendition + DPP LUT" — stacking the auto
-        # gamma would double-brighten.
+        # Idempotency (real run): always re-extract the original preview
+        # from the CR3 so re-running never stacks the brightening on an
+        # edited cache. auto_brighten=False is REQUIRED: since V5.9
+        # raw_to_jpeg auto-brightens dark previews by default, while this
+        # script's contract is "original rendition + DPP LUT" — stacking
+        # the auto gamma would double-brighten.
         if os.path.exists(cache):
             os.remove(cache)
         if raw_to_jpeg(raw, auto_brighten=False) is None:
@@ -195,17 +111,13 @@ def main() -> int:
             continue
         before = read_bgr(cache)
         b_mean = float(before.mean()) if before is not None else -1.0
-        if args.dry:
-            print(f"  {prefix}: 中点{mid} 白点{wp} → "
-                  f"LUT[128]={lut[128]}（原图亮度 {b_mean:.0f}）")
-            continue
         after = apply_lut_to_jpeg(cache, lut)
         if after is None:
             print(f"  {prefix}: LUT 应用失败")
         else:
             print(f"  {prefix}: 中点{mid} → 亮度 {b_mean:.0f} → {after:.0f}")
     if args.dry:
-        print("（dry 模式，未写缓存）")
+        print("（dry 模式，只读未动缓存）")
     return 0
 
 

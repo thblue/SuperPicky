@@ -47,6 +47,18 @@ class AdvancedConfig:
         # cached JPEG to fall back to the original dark rendition.
         "preview_auto_brighten": True,
 
+        # V5.9.4（W1）: DPP 人工伽马编辑跑批内优先。RAW 转换前批量预读
+        # CR3 内 CanonVRD trailer 的 GammaMidPoint，有人工编辑时本次新抽
+        # 取的预览先套 DPP LUT、跳过自动提亮（人工与自动绝不叠加）；缓存
+        # 命中不重写，老批次/跑批后新编辑仍由 refresh_gamma_previews 链
+        # 兜底。
+        # V5.9.4 (W1): human DPP gamma edits win inside the batch — freshly
+        # extracted previews from DPP-edited CR3s get the recipe LUT first
+        # and skip auto-brightening (never stacked); cache hits stay
+        # untouched, and old batches / post-batch edits still belong to
+        # the refresh_gamma_previews chain.
+        "preview_dpp_gamma": True,
+
         # 输出设置
         "save_csv": True,           # 是否保存CSV报告
         "log_level": "detailed",    # 日志详细程度: "simple" | "detailed"
@@ -373,6 +385,14 @@ class AdvancedConfig:
         V5.9: dark-preview auto-brightening switch (default on).
         """
         return self.config.get("preview_auto_brighten", True)
+
+    @property
+    def preview_dpp_gamma(self):
+        """V5.9.4: DPP 人工伽马编辑跑批内优先开关（默认开，见默认配置内注释）。
+
+        V5.9.4: in-batch DPP human-gamma-priority switch (default on).
+        """
+        return self.config.get("preview_dpp_gamma", True)
 
     @property
     def save_csv(self):

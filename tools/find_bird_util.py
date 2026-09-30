@@ -520,38 +520,119 @@ def _brighten_dark_preview(raw_path: str, jpg_path: str) -> None:
     brighten_preview_if_dark(jpg_path, os.path.dirname(raw_path))
 
 
-def raw_to_jpeg(raw_file_path, auto_brighten: Optional[bool] = None):
+def _apply_dpp_gamma_lut(jpg_path: str, gamma_mid: float) -> None:
     """
-    RAW → 预览 JPEG 转换（缓存优先），并可按配置对暗预览做自动提亮。
+    DPP 人工伽马编辑的应用：原始渲染另存 _dark.jpg → 套幂律 LUT。
 
-    V5.9.2: 暗片提亮为 RAW 开发级（传感器数据线性域提升，原内嵌渲染另
-    存 <前缀>_dark.jpg 供分类双渲染对比）；rawpy 无法开发时回退伽马。
-    提亮只作用于 .superpicky/cache 预览缓存（可再生的应用自管文件），由
-    亮度护栏保证幂等。DPP 伽马工作流（refresh_gamma_previews）需要
-    「原始渲染 + DPP LUT」，必须传 auto_brighten=False，否则会在提亮版
-    上叠加 LUT 造成双重提亮。
+    W1/V5.9.4「人工优先」语义：LUT 是用户在 Canon DPP 里的显式操作，
+    套完即使仍暗也不做自动提亮补足（人工意图优先），仅在日志提示；
+    覆盖前先把原始渲染另存 <前缀>_dark.jpg——与自动提亮路径同语义，
+    供分类「亮版优先、暗版重试」双渲染对比使用。
 
-    Convert a RAW file to a preview JPEG (cache-first), optionally
-    auto-brightening dark previews per config. V5.9.2: brightening is
-    RAW-development grade (linear-domain lift of sensor data, with the
-    original embedded rendition preserved as <prefix>_dark.jpg for the
-    classifier's dual-rendition compare); gamma is the fallback when rawpy
-    cannot develop the format. Only the regenerable .superpicky/cache
-    preview is touched; idempotent via the luma guard. The DPP-gamma
-    workflow (refresh_gamma_previews) needs the ORIGINAL rendition and must
-    pass auto_brighten=False, otherwise the LUT would stack on an
-    already-brightened preview.
+    Apply a DPP human gamma edit: preserve the original rendition to
+    _dark.jpg, then apply the power-law LUT.
+
+    W1/V5.9.4 "human edit first": the LUT is the user's explicit DPP
+    operation — if the result is still dark there is NO auto top-up
+    (human intent wins), only a log hint. The original rendition is
+    saved to <prefix>_dark.jpg first, mirroring the auto-brighten path,
+    so the classifier's bright-first/dark-retry compare keeps working.
+
+    参数 / Parameters:
+        jpg_path (str): 预览缓存路径（将被 LUT 版覆盖）/ preview cache
+                       path (overwritten with the LUT rendition).
+        gamma_mid (float): CanonVRD GammaMidPoint 原始值（负值=提亮）
+                          / raw CanonVRD GammaMidPoint (negative=brighter).
+    """
+    from tools.dpp_gamma import apply_lut_to_jpeg, build_lut
+
+    directory_path = os.path.dirname(jpg_path)
+    before = preview_tone_stats(jpg_path)["mean"]
+    dark_path = _dark_sidecar_path(jpg_path)
+    if not os.path.exists(dark_path):
+        try:
+            shutil.copy2(jpg_path, dark_path)
+        except Exception:
+            pass  # 另存失败只损失暗版重试，不阻断 LUT / best effort
+    after = apply_lut_to_jpeg(jpg_path, build_lut(gamma_mid))
+    if after is None:
+        log_message(
+            f"WARNING, DPP LUT apply failed [{os.path.basename(jpg_path)}]",
+            directory_path)
+        return
+    hint = "" if after >= PREVIEW_DARK_MEAN else \
+        " (still dark; human edit wins, no auto top-up)"
+    log_message(
+        f"DPPGAMMA, {os.path.basename(jpg_path)}: mid {gamma_mid} "
+        f"mean {before:.0f} -> {after:.0f}{hint}",
+        directory_path)
+
+
+def raw_to_jpeg(raw_file_path, auto_brighten: Optional[bool] = None,
+                dpp_gamma_mid: Optional[float] = None):
+    """
+    RAW → 预览 JPEG 转换（缓存优先）：DPP 人工伽马编辑优先，否则按
+    配置对暗预览做自动提亮。
+
+    V5.9.4（W1）：人工编辑优先于自动提亮。调用方传入 CanonVRD
+    GammaMidPoint（dpp_gamma_mid）时：仅当本次是「新抽取」的预览才
+    另存 _dark.jpg 并套 DPP LUT，且该分支绝不进入自动提亮——人工与
+    自动绝不叠加；缓存命中原样返回（老批次/事后编辑归
+    refresh_gamma_previews 链管辖，同时天然避免重复套 LUT）。
+    V5.9.2: 自动提亮为 RAW 开发级（传感器数据线性域提升，原内嵌渲染
+    另存 <前缀>_dark.jpg 供分类双渲染对比）；rawpy 无法开发时回退伽
+    马。提亮只作用于 .superpicky/cache 预览缓存（可再生的应用自管文
+    件），由亮度护栏保证幂等。DPP 伽马工作流（refresh_gamma_previews）
+    需要「原始渲染 + DPP LUT」，必须传 auto_brighten=False 且不传
+    dpp_gamma_mid，否则会在提亮版上叠加造成双重提亮。
+
+    Convert a RAW file to a preview JPEG (cache-first): an explicit DPP
+    gamma edit wins, otherwise dark previews may be auto-brightened per
+    config.
+
+    V5.9.4 (W1): human edits beat the auto path. When dpp_gamma_mid
+    carries the CanonVRD GammaMidPoint, only a FRESHLY extracted preview
+    is preserved to _dark.jpg and gets the DPP LUT, and the
+    auto-brighten branch is never entered (human and auto never stack);
+    a cache hit is returned untouched (old batches / post-batch edits
+    belong to the refresh_gamma_previews chain, which also prevents a
+    double LUT).
+    V5.9.2: the auto path is RAW-development grade (linear-domain lift
+    of sensor data, original embedded rendition preserved as
+    <prefix>_dark.jpg for the classifier's dual-rendition compare);
+    gamma is the fallback when rawpy cannot develop the format. Only the
+    regenerable .superpicky/cache preview is touched; idempotent via the
+    luma guard. The DPP-gamma workflow (refresh_gamma_previews) needs
+    the ORIGINAL rendition and must pass auto_brighten=False WITHOUT
+    dpp_gamma_mid, otherwise the LUT would stack on an already-brightened
+    preview.
 
     参数 / Parameters:
         raw_file_path (str): RAW 文件路径 / path to the RAW file.
         auto_brighten (Optional[bool]): 显式开关（None=跟随高级配置
             preview_auto_brighten）/ explicit flag, None to follow config.
+        dpp_gamma_mid (Optional[float]): DPP 人工伽马中点（None=无人工
+            编辑，走自动提亮路径）/ DPP human gamma midpoint; None takes
+            the auto-brighten path.
 
     返回 / Returns:
         str: 预览 JPEG 完整路径；失败返回 None / preview path, or None.
     """
-    jpg_file_path = _raw_to_jpeg_extract(raw_file_path)
-    if jpg_file_path and _auto_brighten_enabled(auto_brighten):
+    jpg_file_path, fresh = _raw_to_jpeg_extract(raw_file_path)
+    if jpg_file_path is None:
+        return None
+    if dpp_gamma_mid is not None:
+        # 人工编辑优先：仅对新抽取的预览套 LUT（缓存命中不动，幂等），
+        # 且绝不叠加自动提亮。
+        # Human edit first: LUT only on a fresh extraction (cache hits
+        # stay untouched, idempotent); auto-brightening never stacks.
+        if fresh:
+            try:
+                _apply_dpp_gamma_lut(jpg_file_path, dpp_gamma_mid)
+            except Exception:
+                pass  # LUT 是增强步骤，绝不阻断转换主流程 / best effort
+        return jpg_file_path
+    if _auto_brighten_enabled(auto_brighten):
         try:
             _brighten_dark_preview(raw_file_path, jpg_file_path)
         except Exception:
@@ -560,10 +641,24 @@ def raw_to_jpeg(raw_file_path, auto_brighten: Optional[bool] = None):
 
 
 def _raw_to_jpeg_extract(raw_file_path):
-    """RAW → 预览 JPEG 的原始提取实现（不含提亮，见 raw_to_jpeg）。
+    """
+    RAW → 预览 JPEG 的原始提取实现（不含提亮，见 raw_to_jpeg）。
+
+    V5.9.4: 返回值带 fresh 标记（本次是否真的从 RAW 抽取了新预览，
+    False=缓存命中），供 raw_to_jpeg 的 DPP 分支实现「仅对新抽取的
+    预览套人工 LUT、缓存命中保持原样」的幂等语义。
 
     Raw preview extraction implementation without brightening; see
     raw_to_jpeg for the public entry.
+
+    V5.9.4: also returns a fresh flag (True only when a preview was
+    actually extracted this call; False on cache hit) so raw_to_jpeg's
+    DPP branch can apply the human LUT to fresh extractions only,
+    keeping cache hits untouched and the whole path idempotent.
+
+    返回 / Returns:
+        Tuple[Optional[str], bool]: (预览路径或 None, 是否新抽取) /
+        (preview path or None, freshly-extracted flag).
     """
     filename = os.path.basename(raw_file_path)
     file_prefix, file_ext = os.path.splitext(filename)
@@ -571,51 +666,54 @@ def _raw_to_jpeg_extract(raw_file_path):
 
     # 在初步生成预览图前先移除原文件只读属性，避免后续元数据写入或移动阶段失败
     clear_readonly_attribute(raw_file_path)
-    
+
     # V4.1.0: 使用 .superpicky/cache 目录存储临时 JPEG
     superpicky_dir = os.path.join(directory_path, ".superpicky")
     cache_dir = os.path.join(superpicky_dir, "cache", "temp_preview")
-    
+
     # 确保目录存在并隐藏
     ensure_hidden_directory(superpicky_dir)
     ensure_hidden_directory(cache_dir)
-    
+
     # 文件名不带 tmp_ 前缀，直接使用原名前缀
     jpg_file_path = os.path.join(cache_dir, f"{file_prefix}.jpg")
-    
+
     if os.path.exists(jpg_file_path) and os.path.getsize(jpg_file_path) >= 128 * 1024:
-        return jpg_file_path  # 返回完整路径（缓存命中且 ≥128KB，无需重新生成）
-        
+        return jpg_file_path, False  # 缓存命中且 ≥128KB，无需重新生成 / cache hit
+
     if not os.path.exists(raw_file_path):
         log_message(f"ERROR, file [{filename}] cannot be found in RAW form", directory_path)
-        return None
+        return None, False
 
     # HEIF/HIF 格式（rawpy 不支持）：用 pillow-heif 解码全分辨率图
     heif_exts = {'.hif', '.heif', '.heic'}
     if file_ext.lower() in heif_exts:
-        return _raw_to_jpeg_via_heif(raw_file_path, jpg_file_path, directory_path)
+        path = _raw_to_jpeg_via_heif(raw_file_path, jpg_file_path, directory_path)
+        return path, path is not None
 
     try:
         with rawpy.imread(raw_file_path) as raw:
             thumbnail = raw.extract_thumb()
             if thumbnail is None:
                 log_message(f"DEBUG: rawpy extract_thumb is None for {filename}", directory_path)
-                return None
+                return None, False
             if thumbnail.format == rawpy.ThumbFormat.JPEG:
                 with open(jpg_file_path, 'wb') as f:
                     f.write(thumbnail.data)
             elif thumbnail.format == rawpy.ThumbFormat.BITMAP:
                 imageio.imsave(jpg_file_path, thumbnail.data)
                 # 成功转换——已由 photo_processor 的批量日志统计，无需逐文件记录
-            return jpg_file_path
+            return jpg_file_path, True
     except rawpy._rawpy.LibRawFileUnsupportedError:
         # LibRaw 不支持的格式（如 Sony A7M5 的已压缩 ARW）
         log_message(f"DEBUG: rawpy unsupported format for {filename}, falling back to ExifTool", directory_path)
-        return _raw_to_jpeg_via_exiftool(raw_file_path, jpg_file_path, directory_path)
+        path = _raw_to_jpeg_via_exiftool(raw_file_path, jpg_file_path, directory_path)
+        return path, path is not None
     except Exception as e:
         log_message(f"Error occurred while converting the RAW file:{raw_file_path}, Error: {e}", directory_path)
         # 即使是普通异常，也尝试走一次 ExifTool 回退（增加容错）
-        return _raw_to_jpeg_via_exiftool(raw_file_path, jpg_file_path, directory_path)
+        path = _raw_to_jpeg_via_exiftool(raw_file_path, jpg_file_path, directory_path)
+        return path, path is not None
 
 
 def _raw_to_jpeg_via_heif(raw_file_path, jpg_file_path, directory_path):

@@ -83,6 +83,27 @@ def _sidecar_path(photo: dict) -> Optional[str]:
     return os.path.join(base_dir, ".superpicky", "meta", f"{prefix}.json")
 
 
+def _bright_crop_path(photo: dict) -> Optional[str]:
+    """返回 V5.9 暗框提亮重识别的亮框图路径（可能不存在，调用方判断）。
+
+    crop_debug 里 <前缀>_bright.jpg 由 photo_processor.apply_birdid_result
+    在提亮重识别命中后写入，不占用任何 DB 列——彻底删除时按前缀推导，
+    防止缓存目录残留孤儿。
+
+    Path of the V5.9 brightened-crop review image (may not exist).
+    crop_debug's <prefix>_bright.jpg is written by apply_birdid_result
+    after a winning brightened retry and referenced by no DB column;
+    derive it from the prefix so permanent delete leaves no orphans.
+    """
+    filename = photo.get("filename") or ""
+    base_dir = photo.get("_base_dir") or ""
+    if not filename or not base_dir:
+        return None
+    prefix = os.path.splitext(os.path.basename(filename))[0]
+    return os.path.join(base_dir, ".superpicky", "cache", "crop_debug",
+                        f"{prefix}_bright.jpg")
+
+
 def collect_purge_files(photo: dict) -> List[str]:
     """
     计算彻底删除一张照片要删掉的全部文件（纯函数，无副作用）。
@@ -140,6 +161,12 @@ def collect_purge_files(photo: dict) -> List[str]:
     sidecar = _sidecar_path(photo)
     if sidecar:
         candidates.append(sidecar)
+
+    # 7. V5.9 亮框复核图（DB 无列，按前缀推导，存在才删）
+    #    V5.9 brightened-crop review image (no DB column, prefix-derived).
+    bright_crop = _bright_crop_path(photo)
+    if bright_crop:
+        candidates.append(bright_crop)
 
     # 去重 + 只保留真实存在的普通文件（绝不碰目录）
     # Deduplicate and keep only existing regular files (never directories).

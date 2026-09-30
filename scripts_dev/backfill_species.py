@@ -184,7 +184,8 @@ def detect_fallback_box(bgr: np.ndarray,
 
 
 def classify(bgr: np.ndarray, box: Tuple[int, int, int, int],
-             exif_path: str, country: str) -> Optional[Dict]:
+             exif_path: str, country: str,
+             dark_retry_conf: float = None) -> Optional[Dict]:
     """
     与管线逐鸟分类完全相同的路径识别单框：方形的智能裁剪 → identify_bird。
 
@@ -193,6 +194,8 @@ def classify(bgr: np.ndarray, box: Tuple[int, int, int, int],
         box (Tuple[int, int, int, int]): 原图像素空间 (x1, y1, x2, y2)
         exif_path (str): 供 GPS/EXIF 读取的源文件路径
         country (str): 地理过滤国家码
+        dark_retry_conf (float): 暗框提亮重识别置信度线（0-100，V5.9 起
+            与主管线一致；None=关闭）
 
     返回:
         Optional[Dict]: identify_bird 原始结果；异常/无结果返回 None
@@ -205,7 +208,8 @@ def classify(bgr: np.ndarray, box: Tuple[int, int, int, int],
         pil_crop = _PILImage.fromarray(
             cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
         return identify_bird(exif_path, False, True, True, country,
-                             None, 1, None, pil_crop)
+                             None, 1, None, pil_crop,
+                             dark_retry_conf=dark_retry_conf)
     except Exception:
         return None
 
@@ -427,7 +431,10 @@ def main() -> int:
             failed += 1
             print(f"  [{idx}/{total}] {entry_prefix}: 预览/RAW/本体均不可读，跳过")
             return
-        result = classify(img, box, exif_path, args.country)
+        # V5.9: 暗框提亮重识别与主管线同线（--threshold 即采纳线）
+        # V5.9: brightened retry shares the pipeline adoption line.
+        result = classify(img, box, exif_path, args.country,
+                          dark_retry_conf=float(args.threshold))
         if not (result and result.get("success") and result.get("results")):
             still_low.append({"prefix": entry_prefix, "name": "（无结果）",
                               "conf": 0.0, "row": row, "source": source,

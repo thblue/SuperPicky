@@ -311,6 +311,8 @@
     "birdid_fallback_model": "[BirdID] Falling back to birdid2024 model",
     "birdid_waiting": "⏳ Waiting for {count} remaining BirdID results...",
     "birdid_low_confidence": "  🐦 Low confidence [{source}]: {name} ({confidence:.0f}% < {threshold}%)",
+    "birdid_brightened_suffix": " (brightened retry {orig:.0f}%→{bright:.0f}%)",
+    "birdid_bright_crop_saved": "  🔆 Brightened crop thumbnail saved: {path}",
     "mps_cache_cleared": "  🧹 [Photo {index}] MPS memory cleared",
     "cuda_cache_cleared": "  🧹 [Photo {index}] CUDA memory cleared",
     "db_load_failed": "Database load failed: {e}",

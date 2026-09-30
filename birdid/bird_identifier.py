@@ -1287,7 +1287,63 @@ def identify_bird(
     name_format: Optional[str] = None,
     preloaded_crop: Optional[Image.Image] = None,
     focus_point: Optional[Tuple[float, float]] = None,
+    dark_retry_conf: Optional[float] = None,
 ) -> Dict:
+    """
+    识别单张照片中的鸟种，支持暗框提亮重识别。
+
+    参数:
+    image_path (str): 照片路径（GPS/EXIF 读取用）
+    use_yolo (bool): 无预载裁剪时是否先 YOLO 检测裁剪
+    use_gps (bool): 是否读取 GPS 做地理过滤/国家解析
+    use_geo_filter (bool): 是否启用分层地理候选集
+    country_code (Optional[str]): 手选国家码（无 GPS 时用）
+    region_code (Optional[str]): 手选地区码
+    top_k (int): 返回候选数
+    name_format (Optional[str]): 鸟名格式
+    preloaded_crop (Optional[Image.Image]): 上游已裁剪的鸟框图（跳过 YOLO）
+    focus_point (Optional[Tuple[float, float]]): 对焦点（多目标选框）
+    dark_retry_conf (Optional[float]): 暗框重识别的置信度线（0-100，与
+        results[].confidence 同口径）。None=关闭重试。启用后：首次分类
+        结果缺失或 top1 置信度低于该线、且鸟框整体偏暗（均值 < 90）时，
+        把框图按目标均值伽马提亮后再分类一次，取置信度更高者返回。
+        动机：逆光/林荫猛禽常「框检出但太黑定不了种」，与 DPP 伽马
+        批次的补种经验一致——提亮后的图分类器看得更清。
+
+    返回:
+    Dict: success/results/yolo_info/gps_info/geo_info/error；触发提亮
+        重试且结果更好时，额外带 brightened_retry（新旧置信度等）与
+        brightened_crop（提亮后的 PIL 框图，供上层保存亮框缩略图）。
+
+    Identify the bird species in one photo, with a brightened-crop retry
+    for dark frames.
+
+    Parameters:
+    image_path (str): photo path (for GPS/EXIF reads)
+    use_yolo (bool): run YOLO detection when no preloaded crop
+    use_gps (bool): read GPS for geo filter / country resolution
+    use_geo_filter (bool): layered geographic candidate sets
+    country_code (Optional[str]): user-selected country (no-GPS case)
+    region_code (Optional[str]): user-selected region
+    top_k (int): number of candidates to return
+    name_format (Optional[str]): name format
+    preloaded_crop (Optional[Image.Image]): upstream crop (skips YOLO)
+    focus_point (Optional[Tuple[float, float]]): focus point for subject selection
+    dark_retry_conf (Optional[float]): confidence line (0-100, same scale
+        as results[].confidence) below which a dark crop is re-classified
+        brightened; None disables. When enabled and the first pass misses
+        or lands under the line with a dark crop (mean < 90), the crop is
+        gamma-brightened toward the target mean and classified once more;
+        the higher-confidence result wins. Rationale: backlit/shaded
+        raptors often get "box detected, species rejected", and the DPP
+        gamma batches proved the classifier reads brightened crops better.
+
+    Return:
+    Dict: success/results/yolo_info/gps_info/geo_info/error; when the
+        brightened retry wins, the dict also carries brightened_retry
+        (old/new confidence etc.) and brightened_crop (the brightened PIL
+        crop, for callers persisting a brightened thumbnail).
+    """
     result = {
         "success": False,
         "image_path": image_path,
@@ -1396,38 +1452,120 @@ def identify_bird(
             or photo_country_code
             or DEFAULT_COUNTRY_NO_GPS
         )
-        if use_geo_filter:
-            results, tier, count = _identify_with_tiers(
-                image,
-                top_k=top_k,
-                lat=lat if use_gps else None,
-                lon=lon if use_gps else None,
-                country_code=effective_region,
-                is_yolo_cropped=is_yolo_cropped,
-                name_format=name_format,
-                photo_country_code=photo_country_code,
+        def _classify_once(img: Image.Image) -> Tuple[List[Dict], Dict]:
+            """
+            用同一套地理/命名参数对给定图跑一次分类。
+
+            Run one classification pass with the same geo/naming setup.
+
+            参数 / Parameters:
+                img (Image.Image): 待分类图（原图或提亮框图）/ image to
+                                  classify (original or brightened crop).
+
+            返回 / Returns:
+                Tuple[List[Dict], Dict]: (候选列表, geo_info 字典)
+                                        (candidates, geo_info dict).
+            """
+            if use_geo_filter:
+                _results, tier, count = _identify_with_tiers(
+                    img,
+                    top_k=top_k,
+                    lat=lat if use_gps else None,
+                    lon=lon if use_gps else None,
+                    country_code=effective_region,
+                    is_yolo_cropped=is_yolo_cropped,
+                    name_format=name_format,
+                    photo_country_code=photo_country_code,
+                )
+                _geo = {
+                    "enabled": tier != TIER_NONE,
+                    "tier": tier,
+                    "species_count": count,
+                    "country_code": effective_region,
+                }
+            else:
+                _results = predict_bird(
+                    img,
+                    top_k=top_k,
+                    species_class_ids=None,
+                    is_yolo_cropped=is_yolo_cropped,
+                    name_format=name_format,
+                    photo_country_code=photo_country_code,
+                )
+                _geo = {
+                    "enabled": False,
+                    "tier": TIER_NONE,
+                    "species_count": None,
+                    "country_code": None,
+                }
+            return _results, _geo
+
+        results, geo_info = _classify_once(image)
+        result["geo_info"] = geo_info
+
+        # V5.9: 暗框提亮重识别。首跑无候选或 top1 低于采纳线、且框图整体
+        # 偏暗时，按目标均值伽马提亮后再分类一次，置信度更高者胜出。提亮
+        # 只作用于内存中的框图副本（原图永不修改）；两次分类共享同一地理
+        # 候选集，差异只来自图像本身。
+        # V5.9: brightened-crop retry. When the first pass has no candidate
+        # or a top-1 under the adoption line on a dark crop, classify a
+        # gamma-brightened copy once more; the higher confidence wins. The
+        # brightening touches only the in-memory copy (originals are never
+        # modified); both passes share the same geo candidate set, so any
+        # difference comes from the image alone.
+        if dark_retry_conf is not None:
+            from tools.tone_curve import (
+                DEFAULT_DARK_MEAN, DEFAULT_MIN_GAMMA,
+                compute_brighten_gamma, mean_luma_pil,
             )
-            result["geo_info"] = {
-                "enabled": tier != TIER_NONE,
-                "tier": tier,
-                "species_count": count,
-                "country_code": effective_region,
-            }
-        else:
-            results = predict_bird(
-                image,
-                top_k=top_k,
-                species_class_ids=None,
-                is_yolo_cropped=is_yolo_cropped,
-                name_format=name_format,
-                photo_country_code=photo_country_code,
-            )
-            result["geo_info"] = {
-                "enabled": False,
-                "tier": TIER_NONE,
-                "species_count": None,
-                "country_code": None,
-            }
+            _top_conf = (float(results[0].get("confidence") or 0.0)
+                         if results else None)
+            _needs_retry = (_top_conf is None
+                            or _top_conf < float(dark_retry_conf))
+            if _needs_retry:
+                _crop_mean = mean_luma_pil(image)
+                if 0 <= _crop_mean < DEFAULT_DARK_MEAN:
+                    _gamma = compute_brighten_gamma(
+                        _crop_mean, min_gamma=DEFAULT_MIN_GAMMA)
+                    if _gamma < 1.0:
+                        # PIL point() 对多通道图要求「每通道各 256 项」的
+                        # 表，同一 LUT 平铺三份即各通道同表提亮，不改变
+                        # 色相平衡，与预览提亮同一套数学。
+                        # PIL point() needs 256 entries PER BAND for
+                        # multi-band images; tiling the same LUT three
+                        # times brightens every channel identically —
+                        # hue balance preserved, same math as the
+                        # preview brightening.
+                        lut = np.array(
+                            [((i / 255.0) ** _gamma) * 255.0
+                             for i in range(256)],
+                            dtype=np.uint8,
+                        )
+                        # point() 的 LUT 长度按通道数校验，先归一到 RGB，
+                        # 防御 RGBA/L 等非常规模式（正常链路均为 RGB 框图）。
+                        # point() validates the LUT length against the band
+                        # count; normalize to RGB first to be safe against
+                        # exotic modes (the normal path always sees RGB
+                        # crops).
+                        _retry_src = (image if image.mode == "RGB"
+                                      else image.convert("RGB"))
+                        _bright = _retry_src.point(np.tile(lut, 3).tolist())
+                        _b_results, _b_geo = _classify_once(_bright)
+                        _b_conf = (float(_b_results[0].get("confidence") or 0.0)
+                                   if _b_results else -1.0)
+                        _o_conf = (_top_conf if _top_conf is not None
+                                   else -1.0)
+                        if _b_conf > _o_conf:
+                            results = _b_results
+                            result["brightened_retry"] = {
+                                "orig_conf": (_top_conf
+                                              if _top_conf is not None
+                                              else None),
+                                "bright_conf": _b_conf,
+                                "crop_mean": _crop_mean,
+                                "gamma": _gamma,
+                            }
+                            result["brightened_crop"] = _bright
 
         # 人工定种白名单：用户核定的易混种对（欧亚喜鹊→喜鹊等）在此出口
         # 统一替换。放最后一层是为了让主鸟采纳、多鸟行、视频封面、补种

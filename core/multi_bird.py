@@ -157,6 +157,7 @@ def classify_secondary_birds(
     name_format: Optional[str] = None,
     identify_fn=None,
     classify: bool = True,
+    dark_retry_conf: Optional[float] = None,
 ) -> List[dict]:
     """
     对多鸟照片的每个检测框生成 bird_detections 行（含逐鸟分类）。
@@ -188,6 +189,9 @@ def classify_secondary_birds(
         与主鸟 identify_bird 相同的地理过滤与命名参数
     identify_fn: 依赖注入的 identify_bird（测试可替换；None 则现场导入）
     classify (bool): True=逐鸟分类（默认）；False=仅落库几何行不推理
+    dark_retry_conf (Optional[float]): 暗框提亮重识别置信度线（0-100），
+        透传给 identify_fn；None=关闭。注入的 identify_fn 若为不支持该
+        参数的测试替身，会自动降级为不传，避免测试面破裂。
 
     返回:
     List[dict]: bird_detections 行（DETECTION_COLUMNS 键），按检测 idx 排序；
@@ -227,6 +231,21 @@ def classify_secondary_birds(
 
     rows: List[dict] = []
     from tools.image_crop import smart_square_crop
+
+    # V5.9: 注入的 identify_fn 可能是不认识 dark_retry_conf 的测试替身；
+    # 签名探测一次决定是否传参，避免逐鸟调用 TypeError。
+    # V5.9: an injected identify_fn may be a test double unaware of
+    # dark_retry_conf; probe the signature once instead of catching
+    # TypeError per bird.
+    _fn_supports_retry = False
+    if dark_retry_conf is not None and identify_fn is not None:
+        import inspect
+        try:
+            _fn_supports_retry = (
+                'dark_retry_conf'
+                in inspect.signature(identify_fn).parameters)
+        except (TypeError, ValueError):
+            _fn_supports_retry = False
 
     for bird in all_birds:
         bbox_proc = bird.get('bbox')
@@ -295,6 +314,9 @@ def classify_secondary_birds(
                 padding_ratio=_BIRDID_PADDING_RATIO)
             pil_crop = Image.fromarray(
                 cv2.cvtColor(square_bgr, cv2.COLOR_BGR2RGB))
+            _identify_kwargs = {}
+            if dark_retry_conf is not None and _fn_supports_retry:
+                _identify_kwargs['dark_retry_conf'] = dark_retry_conf
             result = identify_fn(
                 photo_path,           # image_path：读 GPS/地理过滤
                 False,                # use_yolo：已按框裁剪，跳过内部复检
@@ -305,6 +327,7 @@ def classify_secondary_birds(
                 1,                    # top_k
                 name_format,
                 pil_crop,             # preloaded_crop
+                **_identify_kwargs,
             )
         except Exception:
             continue

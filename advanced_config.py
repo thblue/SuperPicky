@@ -38,6 +38,15 @@ class AdvancedConfig:
         # 鸟种识别设置 V4.2
         "birdid_confidence": 40,      # 识别置信度阈值 (30-95) - 低于此值不写入EXIF。40=工作流定档（2026-09-12 用户定档，50 漏掉临界柳莺/山雀）
 
+        # V5.9: 预览自动提亮（暗片自愈）。RAW 转换出的内嵌预览若整体欠曝
+        # （逆光/林荫/晨昏猛禽），自动按目标均值做幂律伽马提亮——只写
+        # .superpicky/cache 可再生缓存，亮度护栏保证幂等不叠加；关掉后
+        # 恢复原始暗预览（删除缓存 jpg 同样回退）。
+        # V5.9: auto-brighten dark RAW previews with a target-mean gamma
+        # (cache-only, idempotent by luma guard). Turn off or delete the
+        # cached JPEG to fall back to the original dark rendition.
+        "preview_auto_brighten": True,
+
         # 输出设置
         "save_csv": True,           # 是否保存CSV报告
         "log_level": "detailed",    # 日志详细程度: "simple" | "detailed"
@@ -356,6 +365,14 @@ class AdvancedConfig:
     @property
     def birdid_confidence(self):
         return self.config.get("birdid_confidence", 40)
+
+    @property
+    def preview_auto_brighten(self):
+        """V5.9: 暗预览自动提亮开关（默认开，见默认配置内注释）。
+
+        V5.9: dark-preview auto-brightening switch (default on).
+        """
+        return self.config.get("preview_auto_brighten", True)
 
     @property
     def save_csv(self):

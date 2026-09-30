@@ -53,6 +53,19 @@ and everything runs about 30% faster.
     "Delete Permanently" removes selected photos for real — it works on NAS
     drives, where the recycle bin doesn't — together with their paired JPEGs,
     companion videos, sidecar JSON, preview caches and database records.
+18. **Dark shots brighten themselves.** Camera-embedded RAW previews are
+    scene-metered, so backlit raptors and shaded forest birds used to come out
+    globally underexposed: black thumbnails, missing keypoints, zero sharpness,
+    and species IDs rejected for darkness. Dark previews are now auto-brightened
+    to a target mean with a power-law gamma at conversion time (idempotent,
+    cache-only — delete the cached JPEG to get the original rendition back, or
+    turn off `preview_auto_brighten` in advanced settings). On top of that, when
+    a detected bird box is still too dark to clear the species adoption line,
+    the high-res crop is brightened in memory and classified once more; the
+    higher-confidence result wins, the log notes the old→new confidence, and the
+    brightened crop is saved to `.superpicky/cache/crop_debug/<name>_bright.jpg`
+    for review. The DPP-gamma workflow is untouched and no longer stacks on top
+    of the auto brightening.
 
 ## Before you upgrade
 
@@ -63,6 +76,11 @@ and everything runs about 30% faster.
 - **"Delete Permanently" is forever.** It bypasses the recycle bin (the only
   option on NAS shares) and cannot be undone. The keyboard delete and fullscreen
   delete still move files to the trash as before.
+- **Dark RAW previews get brightened in the cache.** Batches shot against the
+  light or in shade will show brighter thumbnails and may gain stars/IDs for the
+  same files — the measurement now sees a lifted image. Delete a photo's cached
+  preview JPEG (or turn off `preview_auto_brighten`) to compare against the
+  original rendition; nothing outside `.superpicky/cache` is ever modified.
 - **Colour labels changed.** Flight is now **blue** (was green), critical focus is
   **green** (was red), and soft photos are **red**. If you built Lightroom smart
   collections on "green means flying", change them to blue.

@@ -3,6 +3,9 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from typing import Optional
+
+import numpy as np
 import rawpy
 import imageio
 from .utils import log_message
@@ -46,7 +49,173 @@ def _extract_binary_via_exiftool_cli(raw_file_path, tag):
         raise RuntimeError(stderr_text or f"ExifTool exited with code {result.returncode}")
     return result.stdout
 
-def raw_to_jpeg(raw_file_path):
+# V5.9: 伽马数学收敛到 tools/tone_curve 单一实现（find_bird_util 预览提亮与
+# birdid 暗框重识别共用），此处按旧名再导出保持兼容。
+# V5.9: the gamma math lives in tools/tone_curve as the single
+# implementation (shared by preview brightening here and the BirdID
+# dark-crop retry); re-exported under the historical names.
+from tools.tone_curve import (  # noqa: E402,F401
+    DEFAULT_DARK_MEAN as PREVIEW_DARK_MEAN,
+    DEFAULT_MIN_GAMMA as PREVIEW_MIN_GAMMA,
+    DEFAULT_TARGET_MEAN as PREVIEW_TARGET_MEAN,
+    compute_brighten_gamma,
+)
+
+
+def preview_mean_luma(jpg_path: str) -> float:
+    """
+    快速估算预览 JPEG 的平均亮度（Rec.601 灰度均值，0-255）。
+
+    用 PIL draft 模式按 1/8 解码（libjpeg DCT 缩放），3200x2400 预览
+    只需约 10ms，避免整幅解码拖慢大批量转换。
+
+    Estimate the mean luma (Rec.601 gray mean, 0-255) of a preview JPEG
+    quickly via PIL's draft mode (1/8 DCT downscale), ~10ms for a
+    3200x2400 preview instead of a full decode.
+
+    参数 / Parameters:
+        jpg_path (str): JPEG 文件路径 / path to the JPEG file.
+
+    返回 / Returns:
+        float: 平均亮度；解码失败返回 -1.0 / mean luma, or -1.0 on failure.
+    """
+    try:
+        from PIL import Image
+        with Image.open(jpg_path) as im:
+            im.draft("L", (512, 512))  # 1/2..1/8 解码，仅影响精度不影响方向
+            gray = im.convert("L")
+            import numpy as _np
+            return float(_np.asarray(gray, dtype=_np.float32).mean())
+    except Exception:
+        return -1.0
+
+
+def brighten_preview_if_dark(
+    jpg_path: str,
+    directory_path: Optional[str] = None,
+    dark_mean: float = PREVIEW_DARK_MEAN,
+    target_mean: float = PREVIEW_TARGET_MEAN,
+) -> Optional[float]:
+    """
+    暗预览原地提亮：均值低于 dark_mean 时套目标均值伽马 LUT 后重写同一文件。
+
+    幂等性由亮度护栏保证：提亮后均值落在 [target 附近, 上限] 区间（约
+    105-120），再跑时均值 ≥ dark_mean 直接跳过，不会叠加。可回退性：只写
+    .superpicky/cache 里的可再生预览，删除缓存 jpg 即自动重生原始版；绝不
+    接触 RAW 本体或成对 JPG 等用户文件。
+
+    Brighten a dark preview in place: when its mean luma is below
+    dark_mean, a target-mean gamma LUT is applied and the same file is
+    rewritten. Idempotent by the luma guard — a brightened preview lands
+    around the target mean and is skipped on re-runs, so lifts never
+    stack. Reversible: only the regenerable .superpicky/cache preview is
+    touched; deleting the cached JPEG regenerates the original rendition.
+    RAW files and paired user JPEGs are never modified.
+
+    参数 / Parameters:
+        jpg_path (str): 预览 JPEG 路径（应位于 .superpicky/cache 内）
+                        / preview JPEG path (expected inside .superpicky/cache).
+        directory_path (Optional[str]): 日志归属目录 / dir for log context.
+        dark_mean (float): 暗片判定均值 / dark threshold on mean luma.
+        target_mean (float): 提亮目标均值 / target mean after brightening.
+
+    返回 / Returns:
+        Optional[float]: 应用了提亮时返回提亮后的均值；未触发或失败返回
+                         None / post-brighten mean when applied, else None.
+    """
+    if not jpg_path or not os.path.exists(jpg_path):
+        return None
+    mean = preview_mean_luma(jpg_path)
+    if mean < 0 or mean >= dark_mean:
+        return None
+    gamma = compute_brighten_gamma(mean, target_mean)
+    if gamma >= 1.0:
+        return None
+    try:
+        import cv2
+
+        from tools.tone_curve import build_gamma_lut
+        img = cv2.imread(jpg_path, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        cv2.imwrite(jpg_path, cv2.LUT(img, build_gamma_lut(gamma)),
+                    [cv2.IMWRITE_JPEG_QUALITY, 92])
+        new_mean = preview_mean_luma(jpg_path)
+        log_message(
+            f"BRIGHTEN, {os.path.basename(jpg_path)}: mean {mean:.0f} -> "
+            f"{new_mean:.0f} (gamma {gamma:.2f})",
+            directory_path)
+        return new_mean
+    except Exception as e:
+        log_message(f"ERROR, brighten preview failed [{jpg_path}]: {e}",
+                    directory_path)
+        return None
+
+
+def _auto_brighten_enabled(flag: Optional[bool]) -> bool:
+    """
+    解析 auto_brighten 参数：显式指定优先，否则读高级配置开关。
+
+    Resolve the auto_brighten flag: an explicit argument wins; otherwise
+    fall back to the advanced-config switch (preview_auto_brighten).
+
+    参数 / Parameters:
+        flag (Optional[bool]): 调用方显式开关（None=跟随配置）/ explicit
+                               flag, None to follow config.
+
+    返回 / Returns:
+        bool: 是否启用自动提亮 / whether auto brightening is enabled.
+    """
+    if flag is not None:
+        return bool(flag)
+    try:
+        from advanced_config import get_advanced_config
+        return bool(get_advanced_config().preview_auto_brighten)
+    except Exception:
+        return True
+
+
+def raw_to_jpeg(raw_file_path, auto_brighten: Optional[bool] = None):
+    """
+    RAW → 预览 JPEG 转换（缓存优先），并可按配置对暗预览做自动提亮。
+
+    提亮只作用于 .superpicky/cache 预览缓存（可再生的应用自管文件），
+    由亮度护栏保证幂等（见 brighten_preview_if_dark）。DPP 伽马工作流
+    （refresh_gamma_previews）需要「原始渲染 + DPP LUT」，必须传
+    auto_brighten=False，否则会在提亮版上叠加 LUT 造成双重提亮。
+
+    Convert a RAW file to a preview JPEG (cache-first), optionally
+    auto-brightening dark previews per config. Brightening only touches
+    the regenerable .superpicky/cache preview and is idempotent via the
+    luma guard (see brighten_preview_if_dark). The DPP-gamma workflow
+    (refresh_gamma_previews) needs the ORIGINAL rendition before its own
+    LUT and must pass auto_brighten=False, otherwise the LUT would stack
+    on an already-brightened preview.
+
+    参数 / Parameters:
+        raw_file_path (str): RAW 文件路径 / path to the RAW file.
+        auto_brighten (Optional[bool]): 显式开关（None=跟随高级配置
+            preview_auto_brighten）/ explicit flag, None to follow config.
+
+    返回 / Returns:
+        str: 预览 JPEG 完整路径；失败返回 None / preview path, or None.
+    """
+    jpg_file_path = _raw_to_jpeg_extract(raw_file_path)
+    if jpg_file_path and _auto_brighten_enabled(auto_brighten):
+        try:
+            brighten_preview_if_dark(
+                jpg_file_path, os.path.dirname(raw_file_path))
+        except Exception:
+            pass  # 提亮是增强步骤，绝不阻断转换主流程 / best effort only
+    return jpg_file_path
+
+
+def _raw_to_jpeg_extract(raw_file_path):
+    """RAW → 预览 JPEG 的原始提取实现（不含提亮，见 raw_to_jpeg）。
+
+    Raw preview extraction implementation without brightening; see
+    raw_to_jpeg for the public entry.
+    """
     filename = os.path.basename(raw_file_path)
     file_prefix, file_ext = os.path.splitext(filename)
     directory_path = os.path.dirname(raw_file_path)

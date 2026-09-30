@@ -179,12 +179,18 @@ def main() -> int:
                              'temp_preview', prefix + '.jpg')
         raw = os.path.join(root, prefix + '.CR3')
         # 幂等保证：先删缓存从 CR3 重抽原始预览，避免在已提亮的图上
-        # 二次应用 LUT（重复运行不会叠加提亮）。
+        # 二次应用 LUT（重复运行不会叠加提亮）。auto_brighten=False 必须
+        # 显式传：V5.9 起 raw_to_jpeg 默认会给暗预览做目标均值提亮，这里
+        # 的语义是「原始渲染 + DPP LUT」，叠加自动提亮会双重变亮。
         # Idempotency: always re-extract the original preview from the CR3
         # so re-running never stacks the brightening on an edited cache.
+        # auto_brighten=False is REQUIRED: since V5.9 raw_to_jpeg
+        # auto-brightens dark previews by default, while this script's
+        # contract is "original rendition + DPP LUT" — stacking the auto
+        # gamma would double-brighten.
         if os.path.exists(cache):
             os.remove(cache)
-        if raw_to_jpeg(raw) is None:
+        if raw_to_jpeg(raw, auto_brighten=False) is None:
             print(f"  {prefix}: 预览生成失败，跳过")
             continue
         before = read_bgr(cache)

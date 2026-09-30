@@ -1292,6 +1292,11 @@ class PhotoProcessor:
                         1,      # top_k
                         nf,     # name_format
                         bird_crop_pil,  # preloaded_crop
+                        # V5.9: 暗框提亮重识别——采纳线以下且鸟框偏暗时
+                        # 自动提亮重试一次（见 identify_bird.dark_retry_conf）
+                        # V5.9: brightened retry for dark crops below the
+                        # adoption line (see identify_bird.dark_retry_conf)
+                        dark_retry_conf=self.settings.birdid_confidence_threshold,
                     )
                     # V5.0(multibird): 多鸟照片在同一 future 里接着做逐鸟分类，
                     # 结果挂在返回 dict 上由 apply_birdid_result 统一落库。
@@ -1359,6 +1364,10 @@ class PhotoProcessor:
                                     region_code=self.settings.birdid_region_code,
                                     name_format=nf,
                                     identify_fn=identify_bird_fn,
+                                    # V5.9: 次要鸟同样吃暗框提亮重识别
+                                    # V5.9: secondary birds get the
+                                    # brightened retry too
+                                    dark_retry_conf=self.settings.birdid_confidence_threshold,
                                 )
                                 # V5.1: 焦点未命中（fallback）时综合重选主鸟
                                 # ——稀有优先，其次大而清晰。
@@ -1570,6 +1579,44 @@ class PhotoProcessor:
                     tier_idx = gbif_score_to_tier(gbif_rarity_100)
                     is_zh = not self.i18n.current_lang.startswith('en')
                     tier_suffix = f"  {tier_icon(tier_idx)} {tier_name(tier_idx, is_zh=is_zh)}"
+
+                # V5.9: 暗框提亮重识别命中时，日志标注新旧置信度，并把
+                # 提亮后的框图存进 crop_debug（<前缀>_bright.jpg）供人工
+                # 复核鸟种——缩略图链路（temp_preview）的提亮由转换层
+                # （raw_to_jpeg 自动提亮）负责，这里只存鸟框。
+                # V5.9: when the brightened retry won, annotate the log
+                # with old/new confidence and persist the brightened crop
+                # to crop_debug (<prefix>_bright.jpg) for manual review.
+                # Thumbnail-side brightening is the conversion layer's job
+                # (raw_to_jpeg auto brighten); only the bird crop is
+                # saved here.
+                _retry_info = birdid_result.get('brightened_retry')
+                if _retry_info:
+                    bird_log += self.i18n.t(
+                        "logs.birdid_brightened_suffix",
+                        orig=float(_retry_info.get('orig_conf') or 0),
+                        bright=float(_retry_info.get('bright_conf') or 0),
+                    )
+                    _bright_crop = birdid_result.get('brightened_crop')
+                    if _bright_crop is not None:
+                        try:
+                            _bright_dir = os.path.join(
+                                self.dir_path, ".superpicky", "cache",
+                                "crop_debug")
+                            ensure_hidden_directory(os.path.join(
+                                self.dir_path, ".superpicky"))
+                            os.makedirs(_bright_dir, exist_ok=True)
+                            _bright_path = os.path.join(
+                                _bright_dir, f"{file_prefix}_bright.jpg")
+                            _bright_crop.convert("RGB").save(
+                                _bright_path, "JPEG", quality=92)
+                            self._log(self.i18n.t(
+                                "logs.birdid_bright_crop_saved",
+                                path=_bright_path), "species")
+                        except Exception as _br_e:
+                            self._log(
+                                f"  ⚠️ Bright crop save failed "
+                                f"[{file_prefix}]: {_br_e}", "warning")
 
                 self._log(f"  🐦 Bird ID [{source_display}]: {bird_log} ({birdid_confidence:.0f}%){tier_suffix}", "species")
 

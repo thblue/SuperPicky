@@ -311,6 +311,8 @@
     "birdid_fallback_model": "[BirdID] 回退使用 birdid2024 模型",
     "birdid_waiting": "⏳ 正在等待剩余 BirdID 识别结果 ({count} 个任务)...",
     "birdid_low_confidence": "  🐦 Low confidence [{source}]: {name} ({confidence:.0f}% < {threshold}%)",
+    "birdid_brightened_suffix": "（暗框提亮重识别 {orig:.0f}%→{bright:.0f}%）",
+    "birdid_bright_crop_saved": "  🔆 亮框缩略图已保存: {path}",
     "mps_cache_cleared": "  🧹 [第{index}张] MPS 显存已清理",
     "cuda_cache_cleared": "  🧹 [第{index}张] CUDA 显存已清理",
     "db_load_failed": "数据库加载失败: {e}",

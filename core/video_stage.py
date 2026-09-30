@@ -194,6 +194,10 @@ def _identify_cover(
             settings.birdid_region_code,
             1,      # top_k
             nf,     # name_format
+            # V5.9: 暗封面（夜鹭/晨昏视频）同样吃暗框提亮重识别。
+            # V5.9: dark covers (night/dawn footage) get the brightened
+            # retry as well.
+            dark_retry_conf=settings.birdid_confidence_threshold,
         )
     except Exception as e:
         log(f"  ⚠️ Video cover BirdID failed [{os.path.basename(cover_path)}]: {e}",

@@ -390,43 +390,33 @@ def _rescue_scan(model, image: np.ndarray, accept_conf: float,
     return None
 
 
-def _rescue_tile_scan(model, image_path: str,
-                      proc_hw: Tuple[int, int]) -> Optional[tuple]:
+def _tile_plan(fw: int, fh: int, tile: int, overlap: float,
+               max_tiles: int, no_gap: bool) -> Tuple[list, list, int]:
     """
-    瓦片检测原语（V5.7 引入，V5.8 起由 _tile_detect_pass 调用）。
+    瓦片网格规划（V5.9.6 从 _rescue_tile_scan 抽出为纯函数）。
 
-    把原图按 RESCUE_TILE_SIZE 边长、RESCUE_TILE_OVERLAP 重叠的瓦片网格
-    逐块推理（imgsz=RESCUE_TILE_IMGSZ，与瓦片边长一致 → 长边 1:1 不缩放，
-    小目标保持原生像素量级），框坐标偏移回全图后做跨瓦贪心 IoU 去重
-    （重叠区里同一只鸟只留一框），最后按预处理图/原图比例映射回预处理图
-    坐标系。只做检测与坐标归一，不过滤、不识别——门槛在 _tile_detect_pass。
+    起点覆盖整轴（0, step, 2*step...，末尾对齐边界）；瓦数超上限时放大
+    步长压缩数量。no_gap=True 时步长钳制在 tile-16 以内——绝不产生覆盖
+    缝隙（常规档允许 step>tile 的缝隙换瓦数；细瓦档必须无缝）。
 
-    资源约束：瓦片数超 RESCUE_TILE_MAX_TILES 时自动放大步长（减小重叠）
-    压缩到上限内；掩码不跨瓦合并（各瓦掩码网格彼此独立），统一返回
-    None——救回框多边形可由调用方确定性重算，不影响入库。
+    Tile-grid planning as a pure function (extracted V5.9.6). Starts cover
+    each axis end-aligned; stride expands when over the tile cap. With
+    no_gap=True the stride is clamped to tile-16 — coverage gaps are
+    impossible (the regular tier may trade gaps for tile count; the fine
+    tier must not).
 
-    参数:
-    model: YOLO 模型实例（调用方已持有 yolo_infer_lock）
-    image_path (str): 预览图文件路径（内嵌全分辨率 JPEG）
-    proc_hw (Tuple[int, int]): 预处理图 (height, width)，返回坐标目标系
+    参数 / Parameters:
+        fw / fh (int): 原图宽高 / full image width/height.
+        tile (int): 瓦片边长 / tile edge.
+        overlap (float): 相邻瓦重叠比例 / overlap ratio (0-0.5).
+        max_tiles (int): 瓦数上限 / tile count cap.
+        no_gap (bool): 步长是否钳制 ≤ tile-16 / clamp stride, no gaps.
 
-    返回:
-    Optional[tuple]: (xyxy(N,4), confs(N,), clss(N,), None)；无候选或
-                     小图（长边 <= 瓦片边长，阶段 1 已覆盖）返回 None
-
-    Stage 2: tiled full-resolution scan. Runs YOLO per overlapping tile
-    at native resolution, dedupes boxes across tiles with greedy IoU NMS,
-    then maps coordinates back into the preprocessed frame. Mask data is
-    not merged across tiles (None).
+    返回 / Returns:
+        Tuple[list, list, int]: (x 起点, y 起点, 最终步长) /
+        (x starts, y starts, final stride).
     """
-    full = read_image_bgr(image_path)
-    if full is None:
-        return None
-    fh, fw = full.shape[:2]
-    tile = max(256, int(config.ai.RESCUE_TILE_SIZE))
-    if max(fh, fw) <= tile:
-        return None
-    overlap = min(0.5, max(0.0, float(config.ai.RESCUE_TILE_OVERLAP)))
+    overlap = min(0.5, max(0.0, float(overlap)))
     step = max(32, int(tile * (1.0 - overlap)))
 
     def _starts(total: int, cur_step: int) -> list:
@@ -440,21 +430,89 @@ def _rescue_tile_scan(model, image_path: str,
         return starts
 
     xs, ys = _starts(fw, step), _starts(fh, step)
-    max_tiles = max(1, int(config.ai.RESCUE_TILE_MAX_TILES))
-    while len(xs) * len(ys) > max_tiles and step < max(fh, fw):
-        step = int(step * 1.5) + 1
+    step_ceiling = max(1, tile - 16) if no_gap else max(fw, fh)
+    while len(xs) * len(ys) > max_tiles and step < step_ceiling:
+        step = min(int(step * 1.5) + 1, step_ceiling)
         xs, ys = _starts(fw, step), _starts(fh, step)
+    return xs, ys, step
+
+
+def _rescue_tile_scan(model, image_path: str,
+                      proc_hw: Tuple[int, int],
+                      tile_size: Optional[int] = None,
+                      imgsz: Optional[int] = None,
+                      max_tiles_limit: Optional[int] = None,
+                      overlap_ratio: Optional[float] = None,
+                      no_gap: bool = False) -> Optional[tuple]:
+    """
+    瓦片检测原语（V5.7 引入，V5.8 起由 _tile_detect_pass 调用）。
+
+    把原图按 RESCUE_TILE_SIZE 边长、RESCUE_TILE_OVERLAP 重叠的瓦片网格
+    逐块推理（imgsz=RESCUE_TILE_IMGSZ，与瓦片边长一致 → 长边 1:1 不缩放，
+    小目标保持原生像素量级），框坐标偏移回全图后做跨瓦贪心 IoU 去重
+    （重叠区里同一只鸟只留一框），最后按预处理图/原图比例映射回预处理图
+    坐标系。只做检测与坐标归一，不过滤、不识别——门槛在 _tile_detect_pass。
+
+    资源约束：瓦片数超 RESCUE_TILE_MAX_TILES 时自动放大步长（减小重叠）
+    压缩到上限内；掩码不跨瓦合并（各瓦掩码网格彼此独立），统一返回
+    None——救回框多边形可由调用方确定性重算，不影响入库。
+
+    V5.9.6: 参数化以支撑细瓦档（tile_size/imgsz/max_tiles_limit/
+    overlap_ratio 覆盖，默认回落常规档常量，行为不变）；no_gap=True 时
+    步长放大被钳制在 tile-16 以内——**绝不产生覆盖缝隙**（常规档允许
+    step>tile 的缝隙，细瓦档不允许）。
+
+    参数:
+    model: YOLO 模型实例（调用方已持有 yolo_infer_lock）
+    image_path (str): 预览图文件路径（内嵌全分辨率 JPEG）
+    proc_hw (Tuple[int, int]): 预处理图 (height, width)，返回坐标目标系
+    tile_size (Optional[int]): 瓦片边长覆盖（None=RESCUE_TILE_SIZE）
+    imgsz (Optional[int]): 推理分辨率覆盖（None=RESCUE_TILE_IMGSZ）
+    max_tiles_limit (Optional[int]): 瓦数上限覆盖（None=RESCUE_TILE_MAX_TILES）
+    overlap_ratio (Optional[float]): 重叠比例覆盖（None=RESCUE_TILE_OVERLAP）
+    no_gap (bool): True=步长钳制 ≤ tile-16（无缝保证）
+
+    返回:
+    Optional[tuple]: (xyxy(N,4), confs(N,), clss(N,), None)；无候选或
+                     小图（长边 <= 瓦片边长，阶段 1 已覆盖）返回 None
+
+    Stage 2: tiled full-resolution scan. Runs YOLO per overlapping tile
+    at native resolution, dedupes boxes across tiles with greedy IoU NMS,
+    then maps coordinates back into the preprocessed frame. Mask data is
+    not merged across tiles (None). Parameterized in V5.9.6 for the fine
+    tier; defaults keep the regular tier's behavior unchanged, and
+    no_gap=True clamps stride expansion so coverage gaps are impossible.
+    """
+    full = read_image_bgr(image_path)
+    if full is None:
+        return None
+    fh, fw = full.shape[:2]
+    tile = max(256, int(tile_size if tile_size is not None
+                        else config.ai.RESCUE_TILE_SIZE))
+    if max(fh, fw) <= tile:
+        return None
+    max_tiles = max(1, int(max_tiles_limit if max_tiles_limit is not None
+                           else config.ai.RESCUE_TILE_MAX_TILES))
+    # V5.9.6: 网格规划抽到 _tile_plan 纯函数（no_gap 时步长钳制 ≤ tile-16，
+    # 常规档保持旧行为——允许 step>tile 的缝隙换瓦数）
+    xs, ys, _step = _tile_plan(
+        fw, fh, tile,
+        (overlap_ratio if overlap_ratio is not None
+         else config.ai.RESCUE_TILE_OVERLAP),
+        max_tiles, no_gap)
 
     from config import get_best_device
     device = get_best_device()
     xyxy_parts, conf_parts, cls_parts = [], [], []
+    infer_imgsz = int(imgsz if imgsz is not None
+                      else config.ai.RESCUE_TILE_IMGSZ)
     for y0 in ys:
         for x0 in xs:
             th, tw = min(tile, fh - y0), min(tile, fw - x0)
             tile_img = full[y0:y0 + th, x0:x0 + tw]
             try:
                 results = model(tile_img,
-                                imgsz=config.ai.RESCUE_TILE_IMGSZ,
+                                imgsz=infer_imgsz,
                                 conf=config.ai.RESCUE_CONF,
                                 device=device.type, verbose=False)
             except Exception:
@@ -486,11 +544,87 @@ def _rescue_tile_scan(model, image_path: str,
     return detections, confidences, class_ids, None
 
 
+def _fine_tile_needed(image_path: str, dir) -> bool:
+    """
+    细瓦档触发判据（V5.9.6）：本片经 Layer A 提亮且提亮后仍是低对比。
+
+    两个条件同时满足才触发：
+    1. 存在 <前缀>_dark.jpg 伴随缓存 —— 本片是暗片、预览已被提亮覆盖
+       （原始内嵌渲染被另存）；正常亮片与平坦雾片（均值≥90 不走暗片
+       路径）天然不满足；
+    2. 提亮后 p95 < FINE_TILE_P95 —— 提亮打满倍率上限仍拉不出高光的
+       极端片。实测标本（2026-10-01 乐活中堤 ORF）：原始 mean 17.7、
+       ×8 打满后 p95=127；正常暗片提亮后 p95 通常 160+。
+
+    Fine-tier trigger (V5.9.6): the frame was Layer-A brightened (a
+    <prefix>_dark.jpg sidecar exists) AND the lifted preview stays
+    low-contrast (p95 < FINE_TILE_P95).
+
+    参数 / Parameters:
+        image_path (str): 预览图路径 / preview path.
+        dir (str): 日志目录 / log directory.
+
+    返回 / Returns:
+        bool: 是否触发细瓦档 / whether to run the fine tile tier.
+    """
+    try:
+        base, _ext = os.path.splitext(image_path)
+        if not os.path.exists(base + "_dark.jpg"):
+            return False
+        from tools.find_bird_util import preview_tone_stats
+        p95 = preview_tone_stats(image_path)["p95"]
+        if 0 <= p95 < config.ai.FINE_TILE_P95:
+            log_message(
+                f"  🔬 Fine-tile tier on {os.path.basename(image_path)}: "
+                f"lifted-dark low contrast (p95={p95:.0f} < "
+                f"{config.ai.FINE_TILE_P95:.0f}), scanning 640px tiles "
+                f"[极端暗片细瓦档触发]", dir)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _merge_tile_candidates(a: Optional[tuple],
+                           b: Optional[tuple]) -> Optional[tuple]:
+    """
+    合并两档瓦片扫描的候选并跨档 IoU 去重（V5.9.6）。
+
+    各档内部已做过跨瓦去重；合并后同一只鸟可能被两档各报一次（2048 档
+    与 640 档都能看见的中等目标），再过一次贪心 IoU NMS 只留置信度
+    最高框，与档内去重同一口径（IoU 0.55）。
+
+    Merge two tile-scan candidate sets with cross-tier greedy IoU dedup
+    (a bird visible to both tiers keeps only its highest-conf box).
+
+    参数 / Parameters:
+        a / b (Optional[tuple]): _rescue_tile_scan 的返回值，任一可为 None
+
+    返回 / Returns:
+        Optional[tuple]: 合并后的 (xyxy, confs, clss, None)；两者皆 None
+                         返回 None / merged tuple, or None if both None.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    det = np.vstack([a[0], b[0]])
+    conf = np.concatenate([a[1], b[1]])
+    cls = np.concatenate([a[2], b[2]])
+    det, conf, cls, _ = _dedupe_bird_boxes(det, conf, cls, None)
+    return (det, conf, cls, None)
+
+
 def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
                       existing_xyxy, birdid_gate: int, dir, i18n) -> list:
     """
     常规瓦片检测（V5.8）：每张照片都在原图瓦片上补找 1024 整图看不见的
     隐蔽小鸟，三重门槛过滤后返回新框。
+
+    V5.9.6 触发式细瓦档：极端暗片（Layer A 提亮过且提亮后仍低对比，
+    判据见 _fine_tile_needed）在常规 2048 档之外追加 640px 无缝细瓦扫描
+    （1:1 原生推理），两档候选合并去重后过同一组门槛——实测标本：
+    146px 小鸟 2048 档 conf<0.03 全链漏检，640 档 conf=0.373。
 
     背景（2026-09-27 乐活中堤）：栗耳鹀/褐柳莺/红喉歌鸲等深度伪装小目标
     在 1024 整图上仅剩 ~30px，低于可检下限，整组漏检；瓦片把有效分辨率
@@ -537,6 +671,25 @@ def _tile_detect_pass(model, image_path: str, proc_image: np.ndarray,
     if not image_path or not config.ai.RESCUE_TILE_ENABLED:
         return []
     arrays = _rescue_tile_scan(model, image_path, proc_image.shape[:2])
+    # V5.9.6: 触发式细瓦档——极端暗片（Layer A 提亮过 + 提亮后仍低对比，
+    # 见 _fine_tile_needed）在常规 2048 档之外追加 640 细瓦扫描（1:1 原生
+    # 推理、步长钳制保证无缝覆盖）；两档候选合并去重后过同一组门槛。
+    # 常规 2048 档零候选（arrays=None）时细瓦档照常运行——ORF 标本的
+    # 小鸟在 2048 档 conf<0.03 全灭，正是细瓦档的目标场景。
+    # V5.9.6: triggered fine tier — extreme-dark frames additionally scan
+    # 640px no-gap tiles; candidates from both tiers merge into the same
+    # gate pipeline. The fine tier still runs when the regular tier found
+    # nothing at all (that is exactly the specimen it exists for).
+    fine_arrays = None
+    if config.ai.FINE_TILE_ENABLED and _fine_tile_needed(image_path, dir):
+        fine_arrays = _rescue_tile_scan(
+            model, image_path, proc_image.shape[:2],
+            tile_size=config.ai.FINE_TILE_SIZE,
+            imgsz=config.ai.FINE_TILE_IMGSZ,
+            max_tiles_limit=config.ai.FINE_TILE_MAX_TILES,
+            overlap_ratio=config.ai.FINE_TILE_OVERLAP,
+            no_gap=True)
+    arrays = _merge_tile_candidates(arrays, fine_arrays)
     if arrays is None:
         return []
     cand_xyxy, cand_confs, cand_clss, _ = arrays

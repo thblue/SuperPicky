@@ -409,6 +409,38 @@ class AIConfig:
     # 0.1-0.2, all vegetation junk at BirdID ~= 1%). Drop to 0.15 (the
     # measured real-bird floor) if a real bird ever loses its row here.
     RESCUE_TILE_UNCONFIRMED_MIN_CONF: float = 0.2
+    # V5.9.6: 触发式细瓦档（极端暗片救援）。判据：本片经 Layer A 提亮
+    # （存在 <前缀>_dark.jpg 伴随缓存）且提亮后仍是低对比（p95 < FINE_TILE_P95）
+    # ——实测标本（2026-10-01 乐活中堤 ORF）：原始 mean 17.7、×8 提亮打满上限
+    # 后 p95=127，146px 小鸟在 2048 瓦片（占比 7%）conf<0.03 全链漏检，
+    # 在 640 瓦片（占比 23%）conf=0.373。正常暗片提亮后 p95 通常 160+，
+    # 平坦雾片无 _dark.jpg（均值≥90 不走暗片路径）天然不触发。
+    # 细瓦独立参数：边长 640 / 20% 重叠（步长 512）保证全覆盖；瓦数超限时
+    # 步长放大但钳制在 tile-16 内——**绝不产生覆盖缝隙**（常规档的步长
+    # 补偿允许 step>tile，细瓦档不允许）。640² 单瓦算力仅 2048² 的 ~1/10，
+    # 整档总算力约为常规档的 1/4，且仅触发片付费。
+    # V5.9.6: triggered fine-tile tier for extreme-dark frames. Trigger:
+    # Layer A brightened this frame (a <prefix>_dark.jpg sidecar exists)
+    # AND the lifted preview stays low-contrast (p95 < FINE_TILE_P95).
+    # Field specimen: mean 17.7 originally, ×8-capped lift to p95=127; a
+    # 146px bird scores <0.03 at 2048 tiles (7% frame share) but 0.373 at
+    # 640 (23% share). Fine tiles keep stride clamped below the edge so
+    # coverage gaps are impossible; per-tile cost is ~1/10 of 2048's.
+    FINE_TILE_ENABLED: bool = True
+    FINE_TILE_SIZE: int = 640        # 细瓦边长（原图像素）/ fine tile edge
+    FINE_TILE_IMGSZ: int = 640       # 细瓦推理分辨率（1:1）/ inference imgsz
+    # V5.9.6a: 重叠 50%（步长 320）——包含性保证：任何 ≤ tile-步长=320px 的
+    # 目标必有一块完整视图。实测教训：20% 重叠（步长 512）时 ORF 标本
+    # 184px 高的鸟恰好跨瓦（y 1477-1661 横跨 1536 步长线），两瓦各见半鸟
+    # conf 只有 0.136（<仅框地板 0.2 被丢），而居中完整视图 conf=0.373。
+    # 5240×3912 画幅下 192 瓦 ≤ 240 上限，步长不被放大，保证完整生效。
+    # V5.9.6a: 50% overlap (stride 320) guarantees any object ≤ 320px is
+    # fully inside at least one tile — the ORF bird (184px) straddled the
+    # 512 stride at 20% overlap and scored 0.136 partial-view vs 0.373
+    # full-view. 192 tiles on a 5240×3912 frame stay under the 240 cap.
+    FINE_TILE_OVERLAP: float = 0.5   # 细瓦重叠比例（步长 320）/ overlap
+    FINE_TILE_MAX_TILES: int = 240   # 细瓦数上限（超出仅放大步长，无缝）/ cap
+    FINE_TILE_P95: float = 135.0     # 触发判据：提亮后 p95 低于此 / trigger p95
     # COCO 中飞鸟常被误认的类别 / COCO classes birds in flight are mistaken for
     RESCUE_CONFUSABLE_CLASS_IDS: dict = field(
         default_factory=lambda: {4: "airplane", 33: "kite"})

@@ -423,3 +423,121 @@ def test_detect_tile_pass_enriches_big_bird_photo(tmp_path, monkeypatch):
     birds = result[10]
     assert birds[0]['bbox'] == (40, 40, 360, 360)   # 大鸟仍为主鸟（conf 最高）
     assert abs(birds[1]['conf'] - 0.45) < 1e-6      # 瓦片新框入列
+
+
+# ============ V5.9.6 触发式细瓦档 / triggered fine tile tier ============
+
+def test_fine_tile_trigger_criterion(tmp_path, monkeypatch):
+    """触发判据：有 _dark.jpg（Layer A 提亮过）且提亮后 p95 < 阈值。
+
+    Trigger requires BOTH a dark sidecar and low post-lift p95."""
+    import os as _os
+
+    import tools.find_bird_util as fbu
+
+    jpg = str(tmp_path / "p.jpg")
+    open(jpg, "w").write("x")
+    monkeypatch.setattr(_os.path, "exists",
+                        lambda p: p.endswith("_dark.jpg"))
+    monkeypatch.setattr(fbu, "preview_tone_stats",
+                        lambda p: {"p95": 100.0, "mean": 90.0,
+                                   "frac_highlight": 0.0})
+    assert ai_model._fine_tile_needed(jpg, str(tmp_path)) is True
+    monkeypatch.setattr(fbu, "preview_tone_stats",
+                        lambda p: {"p95": 160.0, "mean": 90.0,
+                                   "frac_highlight": 0.0})
+    assert ai_model._fine_tile_needed(jpg, str(tmp_path)) is False
+    # 无 _dark.jpg（非暗片/雾片/亮片）→ 不触发
+    monkeypatch.setattr(_os.path, "exists", lambda p: False)
+    monkeypatch.setattr(fbu, "preview_tone_stats",
+                        lambda p: {"p95": 100.0, "mean": 90.0,
+                                   "frac_highlight": 0.0})
+    assert ai_model._fine_tile_needed(jpg, str(tmp_path)) is False
+
+
+def test_tile_plan_no_gap_invariant():
+    """细瓦规划：步长钳制 ≤ tile-16，起点覆盖整轴且无缝。
+
+    The fine-tier plan can never produce coverage gaps."""
+    # ORF 画幅：640 瓦 50% 重叠 → 步长 320（包含性：≤320px 目标必有完整视图）
+    xs, ys, step = ai_model._tile_plan(5240, 3912, 640, 0.5, 240, True)
+    assert step == 320
+    for starts, total in ((xs, 5240), (ys, 3912)):
+        assert starts[0] == 0 and starts[-1] == total - 640
+        assert all(0 < b - a <= 320 for a, b in zip(starts, starts[1:]))
+        assert len(starts) * 1 <= 240
+    # 极端压瓦数：步长放大仍被钳在 624 以内（对比常规档允许 step>tile）
+    xs2, ys2, step2 = ai_model._tile_plan(9504, 6336, 640, 0.2, 24, True)
+    assert step2 <= 640 - 16
+    for starts, total in ((xs2, 9504), (ys2, 6336)):
+        assert starts[0] == 0 and starts[-1] == total - 640
+        assert all(0 < b - a <= 640 - 16 for a, b in zip(starts, starts[1:]))
+    # 常规档（no_gap=False）保持旧行为：步长可超过瓦片边长
+    _, _, step3 = ai_model._tile_plan(5240, 3912, 1024, 0.2, 24, False)
+    assert step3 > 1024
+
+
+def test_merge_tile_candidates_cross_tier_dedup():
+    """跨档合并：同鸟两档各报一框 → 只留置信度最高。"""
+    a = (np.array([[100.0, 100.0, 200.0, 200.0]]),
+         np.array([0.3]), np.array([14]))
+    b = (np.array([[102.0, 102.0, 198.0, 198.0]]),
+         np.array([0.4]), np.array([14]))
+    m = ai_model._merge_tile_candidates(a, b)
+    assert len(m[0]) == 1 and abs(m[1][0] - 0.4) < 1e-6
+    assert ai_model._merge_tile_candidates(None, None) is None
+    assert ai_model._merge_tile_candidates(a, None) is a
+
+
+class _FineOnlyFakeModel:
+    """2048 档瓦片全空（模拟极端暗片大瓦全灭）；仅 ≤1024 的细瓦在
+    包含白色目标块时按内容报鸟（本地坐标从块位置反推）。
+
+    Regular-tier tiles see nothing; small fine tiles report the white
+    patch content-driven (local box recovered from the blob itself)."""
+
+    def __init__(self):
+        self.regular_calls = 0
+        self.fine_calls = 0
+
+    def __call__(self, image, **kwargs):
+        h, w = image.shape[:2]
+        if w > 1024:
+            self.regular_calls += 1
+            return [FakeResult(FakeBoxes(np.zeros((0, 4)), [], []))]
+        self.fine_calls += 1
+        ys_, xs_ = np.where(image[..., 0] > 200)
+        # 只在目标块完整落在瓦内（留 24px 边距）时报鸟——50% 重叠的
+        # 包含性保证让真目标必有这样的完整视图；部分视野不报。
+        # Report only full-view sightings (blob fully inside with margin):
+        # the 50%-overlap containment guarantee provides one for any real
+        # target; partial views stay silent.
+        if (len(xs_) == 0 or xs_.min() < 24 or ys_.min() < 24
+                or xs_.max() > w - 25 or ys_.max() > h - 25):
+            return [FakeResult(FakeBoxes(np.zeros((0, 4)), [], []))]
+        box = [float(xs_.min()), float(ys_.min()),
+               float(xs_.max() + 1), float(ys_.max() + 1)]
+        return [FakeResult(FakeBoxes([box], [0.45], [14]))]
+
+
+def test_tile_pass_fine_tier_catches_hidden_bird(tmp_path, monkeypatch):
+    """V5.9.6: 常规 2048 档零候选 + 触发 → 细瓦档捞回（走同一门槛）。
+
+    Regular tier empty + trigger on → the fine tier rescues the bird
+    through the same gates (ORF specimen scenario)."""
+    jpg = _write_fullres_jpg(tmp_path)
+    monkeypatch.setattr(ai_model, "_fine_tile_needed",
+                        lambda p, d: True)
+    monkeypatch.setattr(ai_model, "_birdid_confirm",
+                        lambda image, xyxy, full_image=None,
+                        xyxy_full=None: ("栗耳鹀", 93.0))
+    model = _FineOnlyFakeModel()
+    boxes = ai_model._tile_detect_pass(model, jpg, IMG43, None, 25,
+                                       ".", None)
+    assert model.regular_calls > 0      # 常规档跑了
+    assert model.fine_calls > 0         # 细瓦档也跑了
+    assert len(boxes) == 1
+    got = [float(v) for v in boxes[0]["xyxy"]]
+    assert all(abs(g - e) < 1.5 for g, e in zip(got, TARGET_PROC))
+    assert abs(boxes[0]["conf"] - 0.45) < 1e-6
+    assert not boxes[0].get("unconfirmed")

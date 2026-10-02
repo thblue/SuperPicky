@@ -35,7 +35,7 @@ from ui.thumbnail_grid import ThumbnailGrid
 from ui.detail_panel import DetailPanel
 from ui.fullscreen_viewer import FullscreenViewer
 from ui.comparison_viewer import ComparisonViewer
-from typing import Optional
+from typing import Callable, Optional
 
 from tools.i18n import get_i18n
 from tools.report_db import ReportDB
@@ -218,10 +218,17 @@ def _trigger_rating_move(
     i18n,
     report_db,
     db_key,
+    on_done: Optional[Callable[[], None]] = None,
 ) -> None:
     """
     在后台线程中执行因改星等引发的文件移动。
     Spawn a daemon thread to move files after a rating change.
+
+    参数:
+    on_done: 移动收尾后的回调（成功、内部跳过或抛异常都会执行），
+             在后台线程运行；用于把涉及目录排入 sidecar 增量重导出
+             队列。必须等移动落定（DB 已写入新 current_path）后再
+             导出，否则导出的 library_path 会停留在移动前旧值。
     """
     from advanced_config import get_advanced_config
     from core.rating_mover import move_photo_on_metadata_change
@@ -237,6 +244,13 @@ def _trigger_rating_move(
         except Exception as e:
             from tools.utils import log_message
             log_message(f"[rating_mover] move failed: {e}")
+        finally:
+            if on_done is not None:
+                try:
+                    on_done()
+                except Exception as e:
+                    from tools.utils import log_message
+                    log_message(f"[rating_mover] post-move callback failed: {e}")
 
     import threading
     threading.Thread(target=_do, daemon=True).start()
@@ -802,7 +816,7 @@ class ResultsBrowserWindow(QMainWindow):
         # UI，完成后经信号回主线程刷新（串行队列防并发重入）
         import threading as _threading
         self._recall_lock = _threading.Lock()
-        self._recall_pending: set = set()
+        self._recall_pending: dict = {}  # {目录: 是否需重算召回} / dir -> recall needed
         self._recall_running: bool = False
         self._recall_rebuild_done.connect(self._on_recall_rebuild_done)
 
@@ -1782,7 +1796,15 @@ class ResultsBrowserWindow(QMainWindow):
         # 后台移动文件（仅已整理的照片；burst / 根目录 / 新旧相同 时内部自动跳过）
         if current_photo:
             base_dir = current_photo.get("_base_dir") or self._directory
-            _trigger_rating_move(base_dir, current_photo, new_rating, self.i18n, self._db, db_key)
+            # 移动收尾后把目录排入 sidecar 增量重导出队列：改星是唯一
+            # 不经过召回重算的人工编辑入口，只补导出、不重算召回（召回
+            # 与星级无关）。挂在移动完成之后，保证导出读到移动后的新
+            # library_path，BirdIndex 才能看到最新星级与位置。
+            _trigger_rating_move(
+                base_dir, current_photo, new_rating, self.i18n, self._db, db_key,
+                on_done=lambda d=base_dir: self._schedule_recall_rebuild(
+                    [d], rebuild_recall=False),
+            )
 
     def _get_photo_file_path(self, photo_or_filename) -> "str | None":
         """根据 photo 或 filename 查找照片绝对路径。"""
@@ -2087,24 +2109,33 @@ class ResultsBrowserWindow(QMainWindow):
         self._refresh_after_edit()
         self._schedule_recall_rebuild([d for d, _f in affected])
 
-    def _schedule_recall_rebuild(self, directories: list):
+    def _schedule_recall_rebuild(self, directories: list,
+                                 rebuild_recall: bool = True):
         """
         目录级召回重算 + 增量导出丢给后台线程（V5.4 性能优化）。
 
         编辑器保存/批量删除后的视图刷新不受 NAS 上全表读取/全量导出
         阻塞；后台完成后经 _recall_rebuild_done 信号回主线程再刷新。
         串行队列：多次触发合并去重，同时最多一个工作线程。
+        改星链路以 rebuild_recall=False 入队——召回与星级无关，只需补
+        sidecar；该路径完成后不回发刷新信号（星级角标已即时更新）。
 
         参数:
         directories (list): 需要重算的照片目录列表（合并视图可多个）
+        rebuild_recall (bool): 是否重算物种召回；False 时仅增量导出 sidecar
 
         Schedule the directory-wide recall rebuild + re-export on a
         background worker; UI refreshes again via signal on completion.
+        Rating-only edits pass rebuild_recall=False to export sidecars
+        without the (rating-independent) recall pass.
         """
         import threading
 
         with self._recall_lock:
-            self._recall_pending.update(directories)
+            # 同目录多来源触发按位或：只要有一个来源要求重算召回就重算
+            for d in directories:
+                self._recall_pending[d] = (
+                    self._recall_pending.get(d, False) or rebuild_recall)
             if self._recall_running:
                 return
             self._recall_running = True
@@ -2112,19 +2143,21 @@ class ResultsBrowserWindow(QMainWindow):
         def _worker():
             while True:
                 with self._recall_lock:
-                    dirs = sorted(self._recall_pending)
+                    pending = dict(self._recall_pending)
                     self._recall_pending.clear()
-                if not dirs:
+                if not pending:
                     with self._recall_lock:
                         self._recall_running = False
                     return
+                ran_recall = any(pending.values())
                 try:
-                    self._rebuild_recall_state(dirs)
+                    self._rebuild_recall_state(pending)
                 except Exception as e:  # noqa: BLE001（后台失败不打断 UI）
                     print(f"⚠️ 后台召回重算失败 / background recall "
                           f"rebuild failed: {e}")
-                # 跨线程信号 → Qt 自动排队到主线程
-                self._recall_rebuild_done.emit()
+                if ran_recall:
+                    # 跨线程信号 → Qt 自动排队到主线程
+                    self._recall_rebuild_done.emit()
 
         threading.Thread(target=_worker, daemon=True,
                          name="recall-rebuild").start()
@@ -2134,17 +2167,17 @@ class ResultsBrowserWindow(QMainWindow):
         """后台召回重算完成：主线程刷新视图（召回标记/标题/清单）。"""
         self._refresh_after_edit()
 
-    def _rebuild_recall_state(self, directories: list):
+    def _rebuild_recall_state(self, pending: dict):
         """
-        召回状态重建：对涉及的每个目录重算物种召回并增量重导出
-        sidecar（合并视图可能跨多个子目录）。
+        按目录重算物种召回（按需）并增量重导出 sidecar（合并视图可能
+        跨多个子目录）。sidecar 导出总是执行；召回仅在目录带重算标记
+        时执行（改星链路标记为 False——召回与星级无关）。
 
         参数:
-        directories (list): 照片目录路径列表（召回以目录为单位整体
-            重算，幂等秒级；DB 与 JSON 的软删标记此前已落盘）
+        pending (dict): {照片目录: 是否需要重算召回}
 
-        Re-run the species recall + incremental sidecar export for each
-        involved directory.
+        Re-run the species recall where requested and incrementally
+        re-export sidecars for each involved directory.
         """
         from core.species_recall import run_species_recall
         from core.sidecar_export import export_directory_sidecars
@@ -2152,12 +2185,13 @@ class ResultsBrowserWindow(QMainWindow):
         from tools.report_db import ReportDB
         threshold = get_advanced_config().recall_species_threshold
 
-        for directory in sorted(set(directories)):
+        for directory, need_recall in sorted(pending.items()):
             try:
                 db = ReportDB(directory)
                 try:
-                    run_species_recall(db, species_threshold=threshold,
-                                       log=print)
+                    if need_recall:
+                        run_species_recall(db, species_threshold=threshold,
+                                           log=print)
                     export_directory_sidecars(db, directory,
                                               log=lambda *_: None)
                 finally:

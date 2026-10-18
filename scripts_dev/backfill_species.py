@@ -52,7 +52,12 @@ from constants import VIDEO_COVER_SUFFIX  # noqa: E402
 from tools.find_bird_util import raw_to_jpeg  # noqa: E402
 from tools.image_crop import smart_square_crop  # noqa: E402
 
-RAW_EXTS = (".CR3", ".cr3", ".NEF", ".nef", ".ARW", ".arw",
+# 探测顺序按新机型优先；必须覆盖全部库内 RAW 机型（含老佳能 CR2——
+# 2020 批次 1.6 公司/1.21 清华即 CR2-only，缺失会导致 EXIF 回填探不到原片）。
+# Probe newest formats first; must cover every RAW format in the library
+# (including legacy Canon CR2 — the 2020 batches "1.6 公司"/"1.21 清华"
+# are CR2-only, and missing it makes EXIF backfill unable to find the file).
+RAW_EXTS = (".CR3", ".cr3", ".CR2", ".cr2", ".NEF", ".nef", ".ARW", ".arw",
             ".RAF", ".raf", ".ORF", ".orf", ".DNG", ".dng")
 PLAIN_EXTS = (".JPG", ".jpg", ".JPEG", ".jpeg", ".PNG", ".png")
 _PADDING = 0.15  # 与 core/multi_bird._BIRDID_PADDING_RATIO 一致

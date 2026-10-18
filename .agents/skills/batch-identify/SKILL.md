@@ -226,3 +226,26 @@ cd G:/code/SuperPicky
   --execute`：仅对有鸟未定种的照片按新采纳门槛重识别，镜像写入
   photos / bird_detections / sidecar 三处，dry-run 默认、写前备份。
   低置信候选（40-50% 段）错误率偏高，采纳后建议人工过目。
+
+## 9. 键分裂巡检（中英名与学名打架）
+
+站点按 (中文名, 学名) 分组展示鸟种。photos 行中英名与主检测框
+（is_selected=1）学名属不同鸟种时，同一鸟种会被劈成两个条目（2026-10
+奥森实例：黄眉柳莺 5 张 + Phylloscopus coronatus vs 24 张 inornatus）。
+成因有二：历史管线把 photos 主种与检测行种名写偏；或旧版
+`spb_rename_species.py photo` 改种只同步「种名命中旧名」的检测行，
+主框种名与 photos 行不一致时主框永远同步不上。
+
+- **巡检用** `scripts_dev/spb_scan_key_splits.py "<目录>"`（只读）：以
+  bird_reference.sqlite 为权威映射，列出中英名与学名打架的全部组合；
+  退出码 0/1 可作巡检判据。七个 2021-2026 目录 2026-10-17 全扫为零。
+- **修复**：photos 行错、检测行对 → `spb_rename_species.py photo` 按
+  检测行物种改（2026-10-17 起工具已修：主框无论自身种名是否命中旧名
+  一律随照片改写，sidecar 按旧名+主框旧名各跑一轮，幂等）；photos 行
+  对、检测行错 → 工具同步不到该行，直接 SQL 更新选中检测行
+  species_cn/en/scientific_name 后 `wal_checkpoint(TRUNCATE)`，再
+  reexport_sidecars。改前逐张目检定夺，拿不准就 wipe。
+- **判例**：稀有种「保留」必须在前后帧证据链上成立（连拍 ±2 号文件），
+  代表帧单点判断不够——江西钳嘴鹳 19 张即因只看代表帧而误保留，前后帧
+  证实为东方白鹳群+白鹤。
+

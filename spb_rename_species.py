@@ -373,8 +373,10 @@ def cmd_photo_rename(db: ReportDB, root: str, filename: str,
     单张照片改主鸟种：photos 主鸟种 + 匹配检测框 + sidecar 同步改写。
 
     匹配规则：照片当前主鸟种名（bird_species_cn/en）作为旧名；该照片
-    未删框中物种名命中旧名的框全部改写，若无任何框命中则改写主鸟框
-    （is_selected=1，兼容主鸟种只存 photos 表的旧数据）。
+    未删框中物种名命中旧名的框全部改写；主鸟框（is_selected=1）无论
+    自身种名是否命中旧名一律改写——照片改种的主张即「本照片主鸟为新
+    种」，主框种名与 photos 行不一致的历史残留（站点键分裂成因）由此
+    一并收敛；sidecar 按 photos 行旧名与主框旧名各跑一轮改写（均幂等）。
 
     参数:
     db (ReportDB): 已打开的库
@@ -402,8 +404,15 @@ def cmd_photo_rename(db: ReportDB, root: str, filename: str,
     targets = [d for d in detections
                if (old_cn and d.get("species_cn") == old_cn)
                or (old_en and d.get("species_en") == old_en)]
-    if not targets:
-        targets = [d for d in detections if d.get("is_selected")]
+    # 主框（选中行）是照片主鸟的权威载体：即便其自身种名与 photos 行
+    # 旧名不一致（历史管线写偏/外部改动遗留），也必须一并改写——否则
+    # 站点按（中文名, 学名）分组时留下「中英名与学名打架」的键分裂。
+    # 原判据只在「没有任何框命中旧名」时才回退主框，命中行存在时
+    # 主框反而被跳过（2026-10 奥森黄眉柳莺 5 张分裂的成因）。
+    selected = next((d for d in detections if d.get("is_selected")), None)
+    if selected and all(d.get("bird_index") != selected.get("bird_index")
+                        for d in targets):
+        targets.append(selected)
 
     result = {"status": "ok", "op": "photo-rename", "root": root,
               "filename": filename,
@@ -427,6 +436,18 @@ def cmd_photo_rename(db: ReportDB, root: str, filename: str,
         new_cn=new_cn, new_en=new_en, new_sci=new_sci,
         old_cn=old_cn or None, old_en=old_en or None,
         class_id=class_id)
+    # 主框旧种名与 photos 行旧名不一致时，sidecar 主鸟条目带的是主框
+    # 旧名——按主框旧名再补一轮改写（幂等，未命中的条目不受影响）。
+    if selected:
+        sel_cn = selected.get("species_cn") or None
+        sel_en = selected.get("species_en") or None
+        if (sel_cn and sel_cn != (old_cn or None)) or \
+           (sel_en and sel_en != (old_en or None)):
+            rename_species_in_sidecar(
+                root, filename,
+                new_cn=new_cn, new_en=new_en, new_sci=new_sci,
+                old_cn=sel_cn, old_en=sel_en,
+                class_id=class_id)
     return _sidecars_written(result, _finalize(db, root))
 
 

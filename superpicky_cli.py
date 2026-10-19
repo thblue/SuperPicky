@@ -157,6 +157,22 @@ def cmd_process(args):
         adv_config.config["auto_cleanup_days"] = args.cleanup_days
     settings = resolve_processing_settings(args, adv_config)  # A 通道（ProcessingSettings）
 
+    # 生活照快速模式（--lite）：就地关闭三个重扫开关并降视频抽帧上限，
+    # 与上方 keep_temp_files 同款「仅改内存、不回写」手法。ai_model 每次
+    # 检测时读取 config.ai.* 与 rescue_scan_enabled，视频阶段读取
+    # video_max_frames，processor 运行前置位即可全链生效。
+    # Lite mode (--lite): flip the rescan switches and the video sampling
+    # cap in memory only (same pattern as keep_temp_files above). ai_model
+    # reads config.ai.* / rescue_scan_enabled at every detection and the
+    # video stage reads video_max_frames, so setting them here before the
+    # processor runs covers the whole chain.
+    if getattr(args, 'lite', False):
+        from config import config as app_config
+        app_config.ai.RESCUE_TILE_ENABLED = False         # 瓦片全图重扫（每张照片都跑）
+        app_config.ai.FINE_TILE_ENABLED = False           # 暗片触发的 640px 细瓦档
+        adv_config.config["rescue_scan_enabled"] = False  # 无鸟 1024px 补救重扫
+        adv_config.config["video_max_frames"] = 8         # 视频封面抽帧上限（默认 60）
+
     print(t("cli.target_dir", directory=args.directory))
     print(t("cli.sharpness", value=settings.sharpness_threshold))
     print(t("cli.aesthetics", value=settings.nima_threshold))
@@ -167,6 +183,8 @@ def cmd_process(args):
     print(f"⚙️  ARW 写入: {adv_config.config.get('arw_write_mode')}")
     print(f"⚙️  清理临时: {'否' if adv_config.keep_temp_files else '是'}")
     print(f"⚙️  视频封面入库: {'否' if args.no_videos else '是（有鸟默认2星）'}")
+    if getattr(args, 'lite', False):
+        print("⚡ Lite 生活照模式: 瓦片重扫/无鸟补救重扫已关，视频抽帧上限 8")
 
     if settings.auto_identify:
         print(f"⚙️  自动识鸟: 是 (有鸟照片，软片低地板拦截)")
@@ -1006,6 +1024,17 @@ Examples:
     # 2-star rating, video moves along with its cover).
     p_process.add_argument('--no-videos', action='store_true', dest='no_videos',
                           help='跳过视频阶段（不生成封面帧、不入库、不移动视频）')
+    # V5.9.x 生活照快速模式：仅本次运行生效（不写 advanced_config.json）。
+    # 场景：个人生活照目录（鸟片零星、召回要求低）——关掉专为深度伪装
+    # 小鸟设计的重扫机制（瓦片全图重扫 + 细瓦档 + 无鸟补救重扫），视频
+    # 封面抽帧上限降为 8 帧。检出鸟后的识鸟/评分/定星链路不受影响。
+    # Lite life-photo mode: this run only (advanced_config.json untouched).
+    # For personal life-photo folders with sparse bird shots — disables the
+    # deep-camouflage rescan machinery (universal tile pass + fine tile tier
+    # + no-bird rescue rescan) and caps video cover sampling at 8 frames.
+    # Bird-ID / scoring / rating for detected birds are unaffected.
+    p_process.add_argument('--lite', action='store_true', dest='lite',
+                           help='生活照快速模式：关瓦片重扫/无鸟补救重扫，视频抽帧上限8')
     p_process.add_argument('-q', '--quiet', action='store_true', help='静默模式')
     p_process.add_argument('--cleanup-days', type=int, default=30,
                           help='自动清理周期（天），0=永久 (默认: 30)')

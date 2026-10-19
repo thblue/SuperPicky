@@ -140,15 +140,50 @@ def cmd_burst(args):
 
 
 def cmd_process(args):
-    """处理照片目录"""
+    """
+    处理照片目录（配置保护壳 / config-protection wrapper）。
+
+    跑批期间屏蔽 AdvancedConfig.save()：photo_processor.process() 开头的
+    add_processed_directory() 会把整份配置字典 save() 回磁盘，CLI 的内存
+    覆盖（B 通道 -c/--no-cleanup 等、--lite 的重扫开关）会被一并持久化，
+    污染用户 GUI 配置（实际泄漏案例：min_confidence 被写成 0.4）。
+    这里先快照，跑完在 finally 中恢复，再在干净配置上补记已处理目录。
+
+    photo_processor.process() opens with add_processed_directory(), which
+    save()s the WHOLE config dict — that would persist in-memory CLI
+    overrides (B-channel flags, --lite switches) into the user's GUI
+    config. Snapshot before the run, restore in finally, then re-record
+    the processed directory on the clean config.
+    """
+    from advanced_config import get_advanced_config
+
+    adv_config = get_advanced_config()
+    _config_snapshot = dict(adv_config.config)
+    adv_config.suppress_save = True
+    exit_code = 1
+    try:
+        exit_code = _cmd_process_impl(args, adv_config)
+    finally:
+        adv_config.suppress_save = False
+        adv_config.config.clear()
+        adv_config.config.update(_config_snapshot)
+    # photo_processor 内的同名调用被 save 屏蔽、只改了内存且已被上面的
+    # 快照恢复覆盖；这里在干净配置上重放一次，让 GUI「已处理目录清单」
+    # 照常更新。Re-record on the restored config so the GUI's processed
+    # list still updates (the in-process record was restored away).
+    adv_config.add_processed_directory(args.directory)
+    return exit_code
+
+
+def _cmd_process_impl(args, adv_config):
+    """处理照片目录主流程（运行于 cmd_process 的配置保护壳内）"""
     from tools.cli_processor import CLIProcessor
     from tools.cli_settings import resolve_processing_settings, apply_config_overrides
-    from advanced_config import get_advanced_config
 
     print_banner()
 
-    # 解析设置：CLI 显式 > advanced_config(= GUI 同源) > 默认。仅改内存，**不回写**。
-    adv_config = get_advanced_config()
+    # 解析设置：CLI 显式 > advanced_config(= GUI 同源) > 默认。仅改内存，
+    # 跑批结束后由 cmd_process 的快照恢复，save() 屏蔽期间不会落盘。
     apply_config_overrides(args, adv_config)                  # B 通道（folder_layout/metadata/min_*…）
     # 兼容：--no-cleanup 且未显式指定保留时，等价于保留临时文件
     if getattr(args, 'keep_temp', None) is None and not args.cleanup:

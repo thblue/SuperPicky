@@ -254,6 +254,13 @@ class AdvancedConfig:
             self.config_file = config_file
 
         self.config = self.DEFAULT_CONFIG.copy()
+        # CLI 跑批保护壳（superpicky_cli.cmd_process）置位期间 save() 直接
+        # 跳过，防止内存覆盖（B 通道/--lite）被 add_processed_directory 的
+        # 整体落盘顺带持久化。运行时标志，永不序列化。
+        # Set by the CLI run guard: save() becomes a no-op so in-memory
+        # overrides never leak into the user's config file. Runtime flag,
+        # never serialized.
+        self.suppress_save = False
         self.load()
 
     def load(self):
@@ -287,6 +294,12 @@ class AdvancedConfig:
 
     def save(self):
         """保存配置到文件"""
+        # CLI 跑批保护壳置位期间跳过落盘（见 superpicky_cli.cmd_process），
+        # 防止把 B 通道/--lite 的内存覆盖一并写进用户配置文件。
+        # No-op while the CLI run guard is active so in-memory overrides
+        # never leak into the persisted config.
+        if self.suppress_save:
+            return True
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)

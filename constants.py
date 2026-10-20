@@ -5,6 +5,8 @@ SuperPicky 常量定义
 统一管理全局常量，避免重复定义
 """
 
+import os
+
 # 应用版本号
 APP_VERSION = "4.5.0"
 
@@ -106,3 +108,43 @@ VIDEO_EXTENSIONS_ALL = (
 # must skip *_vcover.jpg so covers are never re-processed as plain photos.
 VIDEO_COVER_SUFFIX = '_vcover'
 VIDEO_COVER_EXT = '.jpg'
+
+# 传输/网图文件名前缀（大小写不敏感）：手机截屏与社区下载图不是相机原图，
+# 不参与鸟种识别（2026-10-20 用户定则：只保留相机本身拍摄的照片/视频，
+# 微信等传输图与小红书等下载图一律排除）。
+# Filename prefixes of transferred/net images (case-insensitive): phone
+# screenshots and community downloads are not camera originals and never
+# enter bird identification (user rule 2026-10-20: keep only own-camera
+# photos/videos; WeChat-transferred and Xiaohongshu-downloaded excluded).
+TRANSFER_NET_IMAGE_PREFIXES = [
+    'screenshot',     # 手机截屏 Screenshot_xxx / Screenshot xxx
+    'screen shot',    # 截屏空格变体
+    'camera_xhs',     # 小红书下载
+    'camera_1040',    # 社区/电商图片下载 ID
+]
+
+# 传输导出的日期时间命名（微信/微博等下载格式，相机不产生该命名）：
+# 形如 2021-05-01 13.11.45.jpg。
+# Transfer-exported date-time naming from WeChat/Weibo downloads (cameras
+# never emit this pattern), e.g. 2021-05-01 13.11.45.jpg.
+TRANSFER_NET_IMAGE_DATE_RE = r'^\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}'
+
+
+def is_transfer_or_net_image(filename: str) -> bool:
+    """
+    判断文件名是否为截图/传输/网图（跳过识别；文件本体不受影响）。
+
+    参数:
+    filename (str): 文件名（可含路径，按 basename 小写后匹配）
+
+    返回:
+    bool: True=跳过识别；False=正常处理
+
+    Whether the filename is a screenshot/transfer/net image (skipped from
+    identification; the file itself is never touched).
+    """
+    import re
+    low = os.path.basename(filename).lower()
+    if any(low.startswith(p) for p in TRANSFER_NET_IMAGE_PREFIXES):
+        return True
+    return re.match(TRANSFER_NET_IMAGE_DATE_RE, low) is not None

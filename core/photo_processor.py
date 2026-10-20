@@ -43,7 +43,7 @@ from core.flight_detector import FlightDetector, get_flight_detector, FlightResu
 from core.exposure_detector import ExposureDetector, get_exposure_detector, ExposureResult
 from core.focus_point_detector import get_focus_detector, verify_focus_in_bbox, arbitrate_focus_weights
 
-from constants import RATING_FOLDER_NAMES, RAW_EXTENSIONS, JPG_EXTENSIONS, HEIF_EXTENSIONS, get_rating_folder_names, VIDEO_COVER_SUFFIX
+from constants import RATING_FOLDER_NAMES, RAW_EXTENSIONS, JPG_EXTENSIONS, HEIF_EXTENSIONS, get_rating_folder_names, VIDEO_COVER_SUFFIX, is_transfer_or_net_image
 
 # 国际化
 from tools.i18n import get_i18n
@@ -98,6 +98,28 @@ class ProcessingCancelled(RuntimeError):
     """Raised when processing is cancelled by the caller."""
 
 
+def directory_photo_prefixes(dir_path: str) -> set:
+    """
+    目录内照片文件前缀集合（--only-new 增量的"现存文件"口径）。
+
+    枚举规则与 PhotoProcessor._scan_files 完全一致：os.listdir 单层、
+    跳过点开头/临时文件；RAW/HEIF/JPG 都算照片（HEIF 无同名 RAW 才
+    入管线，这里宽松计入——只用于与 report.db 已记录前缀做差集，
+    多算的前缀只是多一次"已入库"命中，不会改变增量语义）。
+    """
+    out = set()
+    for filename in os.listdir(dir_path):
+        if filename.startswith('.'):
+            continue
+        if filename.lower().startswith(('tmp_', 'temp_')):
+            continue
+        prefix, ext = os.path.splitext(filename)
+        if ext.lower() in (RAW_EXTENSIONS + JPG_EXTENSIONS
+                           + HEIF_EXTENSIONS):
+            out.add(prefix)
+    return out
+
+
 def compute_xmp_label(is_flying: bool, focus_status: Optional[str], translate) -> Optional[str]:
     """
     计算 XMP:Label 颜色名(B+ 默认映射,Paul P2):
@@ -141,19 +163,23 @@ class PhotoProcessor:
         self,
         dir_path: str,
         settings: ProcessingSettings,
-        callbacks: Optional[ProcessingCallbacks] = None
+        callbacks: Optional[ProcessingCallbacks] = None,
+        only_prefixes: Optional[set] = None
     ):
         """
         初始化处理器
-        
+
         Args:
             dir_path: 处理目录路径
             settings: 处理参数
             callbacks: 回调函数（进度、日志）
+            only_prefixes: 仅处理这些文件名前缀（--only-new 照片级增量；
+                None=全量，默认）。report.db 已记录的前缀由调用方扣除。
         """
         self.dir_path = dir_path
         self.settings = settings
         self.callbacks = callbacks or ProcessingCallbacks()
+        self.only_prefixes = only_prefixes
         self.config = get_advanced_config()
         
         # 初始化评分引擎
@@ -716,8 +742,20 @@ class PhotoProcessor:
             # V3.9: 忽略 Windows 系统文件
             if filename.lower() == 'desktop.ini' or filename.lower() == 'thumbs.db':
                 continue
-            
+
+            # 2026-10-20 用户定则：截图/微信传输/小红书等下载图不是相机原图，
+            # 不进入识别管线（文件本体不受影响，仅跳过）。
+            # User rule 2026-10-20: screenshots/transferred/downloaded images
+            # are not camera originals — skip identification entirely.
+            if is_transfer_or_net_image(filename):
+                continue
+
             file_prefix, file_ext = os.path.splitext(filename)
+            # --only-new 照片级增量：不在待检前缀集合里的文件全部旁路
+            #（手机备份库持续新增，重跑目录时只检新照片，不整目录重检）
+            if self.only_prefixes is not None \
+                    and file_prefix not in self.only_prefixes:
+                continue
             # V-cover：视频封面 JPEG（<视频名>_vcover.jpg）由视频阶段
             # （core/video_stage.py）管理，不进照片管线——否则封面会被当作
             # 纯 JPEG 照片二次处理并混入 V2 配额定星池。

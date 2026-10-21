@@ -126,6 +126,7 @@ TRANSFER_NET_IMAGE_PREFIXES = [
     'screen shot',    # 截屏空格变体
     'camera_xhs',     # 小红书下载
     'camera_1040',    # 社区/电商图片下载 ID
+    'mmexport',       # 微信图片导出（mmexport+时间戳）
 ]
 
 

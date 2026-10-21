@@ -208,6 +208,24 @@ def _cmd_process_impl(args, adv_config):
         adv_config.config["rescue_scan_enabled"] = False  # 无鸟 1024px 补救重扫
         adv_config.config["video_max_frames"] = 8         # 视频封面抽帧上限（默认 60）
 
+    # --only-new 照片级增量：report.db 已记录的前缀全部旁路，只检新增；
+    # 无新增直接收工（手机备份库持续新增时重跑同一目录不再整目录重检）
+    only_prefixes = None
+    if getattr(args, 'only_new', False):
+        from tools.report_db import ReportDB
+        from core.photo_processor import directory_photo_prefixes
+        _rdb = ReportDB(args.directory)
+        try:
+            _known = _rdb.known_filenames()
+        finally:
+            _rdb.close()
+        only_prefixes = directory_photo_prefixes(args.directory) - _known
+        print(f"⚡ Only-new 增量: 待检 {len(only_prefixes)} 张，"
+              f"已入库旁路 {len(_known)} 张")
+        if not only_prefixes:
+            print("✅ 无新增照片，无需处理")
+            return 0
+
     print(t("cli.target_dir", directory=args.directory))
     print(t("cli.sharpness", value=settings.sharpness_threshold))
     print(t("cli.aesthetics", value=settings.nima_threshold))
@@ -233,7 +251,8 @@ def _cmd_process_impl(args, adv_config):
     processor = CLIProcessor(
         dir_path=args.directory,
         verbose=not args.quiet,
-        settings=settings
+        settings=settings,
+        only_prefixes=only_prefixes
     )
 
     # 连拍检测/跨目录合并由 PhotoProcessor 内部处理。
@@ -824,11 +843,34 @@ def cmd_identify(args):
 
 
 def cmd_batch(args):
-    """递归批量处理子目录"""
+    """递归批量处理子目录（配置保护壳，同 cmd_process：跑批期间屏蔽
+    AdvancedConfig.save()——PhotoProcessor 开头的 add_processed_directory
+    会 save() 整份配置，把 CLI 的内存覆盖持久化污染用户 GUI 配置）。"""
+    from advanced_config import get_advanced_config
+
+    adv_config = get_advanced_config()
+    _config_snapshot = dict(adv_config.config)
+    adv_config.suppress_save = True
+    processed_dirs = []
+    exit_code = 1
+    try:
+        exit_code = _cmd_batch_impl(args, adv_config, processed_dirs)
+    finally:
+        adv_config.suppress_save = False
+        adv_config.config.clear()
+        adv_config.config.update(_config_snapshot)
+    # 与 cmd_process 同款：在恢复后的干净配置上补记已处理目录，
+    # GUI「已处理目录清单」照常更新
+    for d in processed_dirs:
+        adv_config.add_processed_directory(d)
+    return exit_code
+
+
+def _cmd_batch_impl(args, adv_config, processed_dirs):
+    """batch 主流程（运行于 cmd_batch 的配置保护壳内）"""
     from core.recursive_scanner import is_dangerous_root, is_processed, scan_directories
     from core.batch_processor import BatchProcessor
     from tools.cli_settings import resolve_processing_settings, apply_config_overrides
-    from advanced_config import get_advanced_config
 
     print_banner()
     print(f"\n📂 批量处理: {args.directory}")
@@ -838,15 +880,15 @@ def cmd_batch(args):
         print(f"\n❌ {t('health.dangerous_dir_title')}")
         print(t("health.dangerous_dir_msg", directory=args.directory, reason=reason))
         return 1
-    
+
     # 扫描
     scan_results = scan_directories(args.directory, max_depth=args.max_depth)
-    
+
     if not scan_results:
         print(f"\n❌ {t('health.no_photos_title')}")
         print(t("health.no_photos_msg", directory=args.directory))
         return 1
-    
+
     # 预览
     print(f"\n🔍 找到 {len(scan_results)} 个待处理目录:")
     total_photos = 0
@@ -858,21 +900,20 @@ def cmd_batch(args):
         print(f"  {i:3d}. {rel}/ ({n} 张){status}")
         total_photos += n
     print(f"\n  合计: {total_photos} 张照片")
-    
+
     # Dry run
     if args.dry_run:
         print("\n📋 Dry run 模式，不执行处理")
         return 0
-    
+
     # 确认
     if not args.yes:
         confirm = input(f"\n确定处理这 {len(scan_results)} 个目录? [y/N]: ")
         if confirm.lower() not in ['y', 'yes']:
             print("❌ 已取消")
             return 1
-    
+
     # 解析设置：CLI 显式 > advanced_config(= GUI) > 默认。仅改内存，不回写。
-    adv_config = get_advanced_config()
     apply_config_overrides(args, adv_config)
     if getattr(args, 'keep_temp', None) is None and not args.cleanup:
         adv_config.config["keep_temp_files"] = True
@@ -885,13 +926,18 @@ def cmd_batch(args):
         skip_existing=args.skip_existing,
         max_depth=args.max_depth,
     )
-    
+
     result = processor.process(
         dirs=scan_results,
         organize_files=args.organize,
         cleanup_temp=not adv_config.keep_temp_files,
     )
-    
+    # 成功处理的目录记录下来，配置恢复后由 cmd_batch 补记到
+    # 「已处理目录清单」（dir_results 的 dir 是相对根的路径）
+    for d in result.dir_results:
+        if d.get('status') == 'success':
+            processed_dirs.append(os.path.join(args.directory, d['dir']))
+
     print("\n✅ 批量处理完成!")
     return 0 if result.failed_dirs == 0 else 1
 
@@ -1070,6 +1116,8 @@ Examples:
     # Bird-ID / scoring / rating for detected birds are unaffected.
     p_process.add_argument('--lite', action='store_true', dest='lite',
                            help='生活照快速模式：关瓦片重扫/无鸟补救重扫，视频抽帧上限8')
+    p_process.add_argument('--only-new', action='store_true', dest='only_new',
+                           help='照片级增量：只检 report.db 未记录的新照片')
     p_process.add_argument('-q', '--quiet', action='store_true', help='静默模式')
     p_process.add_argument('--cleanup-days', type=int, default=30,
                           help='自动清理周期（天），0=永久 (默认: 30)')
@@ -1158,6 +1206,12 @@ Examples:
     p_batch.add_argument('--no-cleanup', action='store_false', dest='cleanup')
     p_batch.add_argument('--skip-existing', action='store_true',
                         help='跳过已处理的目录')
+    p_batch.add_argument('--lite', action='store_true', dest='lite',
+                         help='生活照快速模式（同 process --lite）')
+    p_batch.add_argument('--no-videos', action='store_true', dest='no_videos',
+                         help='跳过视频阶段（不生成封面帧、不入库）')
+    p_batch.add_argument('--only-new', action='store_true', dest='only_new',
+                         help='照片级增量：每目录只检 report.db 未记录的新照片')
     p_batch.add_argument('--dry-run', action='store_true',
                         help='仅列出待处理目录，不执行')
     p_batch.add_argument('--max-depth', type=int, default=DEFAULT_SCAN_MAX_DEPTH,
@@ -1166,7 +1220,8 @@ Examples:
                         help='跳过确认提示')
     p_batch.add_argument('-q', '--quiet', action='store_true')
     p_batch.set_defaults(organize=True, cleanup=True,
-                        skip_existing=False, dry_run=False)
+                         skip_existing=False, dry_run=False,
+                         lite=False, no_videos=False, only_new=False)
     
     # ===== batch-reset 命令 =====
     p_batch_reset = subparsers.add_parser('batch-reset', help='批量重置所有已处理的子目录')

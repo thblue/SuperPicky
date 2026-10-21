@@ -919,6 +919,16 @@ def _cmd_batch_impl(args, adv_config, processed_dirs):
         adv_config.config["keep_temp_files"] = True
     settings = resolve_processing_settings(args, adv_config)
 
+    # 生活照快速模式（--lite）：与 process 同款「仅改内存、不回写」手法，
+    # 关瓦片全图重扫/细瓦档/无鸟补救重扫，视频封面抽帧上限降为 8
+    if getattr(args, 'lite', False):
+        from config import config as app_config
+        app_config.ai.RESCUE_TILE_ENABLED = False
+        app_config.ai.FINE_TILE_ENABLED = False
+        adv_config.config["rescue_scan_enabled"] = False
+        adv_config.config["video_max_frames"] = 8
+        print("⚡ Lite 生活照模式: 瓦片重扫/无鸟补救重扫已关，视频抽帧上限 8")
+
     # 执行批量处理
     processor = BatchProcessor(
         root_dir=args.directory,
@@ -931,6 +941,8 @@ def _cmd_batch_impl(args, adv_config, processed_dirs):
         dirs=scan_results,
         organize_files=args.organize,
         cleanup_temp=not adv_config.keep_temp_files,
+        no_videos=getattr(args, 'no_videos', False),
+        only_new=getattr(args, 'only_new', False),
     )
     # 成功处理的目录记录下来，配置恢复后由 cmd_batch 补记到
     # 「已处理目录清单」（dir_results 的 dir 是相对根的路径）

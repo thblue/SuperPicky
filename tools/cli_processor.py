@@ -19,22 +19,24 @@ class CLIProcessor:
     """CLI 处理器 - 只负责命令行交互"""
     
     def __init__(
-        self, 
-        dir_path: str, 
-        ui_settings: List = None, 
-        verbose: bool = True, 
+        self,
+        dir_path: str,
+        ui_settings: List = None,
+        verbose: bool = True,
         detect_flight: bool = True,
-        settings: ProcessingSettings = None  # V4.0: 直接传入完整设置
+        settings: ProcessingSettings = None,  # V4.0: 直接传入完整设置
+        only_prefixes: set = None  # --only-new 照片级增量：仅检这些前缀
     ):
         """
         初始化处理器
-        
+
         Args:
             dir_path: 处理目录
             ui_settings: [ai_confidence, sharpness_threshold, nima_threshold, save_crop, norm_mode] (向后兼容)
             verbose: 详细输出
             detect_flight: 是否启用飞鸟检测
             settings: 直接传入完整的 ProcessingSettings (优先使用)
+            only_prefixes: 仅处理这些文件名前缀（None=全量，默认）
         """
         self.verbose = verbose
         self.dir_path = dir_path  # 保存目录路径用于日志
@@ -68,7 +70,8 @@ class CLIProcessor:
             callbacks=ProcessingCallbacks(
                 log=self._log,
                 progress=self._progress
-            )
+            ),
+            only_prefixes=only_prefixes
         )
     
     def _log(self, msg: str, level: str = "info"):

@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Union
 from dataclasses import dataclass, field
 
 from core.recursive_scanner import DEFAULT_SCAN_MAX_DEPTH, ScannedDirectory, count_photos, is_processed, scan_directories
+from core.photo_processor import directory_photo_prefixes
 
 
 @dataclass
@@ -57,17 +58,19 @@ class BatchProcessor:
         dirs: Sequence[Union[str, ScannedDirectory]],
         organize_files: bool = True,
         cleanup_temp: bool = True,
+        no_videos: bool = False,
+        only_new: bool = False,
     ) -> BatchResult:
         """
         批量处理所有目录
-        
+
         Args:
             dirs: 原子目录列表
             organize_files: 是否移动文件到分类文件夹
             cleanup_temp: 是否清理临时文件
-            
-        Returns:
-            BatchResult 汇总结果
+            no_videos: 跳过视频封面阶段
+            only_new: 照片级增量——每目录先读 report.db 已记录前缀，
+                只检新增；无新增的目录整体跳过（视频阶段本身幂等）
         """
         from core.photo_processor import PhotoProcessor, ProcessingCallbacks
         
@@ -106,28 +109,57 @@ class BatchProcessor:
             self.log(f"\n{'━' * 60}")
             self.log(f"📂 [{i}/{len(normalized_dirs)}] 处理: {dir_name} ({photo_count} 张)")
             self.log(f"{'━' * 60}")
-            
+
             dir_start = time.time()
-            
+
             try:
+                # --only-new：只检 report.db 未记录的新照片；无新增整体跳过
+                only_prefixes = None
+                if only_new:
+                    from tools.report_db import ReportDB
+                    known_db = ReportDB(dir_path)
+                    try:
+                        known = known_db.known_filenames()
+                    finally:
+                        known_db.close()
+                    only_prefixes = directory_photo_prefixes(dir_path) - known
+                    if not only_prefixes:
+                        self.log(
+                            f"\n⏭️  [{i}/{len(normalized_dirs)}] 无新增照片，跳过: "
+                            f"{dir_name} ({photo_count} 张)")
+                        result.skipped_dirs += 1
+                        result.dir_results.append({
+                            'dir': dir_name,
+                            'status': 'skipped',
+                            'photos': photo_count,
+                        })
+                        continue
+                    self.log(f"  ⚡ Only-new 增量: 待检 {len(only_prefixes)} 张")
+
                 # 创建回调
                 callbacks = ProcessingCallbacks(
                     log=lambda msg, level="info": self.log(f"  {msg}"),
                     progress=None,
                 )
-                
+
                 # 创建处理器并执行
                 processor = PhotoProcessor(
                     dir_path=dir_path,
                     settings=self.settings,
                     callbacks=callbacks,
+                    only_prefixes=only_prefixes,
                 )
-                
+
                 proc_result = processor.process(
                     organize_files=organize_files,
                     cleanup_temp=cleanup_temp,
                 )
-                
+
+                # V-cover 视频阶段（照片阶段已关闭 report.db，这里新开）：
+                # 封面行幂等——已有记录的视频自动跳过，重跑只处理新视频
+                if not no_videos:
+                    self._run_video_stage(dir_path, organize_files)
+
                 dir_time = time.time() - dir_start
                 stats = proc_result.stats
                 
@@ -173,6 +205,32 @@ class BatchProcessor:
         
         return result
     
+    def _run_video_stage(self, dir_path: str, organize_files: bool) -> None:
+        """
+        单目录 V-cover 视频阶段（batch 版，与 cmd_process 的照片后置
+        视频阶段同参）：封面帧入库 + 有鸟默认 2 星 + 视频伴生归类。
+        """
+        from advanced_config import get_advanced_config
+        from tools.report_db import ReportDB
+        from core.video_stage import process_directory_videos
+
+        adv_config = get_advanced_config()
+        video_db = ReportDB(dir_path)
+        try:
+            process_directory_videos(
+                dir_path=dir_path,
+                settings=self.settings,
+                config=adv_config,
+                report_db=video_db,
+                organize_files=organize_files,
+                max_frames=adv_config.config.get("video_max_frames", 60),
+                yolo_threshold=adv_config.config.get(
+                    "video_yolo_threshold", 0.5),
+                log=lambda msg, level="info": self.log(f"  {msg}"),
+            )
+        finally:
+            video_db.close()
+
     def _save_batch_report(self, result: BatchResult):
         """保存批量处理汇总到根目录"""
         report = {

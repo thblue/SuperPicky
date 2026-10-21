@@ -724,6 +724,20 @@ class ReportDB:
             cursor = self._conn.execute("SELECT * FROM photos ORDER BY filename")
             return [dict(row) for row in cursor.fetchall()]
 
+    def known_filenames(self) -> set:
+        """
+        已入库照片的文件名前缀集合（--only-new 照片级增量用）。
+
+        filename 与 insert_photo 同键：不含扩展名的前缀；视频封面行
+        （*_vcover）也在其中，但封面本就不进照片管线，互不影响。
+
+        Returns:
+            已记录前缀的 set（空目录/首跑返回空集）
+        """
+        with self._lock:
+            cursor = self._conn.execute("SELECT filename FROM photos")
+            return {row[0] for row in cursor.fetchall()}
+
     def get_bird_photos(self) -> List[dict]:
         """
         获取所有有鸟的照片记录（has_bird=1）。

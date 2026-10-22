@@ -145,3 +145,52 @@ def is_transfer_or_net_image(filename: str) -> bool:
     """
     low = os.path.basename(filename).lower()
     return any(low.startswith(p) for p in TRANSFER_NET_IMAGE_PREFIXES)
+
+
+# 「非相机原图」EXIF 判定所需的字段（与 PhotoProcessor._read_all_exif_metadata
+# 返回字典的键保持一致）。相机型号/拍摄时间/GPS 三项在一切相机原图
+# （单反 RAW/JPG、手机 JPEG/HEIC、Windows 导入改名图）上必然至少有一项；
+# QQ/网页/聊天工具转存下载图通常三项全空。
+# Keys consulted by is_non_camera_original_exif(); must match the dict
+# returned by PhotoProcessor._read_all_exif_metadata(). Every camera
+# original (DSLR RAW/JPG, phone JPEG/HEIC, import-renamed copies) carries
+# at least one of camera model / capture time / GPS; transferred net
+# images typically have none.
+NON_CAMERA_ORIGINAL_EXIF_KEYS = ('camera_model', 'date_time_original',
+                                 'gps_latitude')
+
+
+def is_non_camera_original_exif(exif_data: dict) -> bool:
+    """
+    判断 EXIF 元数据是否「三全空」＝无法证实为相机原图（按网图处理）。
+
+    2026-10-21 用户定则的元数据层延伸：文件名前缀黑名单
+    （TRANSFER_NET_IMAGE_PREFIXES）管不住伪装成相机命名的下载图
+    （如 IMG_8475.JPG 煤山雀高清网图），这类图唯一稳定特征是
+    相机型号/拍摄时间/GPS 三项全空。判定规则：
+
+    - 三项全空 → True（非相机原图，按无鸟处理）；
+    - 任一项存在 → False（相机原图；微信「原图」等保留 EXIF 的
+      转发图同样放行，与 2026-10-20 复盘定则一致）；
+    - exif_data 为 None/空字典（EXIF 预取被禁用或读取失败）→ False
+      （保守放过，不因元数据缺失误杀无法验证的照片）。
+
+    参数:
+    exif_data (dict): _read_all_exif_metadata 风格的元数据字典
+                      （键见 NON_CAMERA_ORIGINAL_EXIF_KEYS）
+
+    返回:
+    bool: True=非相机原图（按网图处理）；False=相机原图或无法判定
+
+    Whether the EXIF metadata proves the file is NOT a camera original
+    (camera model, capture time and GPS all empty — the signature of
+    transferred net images masquerading as camera files, e.g. the
+    IMG_8475.JPG Coal Tit). Any field present → camera original (WeChat
+    "original image" forwards keep EXIF and pass, per the 2026-10-20
+    rule). None/empty input → conservatively False (never reject on
+    unverifiable metadata).
+    """
+    if not exif_data:
+        return False
+    return all(exif_data.get(key) is None
+               for key in NON_CAMERA_ORIGINAL_EXIF_KEYS)

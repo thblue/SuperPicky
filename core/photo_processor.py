@@ -43,7 +43,7 @@ from core.flight_detector import FlightDetector, get_flight_detector, FlightResu
 from core.exposure_detector import ExposureDetector, get_exposure_detector, ExposureResult
 from core.focus_point_detector import get_focus_detector, verify_focus_in_bbox, arbitrate_focus_weights
 
-from constants import RATING_FOLDER_NAMES, RAW_EXTENSIONS, JPG_EXTENSIONS, HEIF_EXTENSIONS, get_rating_folder_names, VIDEO_COVER_SUFFIX, is_transfer_or_net_image
+from constants import RATING_FOLDER_NAMES, RAW_EXTENSIONS, JPG_EXTENSIONS, HEIF_EXTENSIONS, get_rating_folder_names, VIDEO_COVER_SUFFIX, is_transfer_or_net_image, is_non_camera_original_exif
 
 # 国际化
 from tools.i18n import get_i18n
@@ -2485,6 +2485,49 @@ class PhotoProcessor:
                             pass
                         add_photo_stage('yolo_refine', (time.time() - refine_start) * 1000)
             
+                # 2026-10-21 网图元数据门槛：EXIF 相机型号/拍摄时间/GPS 三全空
+                # ＝无法证实为相机原图（QQ/网页等转存下载图常伪装相机命名，
+                # 如 IMG_8475.JPG 煤山雀高清网图）。整体按无鸟处理：不评分、
+                # 不识鸟、不入鸟统计。在此处（复选块之后、拒绝判定之前）覆盖，
+                # 使后续所有 detected 消费点（拒绝路径/识鸟门控/仅框落库/
+                # 题注）统一走无鸟分支。DB 行已被检测阶段写入 has_bird=1，
+                # 需就地纠正为 0；检测置信保留作回捞证据。V-cover 由视频阶段
+                # 管理不经本循环；相机 RAW/JPG/HEIC 必有相机 EXIF，不受影响；
+                # EXIF 预取被环境变量禁用时跳过判定（保守放行）。
+                # 2026-10-21 net-image metadata gate: camera model, capture
+                # time and GPS all empty in EXIF means the file cannot be
+                # proven a camera original (transferred net images often
+                # masquerade as camera names, e.g. the IMG_8475.JPG Coal Tit).
+                # Treat it as birdless end to end: no rating, no
+                # identification, no bird stats. Overriding here (after the
+                # refine block, before the reject decision) routes every
+                # downstream detected-consumer (reject path / identify gate /
+                # boxes-only fallback / captions) through the no-bird branch
+                # uniformly. The detection stage already inserted the DB row
+                # with has_bird=1, so correct it in place; keep the YOLO
+                # confidence as rescue evidence. V-covers are managed by the
+                # video stage and never pass through this loop; camera
+                # RAW/JPG/HEIC always carry camera EXIF and are unaffected;
+                # when EXIF prefetch is disabled via env, the check is
+                # skipped (conservative pass-through).
+                if detected and is_non_camera_original_exif(prefetched_exif):
+                    detected = False
+                    all_birds = []
+                    bird_count = 0
+                    rescued = False
+                    if self.report_db:
+                        try:
+                            self.report_db.update_photo(original_prefix, {
+                                'has_bird': 0,
+                            })
+                        except Exception as _net_e:
+                            self._log(
+                                f"  ⚠️ 网图门槛 DB 纠正失败 [{original_prefix}]: {_net_e}",
+                                "warning")
+                    self._log(
+                        f"  🚫 非相机原图（EXIF 三空，按网图跳过）: {os.path.basename(filepath)}",
+                        "warning")
+
                 # V4.1/V4.2: 无鸟或低置信度先标记为拒绝；是否早期退出由详情元数据设置决定。
                 # V4.1/V4.2: Mark no-bird/low-confidence photos as rejected first;
                 # detail-metadata settings decide whether the processor can exit early.

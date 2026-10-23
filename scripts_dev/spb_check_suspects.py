@@ -281,52 +281,99 @@ def find_suspects(photo_dir: str, max_species_photos: int,
     return geo_suspects, rare_suspects
 
 
+def _load_bgr(path: str):
+    """读图：RAW 走 raw_to_jpeg 预览解码，HEIC 走 pillow-heif，其余 cv2 直读。"""
+    import numpy as np
+    ext = os.path.splitext(path)[1].lower()
+    if ext in ('.cr3', '.cr2', '.nef', '.arw', '.orf', '.raf', '.dng'):
+        from tools.find_bird_util import raw_to_jpeg
+        prev = raw_to_jpeg(path, auto_brighten=False)
+        data = np.fromfile(prev, dtype=np.uint8)
+    elif ext in ('.heic', '.heif'):
+        import pillow_heif
+        from PIL import Image
+        heif = pillow_heif.read_heif(path)
+        pil = Image.frombytes(heif.mode, heif.size, heif.data,
+                              'raw').convert('RGB')
+        import cv2
+        return cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+    else:
+        data = np.fromfile(path, dtype=np.uint8)
+    import cv2
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
 def generate_crops(suspects: List[Dict], photo_dir: str, out_dir: str,
                    python_exe: str) -> List[str]:
     """
-    用 spb_review.py 给命中行生成带框复核图（bbox 双坐标系由其处理）。
+    给命中行生成**主鸟 bbox 高清特写**复核图（2026-10-21 用户定则：目视
+    复核必须框出鸟来看，整帧里鸟的像素太少）。bbox 取自主鸟检测行，双
+    坐标系按「框+pad 超原图 1.05 倍即按 1024 处理图坐标换算」判据处理；
+    RAW/HEIC 用管线同款解码。
 
     参数:
     suspects (List[Dict]): 命中行
     photo_dir (str): 照片库目录
     out_dir (str): 复核图输出目录
-    python_exe (str): 当前解释器路径（子进程用同环境）
+    python_exe (str): 未使用（兼容旧签名）
 
     返回:
     List[str]: 成功生成的复核图路径
 
-    Generate annotated review images for suspects via spb_review.py.
+    Generate main-bird bbox close-up review images (high-res, decoded via
+    the pipeline's own RAW/HEIC paths) for each suspect row.
     """
-    # 定位待检文件本体（current_path / original_path 皆可）
-    paths: List[str] = []
-    for r in suspects:
-        for key in ('current_path', 'original_path'):
-            rel = r.get(key)
-            if not rel:
-                continue
-            p = os.path.normpath(os.path.join(photo_dir, rel))
-            if os.path.exists(p):
-                paths.append(p)
-                break
-    if not paths:
-        return []
+    import sqlite3
+
+    import cv2
     os.makedirs(out_dir, exist_ok=True)
-    review_script = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), 'spb_review.py')
-    try:
-        proc = subprocess.run(
-            [python_exe, review_script, *paths, '--out', out_dir],
-            capture_output=True, text=True, timeout=600)
-        if proc.returncode != 0:
-            print(f"    ⚠️ spb_review 退出码 {proc.returncode}: "
-                  f"{(proc.stderr or '').strip()[-300:]}")
-    except subprocess.TimeoutExpired:
-        print("    ⚠️ spb_review 超时（600s），本库裁剪中止")
-        return []
-    crops = []
-    for name in os.listdir(out_dir):
-        if name.endswith('_review.jpg'):
-            crops.append(os.path.join(out_dir, name))
+    db = os.path.join(photo_dir, '.superpicky', 'report.db')
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    crops: List[str] = []
+    for r in suspects:
+        prefix = r.get('file') or r.get('filename') or ''
+        row = cur.execute("SELECT current_path, original_path FROM photos "
+                          "WHERE filename=?", (prefix,)).fetchone()
+        det = cur.execute(
+            """SELECT bbox_x, bbox_y, bbox_w, bbox_h FROM bird_detections
+               WHERE filename=? AND deleted=0
+               ORDER BY (is_selected=1) DESC LIMIT 1""", (prefix,)).fetchone()
+        if not row or not det:
+            continue
+        src = None
+        for rel in row:
+            if rel:
+                p = os.path.normpath(os.path.join(photo_dir, rel))
+                if os.path.exists(p):
+                    src = p
+                    break
+        if not src:
+            continue
+        img = _load_bgr(src)
+        if img is None:
+            print(f"    ⚠️ 解码失败 {prefix} {src}")
+            continue
+        h, w = img.shape[:2]
+        x, y, bw, bh = [float(v) for v in det]
+        if x + bw > w * 1.05 or y + bh > h * 1.05:
+            scale = max(w, h) / 1024.0
+            x, y, bw, bh = x * scale, y * scale, bw * scale, bh * scale
+        pad = 0.6 * max(bw, bh)
+        x0, y0 = max(0, int(x - pad)), max(0, int(y - pad))
+        x1, y1 = min(w, int(x + bw + pad)), min(h, int(y + bh + pad))
+        crop = img[y0:y1, x0:x1]
+        ch, cw = crop.shape[:2]
+        target = 1400
+        if max(ch, cw) > target:
+            s = target / max(ch, cw)
+            crop = cv2.resize(crop, (int(cw * s), int(ch * s)))
+        out_path = os.path.join(out_dir, f"{prefix}_review.jpg")
+        okk, buf = cv2.imencode('.jpg', crop,
+                                [cv2.IMWRITE_JPEG_QUALITY, 90])
+        buf.tofile(out_path)
+        crops.append(out_path)
+    conn.close()
     return sorted(crops)
 
 
